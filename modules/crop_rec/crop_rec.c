@@ -124,7 +124,7 @@ static int crop_preset_fps = 0;
 CONFIG_INT("crop.button_SET",       SET_button, 1);
 static CONFIG_INT("crop.button_H-Shutter", Half_Shutter, 2);
 CONFIG_INT("crop.button_INFO",      INFO_button, 0);
-CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10 */
+CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10, 3=AF assist */
 CONFIG_INT("crop.arrows_U_D",       Arrows_U_D, 3); /* ISO */
 CONFIG_INT("crop.more_hacks",       more_hacks, 1);
 static CONFIG_INT("crop.arrows_L_R",       Arrows_L_R, 2); /* Aperture */
@@ -337,6 +337,7 @@ static void set_zoom(int zoom)
 static void eosm_lv_guard_request(void);
 #endif
 int crop_rec_lv_transition_diag(char *buffer, int size);
+int crop_rec_lv_transition_busy(void);
 
 /* faster version than the one from ML core */
 static void set_lv_af_mode(int lv_af_mode)
@@ -411,7 +412,141 @@ static void slim_zoom_from_x10(void)
     redraw();
 }
 
-/* Settings → Shutter zoom: half-shutter x10 like SET (hold or sticky). */
+/* EOS M slim: one-shot AF assist (Settings → Shutter zoom → AF).
+ *
+ * Crop presets live in the patched x5 path, where Canon's AF data is not
+ * trustworthy.  x10 is left unpatched, so AF is accurate there.  On a
+ * half-shutter press this sequence goes to x10, asks Canon for one AF run
+ * through the remote half-shutter line (so a short tap is enough), waits for
+ * it to finish and returns to x5 through the normal transition controller.
+ * Holding half-shutter keeps x10 on screen to check the result.
+ *
+ * The key handler only raises a request; all waiting happens here, from
+ * CBR_SHOOT_TASK, one non-blocking step per poll. */
+#define SLIM_AF_SETTLE_MS   250   /* let Canon finish the x10 switch first */
+#define SLIM_AF_BLIND_MS   1500   /* AF time when Canon reports no status */
+#define SLIM_AF_MAX_MS     4000   /* hard limit for one reported AF run */
+#define SLIM_AF_RELEASE_MS  150   /* pause around releasing the remote line */
+
+enum slim_af_state
+{
+    SLIM_AF_IDLE = 0,
+    SLIM_AF_SETTLE,
+    SLIM_AF_WAIT_START,
+    SLIM_AF_RUNNING,
+    SLIM_AF_RELEASE,
+    SLIM_AF_HOLD,
+};
+
+static volatile int slim_af_request = 0;
+static int slim_af_state = SLIM_AF_IDLE;
+static int slim_af_since = 0;
+static int slim_af_sw1_held = 0;
+
+/* Only ever release a remote half-press that this sequence made itself. */
+static void slim_af_sw1(int on)
+{
+    if (slim_af_sw1_held == on) return;
+    slim_af_sw1_held = on;
+    SW1(on, 0);
+}
+
+static int slim_af_can_start(void)
+{
+    return is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU &&
+           !RECORDING && !gui_menu_shown() && lv_disp_mode == 0 &&
+           !is_manual_focus() && lv_dispsize == 5 &&
+           !crop_rec_lv_transition_busy();
+}
+
+static void slim_af_finish(void)
+{
+    slim_af_sw1(0);
+    slim_af_state = SLIM_AF_IDLE;
+    slim_af_request = 0;
+    /* No-op unless we are still idle in x10; leaving x10 restarts the guard. */
+    slim_zoom_from_x10();
+}
+
+/* Returns 1 while the sequence owns Live View. */
+static int slim_af_step(void)
+{
+    int now = get_ms_clock();
+
+    if (slim_af_state == SLIM_AF_IDLE)
+    {
+        if (!slim_af_request) return 0;
+        slim_af_request = 0;
+        if (!slim_af_can_start()) return 0;
+
+        slim_zoom_to_x10();
+        if (lv_dispsize != 10) return 0;
+
+        slim_af_state = SLIM_AF_SETTLE;
+        slim_af_since = now;
+        return 1;
+    }
+
+    /* Recording, a menu, SET or a lens switch took x10 away: stop cleanly. */
+    if (!lv || RECORDING || gui_menu_shown() || lv_dispsize != 10 || is_manual_focus())
+    {
+        slim_af_finish();
+        return 0;
+    }
+
+    switch (slim_af_state)
+    {
+        case SLIM_AF_SETTLE:
+            if (now - slim_af_since < SLIM_AF_SETTLE_MS)
+                return 1;
+            slim_af_sw1(1);
+            slim_af_state = SLIM_AF_WAIT_START;
+            slim_af_since = now;
+            return 1;
+
+        case SLIM_AF_WAIT_START:
+            /* PROP_LV_FOCUS_STATUS: 3 = focusing.  It is not confirmed on
+             * EOS M, so fall back to a fixed AF time if it never shows up. */
+            if (lv_focus_status == 3)
+                slim_af_state = SLIM_AF_RUNNING;
+            else if (now - slim_af_since >= SLIM_AF_BLIND_MS)
+            {
+                slim_af_state = SLIM_AF_RELEASE;
+                slim_af_since = now;
+            }
+            return 1;
+
+        case SLIM_AF_RUNNING:
+            if (lv_focus_status != 3 || now - slim_af_since >= SLIM_AF_MAX_MS)
+            {
+                slim_af_state = SLIM_AF_RELEASE;
+                slim_af_since = now;
+            }
+            return 1;
+
+        case SLIM_AF_RELEASE:
+            if (now - slim_af_since < SLIM_AF_RELEASE_MS)
+                return 1;
+            slim_af_sw1(0);
+            slim_af_state = SLIM_AF_HOLD;
+            slim_af_since = now;
+            return 1;
+
+        case SLIM_AF_HOLD:
+            if (now - slim_af_since < SLIM_AF_RELEASE_MS)
+                return 1;
+            /* The remote line is released; what is left is the user's finger. */
+            if (get_halfshutter_pressed())
+                return 1;
+            slim_af_finish();
+            return 0;
+    }
+
+    slim_af_finish();
+    return 0;
+}
+
+/* Settings → Shutter zoom: half-shutter x10 like SET (hold or sticky), or AF assist. */
 static int slim_handle_shutter_zoom(unsigned int key)
 {
     if (!Shutter_zoom || !is_EOSM) return 0;
@@ -419,8 +554,27 @@ static int slim_handle_shutter_zoom(unsigned int key)
     if (lv_disp_mode != 0) return 0;
 
     int base = slim_lv_base_zoom();
+    int mode = Shutter_zoom;
 
-    if (Shutter_zoom == 1)
+    if (mode == 3)
+    {
+        if (is_manual_focus())
+        {
+            /* Nothing to autofocus: behave like ON (hold to zoom). */
+            mode = 1;
+        }
+        else
+        {
+            /* Never swallow the key here: Canon must still see the half-press. */
+            if (key == MODULE_KEY_PRESS_HALFSHUTTER && is_movie_mode() &&
+                CROP_PRESET_MENU && lv_dispsize == base &&
+                slim_af_state == SLIM_AF_IDLE)
+                slim_af_request = 1;
+            return 0;
+        }
+    }
+
+    if (mode == 1)
     {
         if (key == MODULE_KEY_PRESS_HALFSHUTTER && lv_dispsize == base)
         {
@@ -433,7 +587,7 @@ static int slim_handle_shutter_zoom(unsigned int key)
             return 1;
         }
     }
-    else if (Shutter_zoom == 2)
+    else if (mode == 2)
     {
         if (key == MODULE_KEY_PRESS_HALFSHUTTER)
         {
@@ -5712,12 +5866,13 @@ static struct menu_entry slim_info_button_menu[] = {
     {
         .name      = "Shutter zoom",
         .priv      = &Shutter_zoom,
-        .max       = 2,
-        .choices   = CHOICES("OFF", "ON", "Sticky"),
+        .max       = 3,
+        .choices   = CHOICES("OFF", "ON", "Sticky", "AF"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "Half-shutter x10 zoom (same as SET). ON: hold to zoom; Sticky: tap to toggle.",
-        .help2     = "Only in movie LV with ML overlays. Not active while recording.",
+        .help2     = "AF: zoom to x10, autofocus once, return (AF lens; acts like ON with manual lens).\n"
+                     "Only in movie LV with ML overlays. Not active while recording.",
     },
 };
 
@@ -7809,7 +7964,13 @@ static unsigned int crop_rec_polling_cbr(unsigned int unused)
         lv_dirty = 1;
     }
 #endif
-    
+
+    /* One-shot AF assist owns x10 until it is done.  Run it before the early
+     * exits below, so recording or a menu can never strand its remote
+     * half-shutter press. */
+    if (slim_af_step())
+        return CBR_RET_CONTINUE;
+
     if (!lv || menu_shown || RECORDING_RAW || mlv_busy)
     {
         /* outside LV: no need to do anything */
