@@ -5886,6 +5886,311 @@ static int slim_bit_depth_ui = 1;   /* 0=10 1=12 2=14 → bit_depth_analog 3/1/0
 static int slim_touch_crop_ready_at = 0;
 #define SLIM_TOUCH_CROP_SETTLE_MS 900
 
+/* EOS M slim: TEMPORARY AF diagnostics (Settings → AF diag log / AF lens test).
+ *
+ * Goal of one test session: learn which AF-related Canon properties the EOS M
+ * emits (and when), and whether ML can drive the lens focus motor while RAW
+ * video is recording.  Both switches are plain statics, so they are OFF after
+ * every restart, and with both OFF nothing here does any work.
+ *
+ * Events go into a RAM ring buffer (property handlers must stay tiny and must
+ * not touch the card).  The ring is appended to ML/LOGS/AFDIAG.LOG from
+ * CBR_SHOOT_TASK only, never while recording or while mlv_lite is busy.
+ * The ring has no lock: a rare torn entry from two tasks writing at once is
+ * acceptable for a diagnostic. */
+#define AFDIAG_LOG_FILE      "ML/LOGS/AFDIAG.LOG"
+#define AFDIAG_LOG_DIR       "ML/LOGS"
+#define AFDIAG_RING          512
+#define AFDIAG_MAX_FILE      (256 * 1024)
+#define AFDIAG_FLUSH_MS      2000
+#define AFDIAG_DATA_MIN_MS   100   /* PROP_LV_FOCUS_DATA: normal spacing */
+#define AFDIAG_DATA_FAST_MS  20    /* ... when a value jumped by a lot */
+#define AFDIAG_DATA_JUMP     256
+#define AFDIAG_LENS_PERIOD   2000
+
+static int afdiag_log = 0;        /* not CONFIG_INT: OFF after restart */
+static int afdiag_lens_test = 0;  /* not CONFIG_INT: OFF after restart */
+
+/* internal event codes (property ids are all >= 0x80000000) */
+enum
+{
+    AFD_EV_AFSTATE = 1,  /* w0 = old slim_af_state, w1 = new */
+    AFD_EV_FOCUS,        /* w0/w1 = focus_pos old/new, w2/w3 = focus_dist old/new */
+    AFD_EV_REC,          /* w0 = RECORDING, w1 = RECORDING_RAW */
+    AFD_EV_LENS_STEP,    /* w0 = dir, w1 = lens_focus ret, w2 = pos before, w3 = elapsed ms */
+    AFD_EV_LENS_SKIP,    /* w0 = reason: 1 manual focus, 2 continuous AF, 3 slim AF busy, 4 not LV movie */
+};
+
+struct afdiag_entry
+{
+    int      ms;
+    uint32_t code;
+    int      len;
+    uint32_t w[4];
+    int16_t  zoom;
+    int8_t   rraw;
+    int8_t   hs;
+    int      af;
+    int      pos;
+    int      dist;
+};
+
+static struct afdiag_entry afdiag_ring[AFDIAG_RING];
+static volatile unsigned afdiag_head = 0;   /* total entries ever recorded */
+static unsigned afdiag_tail = 0;            /* total entries already flushed */
+static char afdiag_header[320];
+static volatile int afdiag_header_pending = 0;
+
+static void afdiag_record(uint32_t code, int len, uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    if (!afdiag_log) return;
+    struct afdiag_entry *e = &afdiag_ring[afdiag_head % AFDIAG_RING];
+    e->ms = get_ms_clock();
+    e->code = code;
+    e->len = len;
+    e->w[0] = a; e->w[1] = b; e->w[2] = c; e->w[3] = d;
+    e->zoom = lv_dispsize;
+    e->rraw = RECORDING_RAW ? 1 : 0;
+    e->hs = get_halfshutter_pressed() ? 1 : 0;
+    e->af = slim_af_state;
+    e->pos = lens_info.focus_pos;
+    e->dist = lens_info.focus_dist;
+    afdiag_head++;
+}
+
+static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
+{
+    if (!afdiag_log) return;
+    uint32_t w[4] = {0, 0, 0, 0};
+    unsigned n = buf ? MIN(len / 4, 4) : 0;
+    for (unsigned i = 0; i < n; i++) w[i] = buf[i];
+
+    if (property == PROP_LV_FOCUS_DATA)
+    {
+        static int last_ms = 0;
+        static uint32_t last_w[4];
+        int now = get_ms_clock();
+        int jump = 0;
+        for (unsigned i = 0; i < 4; i++)
+            if (ABS((int)w[i] - (int)last_w[i]) > AFDIAG_DATA_JUMP) jump = 1;
+        if (now - last_ms < (jump ? AFDIAG_DATA_FAST_MS : AFDIAG_DATA_MIN_MS))
+            return;
+        last_ms = now;
+        for (unsigned i = 0; i < 4; i++) last_w[i] = w[i];
+    }
+    afdiag_record(property, len, w[0], w[1], w[2], w[3]);
+}
+
+PROP_HANDLER(PROP_LV_FOCUS_DONE)       { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_AF_RESULT)        { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_FOCUS_STATE)      { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_FOCUS_STATUS)     { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_FOCUS_DATA)       { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_FOCUS_CMD)        { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LVCAF_STATE)         { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LVAF_001D)           { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_LENS_DRIVE_REMOTE){ afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_HALF_SHUTTER)        { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_MOVIE_SERVO_AF)      { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LIVE_VIEW_AF_SYSTEM) { afdiag_prop(property, buf, len); }
+
+static const char *afdiag_prop_name(uint32_t code)
+{
+    switch (code)
+    {
+        case PROP_LV_FOCUS_DONE:        return "LV_FOCUS_DONE";
+        case PROP_LV_AF_RESULT:         return "LV_AF_RESULT";
+        case PROP_LV_FOCUS_STATE:       return "LV_FOCUS_STATE";
+        case PROP_LV_FOCUS_STATUS:      return "LV_FOCUS_STATUS";
+        case PROP_LV_FOCUS_DATA:        return "LV_FOCUS_DATA";
+        case PROP_LV_FOCUS_CMD:         return "LV_FOCUS_CMD";
+        case PROP_LVCAF_STATE:          return "LVCAF_STATE";
+        case PROP_LVAF_001D:            return "LVAF_001D";
+        case PROP_LV_LENS_DRIVE_REMOTE: return "LV_LENS_DRIVE_REMOTE";
+        case PROP_HALF_SHUTTER:         return "HALF_SHUTTER";
+        case PROP_MOVIE_SERVO_AF:       return "MOVIE_SERVO_AF";
+        case PROP_LIVE_VIEW_AF_SYSTEM:  return "LIVE_VIEW_AF_SYSTEM";
+        case AFD_EV_AFSTATE:            return "@AF_STATE";
+        case AFD_EV_FOCUS:              return "@FOCUS_CHG";
+        case AFD_EV_REC:                return "@REC";
+        case AFD_EV_LENS_STEP:          return "@LENS_STEP";
+        case AFD_EV_LENS_SKIP:          return "@LENS_SKIP";
+    }
+    return "?";
+}
+
+static void afdiag_make_header(void)
+{
+    snprintf(afdiag_header, sizeof(afdiag_header),
+        "# AFDIAG ON t=%d lens=\"%s\" lv_af_mode=%d cont_af_movie=%d manual_focus=%d "
+        "crop_preset=%d slim_mode=%d small_hacks=%d zoom=x%d\n",
+        get_ms_clock(), lens_info.name, lv_af_mode, continuous_af_movie,
+        is_manual_focus() ? 1 : 0, crop_preset_index, slim_mode_ui,
+        get_config_var("raw.small.hacks"), lv_dispsize);
+    afdiag_header_pending = 1;
+}
+
+/* Poll samples (called from the top of crop_rec_polling_cbr). */
+static void afdiag_sample(void)
+{
+    static int last_log = 0;
+    static int last_af = SLIM_AF_IDLE;
+    static int last_pos = INT_MIN, last_dist = INT_MIN;
+    static int last_rec = 0, last_rraw = 0;
+
+    int rec = RECORDING ? 1 : 0;
+    int rraw = RECORDING_RAW ? 1 : 0;
+
+    if (afdiag_log && !last_log)
+    {
+        afdiag_make_header();
+        /* start from the present state, so only changes get logged */
+        last_af = slim_af_state;
+        last_pos = lens_info.focus_pos;
+        last_dist = lens_info.focus_dist;
+        last_rec = rec;
+        last_rraw = rraw;
+    }
+    last_log = afdiag_log;
+    if (!afdiag_log) return;
+
+    if (slim_af_state != last_af)
+    {
+        afdiag_record(AFD_EV_AFSTATE, 8, last_af, slim_af_state, 0, 0);
+        last_af = slim_af_state;
+    }
+    if (lens_info.focus_pos != last_pos || (int)lens_info.focus_dist != last_dist)
+    {
+        afdiag_record(AFD_EV_FOCUS, 16, last_pos, lens_info.focus_pos, last_dist, lens_info.focus_dist);
+        last_pos = lens_info.focus_pos;
+        last_dist = lens_info.focus_dist;
+    }
+    if (rec != last_rec || rraw != last_rraw)
+    {
+        afdiag_record(AFD_EV_REC, 8, rec, rraw, 0, 0);
+        last_rec = rec;
+        last_rraw = rraw;
+    }
+}
+
+/* Append pending entries to the log.  Only when the card is free. */
+static void afdiag_flush(void)
+{
+    static int last_flush = 0;
+    static char buf[2048];
+    int now = get_ms_clock();
+
+    unsigned head = afdiag_head;
+    if (head == afdiag_tail && !afdiag_header_pending) return;
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) return;
+    if (now - last_flush < AFDIAG_FLUSH_MS) return;
+    last_flush = now;
+
+    if (!is_dir(AFDIAG_LOG_DIR))
+        FIO_CreateDirectory(AFDIAG_LOG_DIR);
+
+    uint32_t size = 0;
+    FIO_GetFileSize(AFDIAG_LOG_FILE, &size);
+    FILE *f = (size > AFDIAG_MAX_FILE) ? FIO_CreateFile(AFDIAG_LOG_FILE)
+                                       : FIO_CreateFileOrAppend(AFDIAG_LOG_FILE);
+    if (!f) return;
+
+    int n = 0;
+    if (afdiag_header_pending)
+    {
+        afdiag_header_pending = 0;
+        n += snprintf(buf, sizeof(buf), "%s", afdiag_header);
+    }
+    if (head - afdiag_tail > AFDIAG_RING)
+    {
+        unsigned lost = head - afdiag_tail - AFDIAG_RING;
+        afdiag_tail += lost;
+        n += snprintf(buf + n, sizeof(buf) - n, "# dropped %u entries (ring full)\n", lost);
+    }
+
+    while (afdiag_tail != head)
+    {
+        struct afdiag_entry e = afdiag_ring[afdiag_tail % AFDIAG_RING];
+        afdiag_tail++;
+        n += snprintf(buf + n, sizeof(buf) - n,
+            "%08d %-20s n=%d w=%08x,%08x,%08x,%08x z=%d rr=%d hs=%d af=%d pos=%d dist=%d\n",
+            e.ms, afdiag_prop_name(e.code), e.len, e.w[0], e.w[1], e.w[2], e.w[3],
+            e.zoom, e.rraw, e.hs, e.af, e.pos, e.dist);
+        if (n > (int)sizeof(buf) - 200)
+        {
+            FIO_WriteFile(f, buf, n);
+            n = 0;
+        }
+    }
+    if (n > 0)
+        FIO_WriteFile(f, buf, n);
+    FIO_CloseFile(f);
+}
+
+/* Lens test: step the focus motor +1/-1 every 2 s.  Never touches the card. */
+static void afdiag_lens_task(void *unused)
+{
+    int dir = 1;
+    int last_step = 0;
+    int last_skip = 0;
+
+    while (1)
+    {
+        msleep(100);
+        if (!afdiag_lens_test) { last_skip = 0; continue; }
+        if (!lv || !is_movie_mode()) continue;
+
+        int now = get_ms_clock();
+        if (now - last_step < AFDIAG_LENS_PERIOD) continue;
+
+        int skip = 0;
+        if (is_manual_focus()) skip = 1;
+        else if (is_continuous_af()) skip = 2;
+        else if (slim_af_state != SLIM_AF_IDLE) skip = 3;
+
+        if (skip)
+        {
+            /* log a refusal once per reason, not every 2 s */
+            if (skip != last_skip)
+                afdiag_record(AFD_EV_LENS_SKIP, 4, skip, 0, 0, 0);
+            last_skip = skip;
+            last_step = now;
+            continue;
+        }
+        last_skip = 0;
+
+        int before = lens_info.focus_pos;
+        int ret = lens_focus(dir, 1, 1, 0);
+        int elapsed = get_ms_clock() - now;
+        afdiag_record(AFD_EV_LENS_STEP, 16, dir, ret, before, elapsed);
+        dir = -dir;
+        last_step = get_ms_clock();
+    }
+}
+
+static struct menu_entry afdiag_menu[] = {
+    {
+        .name      = "AF diag log",
+        .priv      = &afdiag_log,
+        .max       = 1,
+        .choices   = CHOICES("OFF", "ON"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_DICE,
+        .help      = "TEMPORARY diagnostics: log AF properties to ML/LOGS/AFDIAG.LOG.",
+        .help2     = "Always OFF after restart. Written to the card only when not recording.",
+    },
+    {
+        .name      = "AF lens test",
+        .priv      = &afdiag_lens_test,
+        .max       = 1,
+        .choices   = CHOICES("OFF", "ON"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_DICE,
+        .help      = "TEMPORARY diagnostics: nudge the focus motor +1/-1 every 2 s in movie LV.",
+        .help2     = "Works while recording too; pair with AF diag log. OFF after restart.",
+    },
+};
+
 /* 1x1 Aspect Ratio UI: 0=2.33:1, 1=2.35:1, 2=16:9, 3=3:2, 4=4:3 */
 static int slim_1x1_ar = 2; /* default 16:9 */
 static const char * const slim_1x1_ar_labels[5] = {
@@ -7965,10 +8270,19 @@ static unsigned int crop_rec_polling_cbr(unsigned int unused)
     }
 #endif
 
+    if (is_EOSM)
+    {
+        afdiag_sample();
+        afdiag_flush();
+    }
+
     /* One-shot AF assist owns x10 until it is done.  Run it before the early
      * exits below, so recording or a menu can never strand its remote
      * half-shutter press. */
-    if (slim_af_step())
+    int slim_af_busy = slim_af_step();
+    if (is_EOSM)
+        afdiag_sample(); /* catch a transition made by this step */
+    if (slim_af_busy)
         return CBR_RET_CONTINUE;
 
     if (!lv || menu_shown || RECORDING_RAW || mlv_busy)
@@ -9229,6 +9543,10 @@ static unsigned int crop_rec_init()
         menu_add("Expo", expo_shutter_range_eosm, COUNT(expo_shutter_range_eosm));
         menu_add("Settings", slim_info_button_menu, COUNT(slim_info_button_menu));
         anamorphic_preview_add_slim_menu();
+        menu_add("Settings", afdiag_menu, COUNT(afdiag_menu));
+        menu_move_entry_after("Settings", "AF diag log", "Shutter zoom");
+        menu_move_entry_after("Settings", "AF lens test", "AF diag log");
+        task_create("afdiag_lens", 0x1e, 0x2000, afdiag_lens_task, (void*)0);
         menu_add("Settings", slim_more_hacks_menu, COUNT(slim_more_hacks_menu));
         lvinfo_add_items(info_items, COUNT(info_items));
         return 0;
@@ -9291,4 +9609,16 @@ MODULE_CBRS_END()
 MODULE_PROPHANDLERS_START()
     MODULE_PROPHANDLER(PROP_LV_ACTION)
     MODULE_PROPHANDLER(PROP_LV_DISPSIZE)
+    MODULE_PROPHANDLER(PROP_LV_FOCUS_DONE)
+    MODULE_PROPHANDLER(PROP_LV_AF_RESULT)
+    MODULE_PROPHANDLER(PROP_LV_FOCUS_STATE)
+    MODULE_PROPHANDLER(PROP_LV_FOCUS_STATUS)
+    MODULE_PROPHANDLER(PROP_LV_FOCUS_DATA)
+    MODULE_PROPHANDLER(PROP_LV_FOCUS_CMD)
+    MODULE_PROPHANDLER(PROP_LVCAF_STATE)
+    MODULE_PROPHANDLER(PROP_LVAF_001D)
+    MODULE_PROPHANDLER(PROP_LV_LENS_DRIVE_REMOTE)
+    MODULE_PROPHANDLER(PROP_HALF_SHUTTER)
+    MODULE_PROPHANDLER(PROP_MOVIE_SERVO_AF)
+    MODULE_PROPHANDLER(PROP_LIVE_VIEW_AF_SYSTEM)
 MODULE_PROPHANDLERS_END()
