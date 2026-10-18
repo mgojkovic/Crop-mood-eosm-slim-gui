@@ -5920,7 +5920,7 @@ static int slim_touch_crop_ready_at = 0;
 #define AFDIAG_LOG_FILE      "ML/LOGS/AFDIAG.LOG"
 #define AFDIAG_LOG_DIR       "ML/LOGS"
 #define AFDIAG_RING          1024
-#define AFDIAG_MAX_FILE      (256 * 1024)
+#define AFDIAG_MAX_FILE      (1024 * 1024)
 #define AFDIAG_FLUSH_MS      2000
 #define AFDIAG_DATA_MIN_MS   100   /* PROP_LV_FOCUS_DATA: normal spacing */
 #define AFDIAG_DATA_FAST_MS  20    /* ... when a value jumped by a lot */
@@ -6043,6 +6043,12 @@ static void afdiag_record(uint32_t code, int len, uint32_t a, uint32_t b, uint32
 static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
 {
     if (!afdiag_log) return;
+    /* The lens test sends hundreds of drive commands per cycle and logs a
+     * summary per burst; one line per command and acknowledgement flooded
+     * the ring and the file.  Keep them only while the test is off. */
+    if (afdiag_lens_test &&
+        (property == PROP_LV_LENS_DRIVE_REMOTE || property == PROP_LV_FOCUS_DONE))
+        return;
     uint32_t w[4] = {0, 0, 0, 0};
     unsigned n = buf ? MIN(len / 4, 4) : 0;
     for (unsigned i = 0; i < n; i++) w[i] = buf[i];
@@ -6196,10 +6202,17 @@ static void afdiag_flush(void)
     if (!is_dir(AFDIAG_LOG_DIR))
         FIO_CreateDirectory(AFDIAG_LOG_DIR);
 
+    /* Field test: a lens test session passed the cap within ~2 minutes and
+     * recreating the file wiped the whole session.  Keep the full file as
+     * AFDIAG.OLD (replacing an older one) and start a fresh log instead. */
     uint32_t size = 0;
     FIO_GetFileSize(AFDIAG_LOG_FILE, &size);
-    FILE *f = (size > AFDIAG_MAX_FILE) ? FIO_CreateFile(AFDIAG_LOG_FILE)
-                                       : FIO_CreateFileOrAppend(AFDIAG_LOG_FILE);
+    if (size > AFDIAG_MAX_FILE)
+    {
+        FIO_RemoveFile(AFDIAG_LOG_DIR "/AFDIAG.OLD");
+        FIO_RenameFile(AFDIAG_LOG_FILE, AFDIAG_LOG_DIR "/AFDIAG.OLD");
+    }
+    FILE *f = FIO_CreateFileOrAppend(AFDIAG_LOG_FILE);
     if (!f) return;
 
     int n = 0;
