@@ -125,6 +125,7 @@ CONFIG_INT("crop.button_SET",       SET_button, 1);
 static CONFIG_INT("crop.button_H-Shutter", Half_Shutter, 2);
 CONFIG_INT("crop.button_INFO",      INFO_button, 0);
 CONFIG_INT("crop.auto_refocus", Auto_refocus, 0); /* EOS M slim: 0=OFF, 1=ON, 2=ON + REC */
+CONFIG_INT("crop.auto_refocus_sens", Auto_refocus_sens, 1); /* EOS M slim: 0=Low, 1=Medium, 2=High */
 CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10, 3=AF assist */
 CONFIG_INT("crop.arrows_U_D",       Arrows_U_D, 3); /* ISO */
 CONFIG_INT("crop.more_hacks",       more_hacks, 1);
@@ -5948,6 +5949,17 @@ static struct menu_entry slim_info_button_menu[] = {
         .help2     = "AF lens only; off with Movie Servo AF. ON + REC: also while recording - during RAW\n"
                      "recording Canon AF needs Small Hacks OFF and may hunt.",
     },
+    {
+        .name      = "Refocus sensitivity",
+        .priv      = &Auto_refocus_sens,
+        .max       = 2,
+        .choices   = CHOICES("Low", "Medium", "High"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_DICE,
+        .help      = "How readily Auto refocus reacts to blur.",
+        .help2     = "Low: only clear blur, slower. Medium: default. High: smaller sharpness drops and shorter\n"
+                     "waits - may also refocus on pans or scene changes.",
+    },
 };
 
 /* Mode UI: 0=1x1, 1=1x3, 2=3x3, 3=LV (Full-Res LiveView). */
@@ -6053,11 +6065,12 @@ static volatile int afdiag_header_pending = 0;
  * luma over the centre 1/4 x 1/4, every 2nd row and 2nd pixel.  Read-only and
  * cheap (a few thousand samples).  Returns the edge sum; 0 and samples=0 if
  * the buffer is unavailable. */
-static uint32_t afdiag_sharpness(int *luma_mean, int *samples, int *emax)
+static uint32_t afdiag_sharpness_ex(int *luma_mean, int *samples, int *emax, uint32_t *gsum_out)
 {
-    uint32_t esum = 0, lsum = 0, emx = 0;
+    uint32_t esum = 0, lsum = 0, emx = 0, gsum = 0;
     int n = 0;
     *luma_mean = 0; *samples = 0; *emax = 0;
+    if (gsum_out) *gsum_out = 0;
 
     /* YUV422_LV_BUFFER_DISPLAY_ADDR is not visible to modules: use the core
      * accessor, which returns the same displayed LV buffer. */
@@ -6085,6 +6098,11 @@ static uint32_t afdiag_sharpness(int *luma_mean, int *samples, int *emax)
             esum += e;
             lsum += cv;
             if ((uint32_t)e > emx) emx = e;
+            /* first-derivative magnitude: scene-contrast normaliser for the
+             * Laplacian (blur lowers e much more than g) */
+            int gx = c[2] - c[-2]; if (gx < 0) gx = -gx;
+            int gy = c[pitch] - c[-pitch]; if (gy < 0) gy = -gy;
+            gsum += gx + gy;
             n++;
         }
     }
@@ -6093,8 +6111,14 @@ static uint32_t afdiag_sharpness(int *luma_mean, int *samples, int *emax)
         *luma_mean = lsum / n;
         *samples = n;
         *emax = emx;
+        if (gsum_out) *gsum_out = gsum;
     }
     return esum;
+}
+
+static uint32_t afdiag_sharpness(int *luma_mean, int *samples, int *emax)
+{
+    return afdiag_sharpness_ex(luma_mean, samples, emax, 0);
 }
 
 static void afdiag_record(uint32_t code, int len, uint32_t a, uint32_t b, uint32_t c, uint32_t d)
@@ -9170,21 +9194,42 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
  * same task: no locks, it can never overlap the AF state machine (it only
  * raises a request while slim_af_state is IDLE and no request is pending),
  * and one sample every AREF_PERIOD_MS costs a few thousand pixel reads.
- * Sharpness depends on scene and zoom, so S_ref is only compared at the
- * zoom it was taken at.  While recording, AF runs in place (request 2). */
+ * Sharpness depends on scene and zoom, so the remembered best sharpness (a
+ * 12..24 s decaying peak, not a post-AF snapshot) is only compared at the zoom
+ * it was seen at.  While recording, AF runs in place (request 2). */
 #define AREF_PERIOD_MS      200   /* sharpness sampling interval */
-#define AREF_SETTLE_MS      500   /* wait after AF / regained eligibility before taking S_ref */
-#define AREF_DROP_PCT       60    /* "blurry": current below this % of S_ref ... */
-#define AREF_DROP_MS        600   /* ... continuously for this long */
-#define AREF_DROP_REC_MS    350   /* ON + REC: blur is in the footage, react sooner */
+#define AREF_SETTLE_MS      500   /* wait after AF / regained eligibility before judging */
 #define AREF_STEADY_PCT     15    /* last 3 samples within this % of each other ... */
-#define AREF_STEADY_ABS_PCT 8     /* ... or within this % of S_ref (noise floor while blurry) */
-#define AREF_MIN_SHARP      40000 /* S_ref floor: ignore flat, textureless scenes */
+#define AREF_STEADY_ABS_PCT 8     /* ... or within this % of the peak (noise floor while blurry) */
+#define AREF_PEAK_HOLD_MS   12000 /* best-recent-sharpness memory: two buckets, so 12..24 s */
+#define AREF_PEAK_EMAX_MIN  70    /* the remembered peak must have had a real edge: flat or noise-only
+                                   * scenes peak at emax 20..30, textured in-focus at 130..370 (field logs) */
+#define AREF_ABS_G_MIN      2     /* absolute path: mean |gradient| per sample above the noise floor */
 #define AREF_COOLDOWN_MS    2000  /* after any AF */
 #define AREF_FAIL_BACKOFF_MS 4000 /* after a failed AF */
 #define AREF_MAX_FAILS      3     /* consecutive failures before pausing */
+#define AREF_PAUSE_MS       20000 /* a pause ends by itself after this: one more attempt */
 #define AREF_REC_START_MS   2000  /* ON + REC: wait this long after RAW recording starts */
 #define AREF_REC_RETRY_MS   1500  /* ON + REC: retry delay after the first failed AF (lens parks at an end stop) */
+
+/* Refocus sensitivity (Low / Medium / High), derived from the field logs
+ * (afdiag19/20, guardrun2):
+ *  - in-focus x5 sharpness is 60..200k, blurry plateaus 5..45k, i.e. real blur is
+ *    10..35% of the recent best, so Low (45%) still catches it;
+ *  - normal in-focus sag (exposure, subject moving, tilt) reaches ~65..75% of the
+ *    peak, so Medium (60%) stays below it and only High (70%) starts to fire on it;
+ *  - peak floor: noise-only plateaus sit at 10..14k, so 24..45k means "has texture";
+ *  - dwell: how long the drop must persist before we spend an AF run. */
+static const uint8_t  aref_drop_pct[3]  = { 45, 60, 70 };
+static const uint16_t aref_dwell_ms[3]  = { 1000, 700, 500 };
+static const uint16_t aref_dwell_rec[3] = { 600, 350, 250 };
+static const uint32_t aref_peak_min[3]  = { 45000, 30000, 24000 };
+/* Absolute "blurry" path (scene-normalised): Laplacian energy / gradient energy, in %.
+ * Used only when there is no usable remembered peak, once per blur episode.  Not
+ * calibrated against real frames yet (the logs hold no gradient): the thresholds are
+ * conservative and the value is logged (REFOCUS kind 10) so they can be tuned. 0 = off. */
+static const uint8_t  aref_abs_q[3]     = { 0, 15, 25 };
+#define AREF_ABS_Q_GOOD     40    /* q at/above this re-arms the absolute path */
 
 enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN };
 
@@ -9192,19 +9237,29 @@ static int aref_phase = AREF_MON;
 static int aref_is_idle(void) { return aref_phase == AREF_MON; }
 static int aref_prev_mode = 0;
 static int aref_eligible = 0;
-static uint32_t aref_ref = 0;        /* S_ref, 0 = not taken yet */
-static int aref_ref_zoom = 0;        /* lv_dispsize S_ref belongs to */
-static int aref_take_at = 0;         /* ms: earliest time to take S_ref */
+static uint32_t aref_ref = 0;        /* effective best recent sharpness (peak memory), 0 = none */
+static int aref_ref_em = 0;          /* emax at that peak */
+static int aref_ref_zoom = 0;        /* lv_dispsize the memory belongs to */
+static uint32_t aref_pk_v[2];        /* peak buckets: [0] current, [1] previous */
+static int aref_pk_em[2];
+static int aref_pk_t = 0;            /* ms: start of the current bucket, 0 = empty */
+static int aref_forget = 0;          /* clear the memory at the next (re)acquire */
+static int aref_post_check = 0;      /* judge the picture after our AF finished OK */
+static int aref_take_at = 0;         /* ms: settle end, no judging before */
 static int aref_next_at = 0;         /* ms: cooldown end */
 static int aref_last_t = 0;          /* ms: last sample */
 static uint32_t aref_hist[3];
 static int aref_hist_n = 0;
 static int aref_low_since = 0;       /* ms: sharpness has been low since, 0 = not low */
+static int aref_low_path = 0;        /* 1 = relative to peak, 2 = absolute */
+static int aref_abs_used = 0;        /* absolute path already spent in this blur episode */
 static int aref_fails = 0;
 static int aref_paused = 0;
-static uint32_t aref_pause_ref = 0;  /* S_ref at the failure that paused us */
+static int aref_pause_t = 0;
+static uint32_t aref_pause_ref = 0;  /* peak at the failure that paused us */
 static uint32_t aref_trig_ref = 0;
 static int aref_count0 = 0;          /* slim_af_result_count at the request */
+static int aref_dbg_t = 0;           /* ms: last periodic decision record */
 
 static void aref_log(int what, uint32_t cur)
 {
@@ -9228,18 +9283,55 @@ PROP_HANDLER(PROP_LV_AFFRAME)
     aref_log_affr();
 }
 
-static void aref_drop_ref(int now, int wait_ms)
+/* Wait wait_ms before judging again.  The peak memory survives unless forget:
+ * field logs showed that re-taking the reference from an already blurry picture
+ * (after a failed AF, menu close, recording start) disarmed the trigger for
+ * tens of seconds. */
+static void aref_drop_ref(int now, int wait_ms, int forget)
 {
-    aref_ref = 0;
+    if (forget) aref_forget = 1;
     aref_take_at = now + wait_ms;
     aref_low_since = 0;
     aref_hist_n = 0;
+}
+
+static void aref_peak_clear(void)
+{
+    aref_pk_v[0] = aref_pk_v[1] = 0;
+    aref_pk_em[0] = aref_pk_em[1] = 0;
+    aref_pk_t = 0;
+    aref_ref = 0;
+    aref_ref_em = 0;
+}
+
+/* Two-bucket decaying peak: the best sharpness seen in the last 12..24 s. */
+static void aref_peak_update(int now, uint32_t v, int em)
+{
+    if (aref_pk_t && now - aref_pk_t >= 2 * AREF_PEAK_HOLD_MS)
+        aref_peak_clear();
+    if (!aref_pk_t)
+        aref_pk_t = now ? now : 1;
+    else if (now - aref_pk_t >= AREF_PEAK_HOLD_MS)
+    {
+        aref_pk_v[1] = aref_pk_v[0];
+        aref_pk_em[1] = aref_pk_em[0];
+        aref_pk_v[0] = 0;
+        aref_pk_em[0] = 0;
+        aref_pk_t = now;
+    }
+    if (v >= aref_pk_v[0]) { aref_pk_v[0] = v; aref_pk_em[0] = em; }
+    int b = aref_pk_v[1] > aref_pk_v[0];
+    aref_ref = aref_pk_v[b];
+    aref_ref_em = aref_pk_em[b];
 }
 
 static void aref_step(void)
 {
     int now = get_ms_clock();
     int busy = slim_af_state != SLIM_AF_IDLE;
+    int sens = Auto_refocus_sens;
+    if (sens < 0) sens = 0;
+    if (sens > 2) sens = 2;
 
     /* Setting toggled: forget everything, including a pause. */
     if (Auto_refocus != aref_prev_mode)
@@ -9248,6 +9340,8 @@ static void aref_step(void)
         aref_fails = 0;
         aref_paused = 0;
         aref_eligible = 0;
+        aref_forget = 1;
+        aref_abs_used = 0;
     }
 
     /* Follow an AF run, ours or the user's (Shutter zoom AF). */
@@ -9259,43 +9353,47 @@ static void aref_step(void)
             aref_phase = AREF_OURS;
         else if (!slim_af_request)
         {
-            /* the state machine refused (menu, zoom, MF ...) */
+            /* request dropped without running (Canon state not ready) */
             aref_phase = AREF_MON;
             aref_next_at = now + AREF_COOLDOWN_MS;
             aref_log(4, 0);
         }
+        return;
     }
     else if ((aref_phase == AREF_OURS || aref_phase == AREF_FOREIGN) && !busy)
     {
-        /* No PROP_LV_AF_RESULT before the blind timeout counts as failure. */
         int failed = slim_af_result_count == aref_count0 || slim_af_last_result;
         if (aref_phase == AREF_FOREIGN)
         {
+            /* the user focused (or zoomed): a new picture, start over */
             aref_next_at = now + AREF_COOLDOWN_MS;
-            aref_drop_ref(now, AREF_SETTLE_MS);
+            aref_drop_ref(now, AREF_SETTLE_MS, 1);
+            aref_abs_used = 0;
         }
         else if (!failed)
         {
-            aref_fails = 0;
+            /* The failure counter is cleared only if the picture really
+             * recovered (judged after the settle): field logs had "AF ok"
+             * at the lens end stop with the picture still blurry. */
             aref_next_at = now + AREF_COOLDOWN_MS;
-            aref_drop_ref(now, AREF_SETTLE_MS);
+            aref_drop_ref(now, AREF_SETTLE_MS, 0);
+            aref_post_check = 1;
             aref_log(2, 0);
         }
         else
         {
-            /* S_ref = current: re-taken once the back-off is over. */
             aref_fails++;
             if (aref_fails >= AREF_MAX_FAILS && !aref_paused)
             {
                 aref_paused = 1;
+                aref_pause_t = now ? now : 1;
                 aref_pause_ref = aref_trig_ref;
                 aref_log(5, 0);
             }
             if (RECORDING && aref_fails == 1 && !aref_paused)
             {
-                /* Field logs: a failed AF parks the lens at an end stop, and
-                 * re-taking S_ref from that blur disarmed the trigger for
-                 * seconds.  Keep the good S_ref and retry once, quickly. */
+                /* Field logs: a failed AF parks the lens at an end stop.
+                 * Retry once, quickly. */
                 aref_next_at = now + AREF_REC_RETRY_MS;
                 aref_low_since = 0;
                 aref_hist_n = 0;
@@ -9303,7 +9401,7 @@ static void aref_step(void)
             else
             {
                 aref_next_at = now + AREF_FAIL_BACKOFF_MS;
-                aref_drop_ref(now, AREF_FAIL_BACKOFF_MS);
+                aref_drop_ref(now, AREF_SETTLE_MS, 0);
             }
             aref_log(3, 0);
         }
@@ -9322,24 +9420,34 @@ static void aref_step(void)
     int raw_transition = (mlv_raw_rec_busy() && !RECORDING_RAW) ||
                          (RECORDING_RAW && now - aref_rec_since < AREF_REC_START_MS);
 
-    int elig = Auto_refocus && is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU &&
-               !busy && !slim_af_request && !afdiag_lens_test &&
-               !is_manual_focus() && !is_continuous_af() &&
-               !gui_menu_shown() && lv_disp_mode == 0 &&
-               !crop_rec_lv_transition_busy() && !raw_transition &&
-               !get_halfshutter_pressed() &&
-               (RECORDING ? Auto_refocus == 2 : lv_dispsize == 5);
-    if (!elig)
+    /* Eligibility as a bit mask of what blocks us, so the log can say which gate. */
+    int blk = 0;
+    if (!(Auto_refocus && is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU)) blk |= 1;
+    if (busy || slim_af_request || afdiag_lens_test) blk |= 2;
+    if (is_manual_focus() || is_continuous_af()) blk |= 4;
+    if (gui_menu_shown() || lv_disp_mode != 0) blk |= 8;
+    if (crop_rec_lv_transition_busy() || raw_transition) blk |= 16;
+    if (get_halfshutter_pressed()) blk |= 32;
+    if (!(RECORDING ? Auto_refocus == 2 : lv_dispsize == 5)) blk |= 64;
+    if (blk)
     {
         aref_eligible = 0;
+        if (afdiag_log && Auto_refocus && now - aref_dbg_t >= 2000)
+        {
+            aref_dbg_t = now;
+            afdiag_record(AFD_EV_REFOCUS, 16, 11, blk, lv_dispsize, 0);
+        }
         return;
     }
     if (!aref_eligible || lv_dispsize != aref_ref_zoom)
     {
-        /* newly eligible or zoom changed: re-acquire from the live picture */
+        /* newly eligible or zoom changed: keep the peak memory over a short
+         * ineligible spell (menu, half-press, recording start), but not
+         * across a zoom change (sharpness is zoom dependent). */
+        if (lv_dispsize != aref_ref_zoom) aref_forget = 1;
         aref_eligible = 1;
         aref_ref_zoom = lv_dispsize;
-        aref_drop_ref(now, AREF_SETTLE_MS);
+        aref_drop_ref(now, AREF_SETTLE_MS, 0);
         aref_last_t = 0;
         return;
     }
@@ -9348,7 +9456,8 @@ static void aref_step(void)
     aref_last_t = now;
 
     int mean, n, emax;
-    uint32_t cur = afdiag_sharpness(&mean, &n, &emax);
+    uint32_t gsum;
+    uint32_t cur = afdiag_sharpness_ex(&mean, &n, &emax, &gsum);
     if (!n) return;
 
     if (aref_hist_n < 3) aref_hist_n++;
@@ -9356,57 +9465,153 @@ static void aref_step(void)
     aref_hist[1] = aref_hist[0];
     aref_hist[0] = cur;
 
+    /* scene-normalised focus measure: Laplacian / gradient energy, in %
+     * (cur <= ~5.2M, so cur * 100 fits in 32 bits) */
+    int q = gsum ? (int)((cur * 100) / gsum) : 0;
+    int gn = gsum / n;
+    if (gn > 255) gn = 255;
+    if (q > 255) q = 255;
+
+    if (now < aref_take_at) return;      /* settling: neither learn nor judge */
+    if (aref_forget)
+    {
+        aref_peak_clear();
+        aref_forget = 0;
+    }
+
+    /* Feed the peak with the median of the last 3 samples, so a one-sample
+     * spike (the x10 -> x5 return gave 445k once, auto-exposure steps gave
+     * 126k) cannot poison the memory. */
+    if (aref_hist_n >= 3)
+    {
+        uint32_t a = aref_hist[0], b = aref_hist[1], c = aref_hist[2];
+        uint32_t lo = a < b ? a : b;
+        uint32_t hi = a < b ? b : a;
+        uint32_t mid = c < hi ? c : hi;
+        uint32_t med = lo > mid ? lo : mid;
+        int first = !aref_ref;
+        aref_peak_update(now, med, emax);
+        if (first && aref_ref) aref_log(7, cur);
+    }
+    uint32_t peak = aref_ref;
+    uint32_t pmin = aref_peak_min[sens];
+    int pct = aref_drop_pct[sens];
+    int dwell = RECORDING ? aref_dwell_rec[sens] : aref_dwell_ms[sens];
+    int gate = 0;
+
+    /* Re-arm the absolute path once a sharp picture has been seen again. */
+    if (q >= AREF_ABS_Q_GOOD && cur >= pmin) aref_abs_used = 0;
+
+    if (aref_post_check)
+    {
+        aref_post_check = 0;
+        if (peak && peak >= pmin && cur * 100 < peak * pct)
+        {
+            /* AF said OK but the picture is still blurry: counts as a failure */
+            aref_fails++;
+            if (aref_fails >= AREF_MAX_FAILS && !aref_paused)
+            {
+                aref_paused = 1;
+                aref_pause_t = now ? now : 1;
+                aref_pause_ref = peak;
+                aref_log(5, cur);
+            }
+            aref_log(9, cur);
+        }
+        else
+            aref_fails = 0;
+    }
+
     if (aref_paused)
     {
-        /* resume once sharpness is back (manual focus, scene change ...) */
-        if (cur * 100 >= aref_pause_ref * AREF_DROP_PCT)
+        /* resume once sharpness is back (manual focus, scene change ...), or
+         * after a while for one more attempt */
+        if (cur * 100 >= aref_pause_ref * pct)
         {
             aref_paused = 0;
             aref_fails = 0;
-            aref_drop_ref(now, 0);
+            aref_drop_ref(now, 0, 0);
             aref_log(6, cur);
         }
-        return;
-    }
-
-    if (!aref_ref)
-    {
-        if (now >= aref_take_at)
+        else if (now - aref_pause_t >= AREF_PAUSE_MS)
         {
-            aref_ref = cur;
-            aref_log(7, cur);
+            aref_paused = 0;
+            aref_fails = AREF_MAX_FAILS - 1;
+            aref_abs_used = 0;
+            aref_drop_ref(now, 0, 0);
+            aref_log(6, cur);
         }
-        return;
+        else
+            gate = 6;
     }
-    if (cur > aref_ref) aref_ref = cur;
 
-    if (cur * 100 < aref_ref * AREF_DROP_PCT)
+    int path = 0;
+    if (!gate)
     {
-        if (!aref_low_since) aref_low_since = now;
+        if (peak >= pmin && aref_ref_em >= AREF_PEAK_EMAX_MIN)
+        {
+            if (cur * 100 < peak * pct) path = 1;
+            else gate = 1;
+        }
+        else
+            gate = 4;
+        /* no usable memory (lost it, or only ever saw blur): absolute check */
+        if (!path && gate == 4 && aref_abs_q[sens] && !aref_abs_used &&
+            q <= aref_abs_q[sens] && gn >= AREF_ABS_G_MIN)
+        {
+            path = 2;
+            gate = 0;
+        }
     }
-    else
+
+    if (!path)
         aref_low_since = 0;
-
-    if (!aref_low_since ||
-        now - aref_low_since < (RECORDING ? AREF_DROP_REC_MS : AREF_DROP_MS)) return;
-    if (now < aref_next_at || aref_ref < AREF_MIN_SHARP) return;
-    if (aref_hist_n < 3) return;
-
-    uint32_t hi = aref_hist[0], lo = aref_hist[0];
-    for (int i = 1; i < 3; i++)
+    else
     {
-        if (aref_hist[i] > hi) hi = aref_hist[i];
-        if (aref_hist[i] < lo) lo = aref_hist[i];
+        if (!aref_low_since || aref_low_path != path) aref_low_since = now;
+        aref_low_path = path;
     }
-    /* scene still moving?  Blurry samples are small, so their relative noise
-     * is large: also accept a spread below a fraction of S_ref. */
-    uint32_t tol = lo * AREF_STEADY_PCT;
-    if (aref_ref * AREF_STEADY_ABS_PCT > tol) tol = aref_ref * AREF_STEADY_ABS_PCT;
-    if ((hi - lo) * 100 > tol) return;
 
-    aref_trig_ref = aref_ref;
+    if (path)
+    {
+        int need = path == 2 ? 2 * dwell : dwell;   /* absolute path is the less certain one */
+        if (now - aref_low_since < need) gate = 2;
+        else if (now < aref_next_at) gate = 3;
+        else if (aref_hist_n < 3) gate = 8;
+        else
+        {
+            uint32_t hi = aref_hist[0], lo = aref_hist[0];
+            for (int i = 1; i < 3; i++)
+            {
+                if (aref_hist[i] > hi) hi = aref_hist[i];
+                if (aref_hist[i] < lo) lo = aref_hist[i];
+            }
+            /* scene still moving?  Blurry samples are small, so their relative
+             * noise is large: also accept a spread below a fraction of the peak. */
+            uint32_t tol = lo * AREF_STEADY_PCT;
+            uint32_t ref_for_tol = peak ? peak : cur;
+            if (ref_for_tol * AREF_STEADY_ABS_PCT > tol) tol = ref_for_tol * AREF_STEADY_ABS_PCT;
+            if ((hi - lo) * 100 > tol) gate = 5;
+        }
+    }
+
+    /* compact decision record, once a second, only with the diag log on:
+     * w0 = 10 | sens<<8 | gate<<16 | path<<24, w1 = current, w2 = peak,
+     * w3 = q% | gradient/sample<<8 | emax<<16 (gate: 0 fire, 1 not low, 2 dwell,
+     * 3 cooldown, 4 no usable peak, 5 unsteady, 6 paused, 8 history) */
+    if (afdiag_log && ((path && !gate) || now - aref_dbg_t >= 1000))
+    {
+        aref_dbg_t = now;
+        afdiag_record(AFD_EV_REFOCUS, 16, 10 | (sens << 8) | (gate << 16) | (path << 24), cur, peak,
+                      q | (gn << 8) | ((emax & 0xFFFF) << 16));
+    }
+
+    if (!path || gate) return;
+
+    aref_trig_ref = peak;
     aref_count0 = slim_af_result_count;
     aref_low_since = 0;
+    if (path == 2) aref_abs_used = 1;
     aref_phase = AREF_REQUESTED;
     slim_af_request = RECORDING ? 2 : 1;
     aref_log(1, cur);
@@ -10798,6 +11003,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(INFO_button)
     MODULE_CONFIG(Shutter_zoom)
     MODULE_CONFIG(Auto_refocus)
+    MODULE_CONFIG(Auto_refocus_sens)
     MODULE_CONFIG(tapdisp)
     MODULE_CONFIG(Arrows_L_R)
     MODULE_CONFIG(Arrows_U_D)
