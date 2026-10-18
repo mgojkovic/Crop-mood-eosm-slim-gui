@@ -5998,6 +5998,15 @@ enum
                           * w1..w3 = payload bytes 0-11 (byte 0 in the low byte), dropped repeats in len's top */
     AFD_EV_LVOBJ,        /* Canon LV AF state (RAM *(0x4069C+12)), logged on change: w0 = obj,
                           * w1 = +0x184 LV mode, w2 = +0x710 AF method/zoom tag, w3 = +0xC7C servo << 8 | +0xC88 */
+    AFD_EV_MPUTEST,      /* AF lens test "MPU", two records per step.
+                          * start: w0 = step << 8 | MF << 16 | movie << 17, w1 = property id (0 = none),
+                          *        w2/w3 = payload bytes 0-3 / 4-7 (byte 0 in the low byte)
+                          * end:   w0 = fpc delta (int8) << 24 | flags << 16 | step << 8 | 1,
+                          *        w1 = sharpness before, w2 = sharpness after, w3 = dist before << 16 | after
+                          * flags: 1 sent, 2 FOCUS_DONE seen, 4 FOCUS_DONE with error bit, 8 focus_dist moved
+                          *        during the step, 0x10 pulse count changed, 0x40 aborted
+                          * end of run: w0 = 0xFF01, w1 = stop reason (0 none, 1 LV lost, 2 recording,
+                          * 3 menu, 4 switched off), w2 = steps done, w3 = steps planned */
     AFD_EV_REFOCUS,      /* auto refocus: w0 = what (1 trigger, 2 AF ok, 3 AF failed, 4 request not started,
                           * 5 paused, 6 resumed, 7 reference taken), w1 = current sharpness,
                           * w2 = S_ref, w3 = lv_dispsize | RECORDING << 8 | consecutive fails << 16 */
@@ -6101,7 +6110,7 @@ static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
     /* The lens test sends hundreds of drive commands per cycle and logs a
      * summary per burst; one line per command and acknowledgement flooded
      * the ring and the file.  Keep them only while the test is off. */
-    if (afdiag_lens_test &&
+    if (afdiag_lens_test && afdiag_lens_test < 3 &&
         (property == PROP_LV_LENS_DRIVE_REMOTE || property == PROP_LV_FOCUS_DONE))
         return;
     uint32_t w[4] = {0, 0, 0, 0};
@@ -6218,6 +6227,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_REFOCUS:            return "@REFOCUS";
         case AFD_EV_LVOBJ:              return "@LVOBJ";
         case AFD_EV_MPU:                return "@MPU";
+        case AFD_EV_MPUTEST:            return "@MPUTEST";
     }
     return "?";
 }
@@ -6588,6 +6598,354 @@ static void afdiag_sweep(int unused)
     }
 }
 
+/* ---- AF lens test choices 3 "MPU" and 4 "MPU+SW1" ----
+ *
+ * A fixed, logged series of experiments that try to make the lens move by
+ * sending Canon's own ICU -> MPU messages, each through the Canon property
+ * that the 2.0.2 firmware turns into that message.  ROM findings (see the
+ * property request handlers, callback 0xFF324950 and the pair table at
+ * 0xFF32456C / 0xFF324100):
+ *   PROP_LV_FOCUS      0x80050001 {1, hi, lo, FF, FF}  -> (9,0x01,5) [hi lo FF FF 00]; data[0] == 0 sends nothing
+ *   PROP_LV_FOCUS_STOP 0x80050003 non-zero 32-bit word -> (9,0x03,1) [00]
+ *   PROP_LVAF_001D     0x8005001D {1, b1, b2, b3}      -> (9,0x13,4) [b1 b2 b3 00]; data[0] == 0 sends nothing
+ *   (session)          0x8005003C 15 bytes             -> (9,0x25,16) [15 bytes, 00]; Canon sends [02 00 ...]
+ *   PROP_LV_FOCUS_CMD  0x80050027 data[0]              -> (9,0x0B,2) [data[0] 00]
+ *   PROP_LV_AF_RESULT  0x80050029 7 bytes              -> (9,0x19,7) [6 bytes, 00]; Canon sends 01 3b 6b 26 60 1e
+ *   PROP_REMOTE_SW1    0x80020015 data[0], data[1]     -> (4,0x16,3) [d0 d1 00]
+ * Every request goes through Canon's _prop_request_change (0xFF11FB04), like
+ * afdiag_direct_focus, because ML's wrapper refuses properties whose cached
+ * length is 0.  Nothing writes to the MPU ring and the packet builder is never
+ * called directly.  Each step is logged as two @MPUTEST records; turn AF diag
+ * log "ON + MPU" on to see the resulting @MPU messages next to them.
+ * The run is one-shot: it switches the test back to OFF when it ends. */
+#define AFDIAG_PROP_AF_SESSION 0x8005003C
+
+enum
+{
+    AFM_STOP = 1,   /* FOCUS_STOP alone */
+    AFM_FOCUS,      /* PROP_LV_FOCUS, a = signed relative pulses, then FOCUS_STOP */
+    AFM_SEARCH,     /* PROP_LVAF_001D {1, a hi, a lo, b}, then FOCUS_STOP */
+    AFM_OPEN25,     /* 0x8005003C {02, 0 ...} */
+    AFM_STATE,      /* PROP_LV_FOCUS_CMD {a} */
+    AFM_AFCFG,      /* PROP_LV_AF_RESULT with Canon's x10 AF configuration */
+    AFM_SW1,        /* remote half-press a = 1 / 0 */
+    AFM_REMOTE,     /* b x PROP_LV_LENS_DRIVE_REMOTE of signed size a (MF allowed), then FOCUS_STOP */
+    AFM_WAITAF,     /* wait for PROP_LV_AF_RESULT (settle ms at most) */
+};
+
+struct afdiag_mpu_step
+{
+    uint8_t kind;
+    int16_t a;
+    uint8_t b;
+    uint16_t settle;  /* ms to watch after the request */
+    uint8_t sw1_only; /* only in choice 4 */
+    const char *name;
+};
+
+static const struct afdiag_mpu_step afdiag_mpu_table[] = {
+    /* P: does a harmless request reach the MPU at all?  (expect @MPU 9,3,1) */
+    { AFM_STOP,    0, 0,  600, 0, "P stop probe" },
+    /* A: "AF session" message Canon sends at every half-press, then big relative drives */
+    { AFM_OPEN25,  0, 0,  800, 0, "A open (9,25)" },
+    { AFM_FOCUS,  50, 0, 1200, 0, "A +50" },
+    { AFM_FOCUS, -50, 0, 1200, 0, "A -50" },
+    { AFM_FOCUS, 200, 0, 1200, 0, "A +200" },
+    { AFM_FOCUS,-200, 0, 1200, 0, "A -200" },
+    { AFM_FOCUS, 500, 0, 1500, 0, "A +500" },
+    { AFM_FOCUS,-500, 0, 1500, 0, "A -500" },
+    /* B: Canon's "focus state" message (9,0x0B) = 0 (what it sends when an AF run ends), then drives */
+    { AFM_STATE,   0, 0,  800, 0, "B state 0" },
+    { AFM_FOCUS, 200, 0, 1200, 0, "B +200" },
+    { AFM_FOCUS,-200, 0, 1200, 0, "B -200" },
+    { AFM_FOCUS, 500, 0, 1500, 0, "B +500" },
+    { AFM_FOCUS,-500, 0, 1500, 0, "B -500" },
+    { AFM_STATE,   2, 0,  800, 0, "B state 2" },
+    /* C: the remote drive sent directly (no lens_focus MF check); run it in AF and in MF */
+    { AFM_REMOTE, 15, 10, 600, 0, "C remote +15 x10" },
+    { AFM_REMOTE,-15, 10, 600, 0, "C remote -15 x10" },
+    /* D: LensSearchDriveStart, payload layout inferred from the ROM only (3 bytes after the flag) */
+    { AFM_SEARCH,  16, 0,    1000, 0, "D search +16,0" },
+    { AFM_SEARCH, -16, 0,    1000, 0, "D search -16,0" },
+    { AFM_SEARCH,  16, 1,    1000, 0, "D search +16,1" },
+    { AFM_SEARCH, -16, 1,    1000, 0, "D search -16,1" },
+    { AFM_SEARCH,   0, 1,    1000, 0, "D search 0,1" },
+    { AFM_SEARCH,  64, 0xFF, 1000, 0, "D search +64,FF" },
+    /* E: replay Canon's own AF start (needs the remote half-press, so Canon runs an AF too) and
+     * inject drives while it is running */
+    { AFM_AFCFG,   0, 0,  800, 1, "E af cfg (9,19)" },
+    { AFM_SW1,     1, 0,  400, 1, "E SW1 on" },
+    { AFM_FOCUS, 100, 0, 1200, 1, "E +100 in AF" },
+    { AFM_FOCUS,-100, 0, 1200, 1, "E -100 in AF" },
+    { AFM_WAITAF,  0, 0, 4000, 1, "E wait AF result" },
+    { AFM_SW1,     0, 0,  800, 1, "E SW1 off" },
+};
+
+static int afdiag_mpu_sw1_on = 0;      /* this run holds the remote half-press */
+static int afdiag_mpu_state_dirty = 0; /* this run sent (9,0x0B) = 0 and has not restored it */
+static int afdiag_mpu_abort_reason = 0;
+
+/* 0 = go on, otherwise the reason to stop (see AFD_EV_MPUTEST). */
+static int afdiag_mpu_check(void)
+{
+    if (!lv) return 1;
+    if (RECORDING) return 2;
+    if (gui_menu_shown()) return 3;
+    if (afdiag_lens_test < 3) return 4;
+    return 0;
+}
+
+/* Sleep up to ms; returns 1 (and remembers why) if the run has to stop. */
+static int afdiag_mpu_sleep(int ms)
+{
+    for (int t = 0; t < ms; t += 20)
+    {
+        int r = afdiag_mpu_check();
+        if (r) { afdiag_mpu_abort_reason = r; return 1; }
+        msleep(20);
+    }
+    return 0;
+}
+
+/* Fill the property id, payload and length of one request.  prop == 0 for
+ * kinds that do not go through Canon's property call. */
+static void afdiag_mpu_build(const struct afdiag_mpu_step *s, unsigned *prop, uint8_t *d, int *len)
+{
+    memset(d, 0, 16);
+    *prop = 0;
+    *len = 0;
+    switch (s->kind)
+    {
+        case AFM_STOP:
+            *prop = PROP_LV_FOCUS_STOP; d[0] = 1; *len = 4;
+            break;
+        case AFM_FOCUS:
+            *prop = PROP_LV_FOCUS;
+            d[0] = 1; d[1] = (s->a >> 8) & 0xFF; d[2] = s->a & 0xFF; d[3] = 0xFF; d[4] = 0xFF;
+            *len = 5;
+            break;
+        case AFM_SEARCH:
+            *prop = PROP_LVAF_001D;
+            d[0] = 1; d[1] = (s->a >> 8) & 0xFF; d[2] = s->a & 0xFF; d[3] = s->b;
+            *len = 4;
+            break;
+        case AFM_OPEN25:
+            *prop = AFDIAG_PROP_AF_SESSION; d[0] = 2; *len = 16;
+            break;
+        case AFM_STATE:
+            *prop = PROP_LV_FOCUS_CMD; d[0] = s->a; *len = 3;
+            break;
+        case AFM_AFCFG:
+            /* byte for byte what Canon sends when x10 is entered (every field log) */
+            *prop = PROP_LV_AF_RESULT;
+            d[0] = 0x01; d[1] = 0x3b; d[2] = 0x6b; d[3] = 0x26; d[4] = 0x60; d[5] = 0x1e; d[6] = 0x00;
+            *len = 7;
+            break;
+        case AFM_REMOTE:
+            d[0] = s->a < 0 ? 0x80 : 0;
+            d[1] = ABS(s->a) & 0xFF;
+            break;
+        case AFM_SW1:
+            d[0] = s->a;
+            break;
+    }
+}
+
+static int afdiag_mpu_canon_request(unsigned prop, const uint8_t *d, int len)
+{
+    if (!is_camera("EOSM", "2.0.2")) return 0;
+    void (*canon_prop_request_change)(unsigned, const void *, size_t) =
+        (void (*)(unsigned, const void *, size_t)) 0xFF11FB04;
+    canon_prop_request_change(prop, d, len);
+    return 1;
+}
+
+static void afdiag_mpu_stop(void)
+{
+    const struct afdiag_mpu_step stop = { AFM_STOP, 0, 0, 0, 0, "stop" };
+    unsigned prop; uint8_t d[16]; int len;
+    afdiag_mpu_build(&stop, &prop, d, &len);
+    afdiag_mpu_canon_request(prop, d, len);
+}
+
+/* One step: request, watch focus_dist / pulse count / sharpness for the
+ * settle time, FOCUS_STOP after anything that drives.  Returns 1 to stop. */
+static int afdiag_mpu_step(int idx, int total, const struct afdiag_mpu_step *s)
+{
+    unsigned prop; uint8_t d[16]; int len;
+    int m, n, x;
+
+    afdiag_mpu_build(s, &prop, d, &len);
+    NotifyBox(1500, "MPU %d/%d %s", idx + 1, total, s->name);
+
+    uint32_t sh0 = afdiag_sharpness(&m, &n, &x);
+    int d0 = lens_info.focus_dist;
+    int dmin = d0, dmax = d0;
+    int fpc0 = afdiag_fpc;
+    int done0 = afdiag_focus_done_count;
+    int flags = 0;
+
+    afdiag_record(AFD_EV_MPUTEST, 16,
+                  (idx << 8) | ((is_manual_focus() ? 1 : 0) << 16) | ((is_movie_mode() ? 1 : 0) << 17),
+                  prop,
+                  d[0] | (d[1] << 8) | (d[2] << 16) | ((uint32_t) d[3] << 24),
+                  d[4] | (d[5] << 8) | (d[6] << 16) | ((uint32_t) d[7] << 24));
+
+    int sent = 0, drives = 0;
+    switch (s->kind)
+    {
+        case AFM_STOP: case AFM_OPEN25: case AFM_STATE: case AFM_AFCFG:
+            sent = afdiag_mpu_canon_request(prop, d, len);
+            if (s->kind == AFM_STATE) afdiag_mpu_state_dirty = (s->a == 0);
+            break;
+        case AFM_FOCUS: case AFM_SEARCH:
+            sent = afdiag_mpu_canon_request(prop, d, len);
+            drives = 1;
+            break;
+        case AFM_SW1:
+            afdiag_mpu_sw1_on = s->a ? 1 : 0;
+            SW1(s->a ? 1 : 0, 0);
+            sent = 1;
+            break;
+        case AFM_REMOTE:
+        {
+            /* the same command lens_focus() sends, minus its MF refusal and size clamp */
+            int cmd = s->a < 0 ? 0x8000 | ABS(s->a) : s->a;
+            drives = 1;
+            sent = 1;
+            for (int i = 0; i < s->b; i++)
+            {
+                int dn = afdiag_focus_done_count;
+                prop_request_change(PROP_LV_LENS_DRIVE_REMOTE, &cmd, 4);
+                for (int t = 0; t < 300 && afdiag_focus_done_count == dn; t += 10)
+                {
+                    int r = afdiag_mpu_check();
+                    if (r) { afdiag_mpu_abort_reason = r; flags |= 0x40; break; }
+                    msleep(10);
+                }
+                if (flags & 0x40) break;
+            }
+            break;
+        }
+        case AFM_WAITAF:
+        {
+            int c0 = slim_af_result_count;
+            for (int t = 0; t < s->settle && slim_af_result_count == c0 && !(flags & 0x40); t += 20)
+            {
+                int r = afdiag_mpu_check();
+                if (r) { afdiag_mpu_abort_reason = r; flags |= 0x40; break; }
+                msleep(20);
+            }
+            break;
+        }
+    }
+    if (sent) flags |= 1;
+
+    if (s->kind != AFM_WAITAF)
+    {
+        int t0 = get_ms_clock();
+        while (!(flags & 0x40) && get_ms_clock() - t0 < s->settle)
+        {
+            int r = afdiag_mpu_check();
+            if (r) { afdiag_mpu_abort_reason = r; flags |= 0x40; break; }
+            int dd = lens_info.focus_dist;
+            if (dd < dmin) dmin = dd;
+            if (dd > dmax) dmax = dd;
+            msleep(20);
+        }
+    }
+    if (drives && lv)
+    {
+        afdiag_mpu_stop();      /* always end a drive with FOCUS_STOP */
+        if (!(flags & 0x40)) afdiag_mpu_sleep(400);
+    }
+
+    if (afdiag_focus_done_count != done0) flags |= 2;
+    if ((flags & 2) && afdiag_focus_done_err) flags |= 4;
+    int d1 = lens_info.focus_dist;
+    if (dmin != dmax || d1 != d0) flags |= 8;
+    int fpc1 = afdiag_fpc;
+    int fdelta = 0;
+    if (fpc0 != INT_MIN && fpc1 != INT_MIN) fdelta = COERCE(fpc1 - fpc0, -128, 127);
+    if (fpc1 != fpc0) flags |= 0x10;
+    uint32_t sh1 = afdiag_sharpness(&m, &n, &x);
+
+    afdiag_record(AFD_EV_MPUTEST, 16,
+                  ((uint32_t)(fdelta & 0xFF) << 24) | (flags << 16) | (idx << 8) | 1,
+                  sh0, sh1, ((d0 & 0xFFFF) << 16) | (d1 & 0xFFFF));
+    return (flags & 0x40) ? 1 : 0;
+}
+
+static void afdiag_mpu_run(void)
+{
+    if (!is_camera("EOSM", "2.0.2"))
+    {
+        NotifyBox(4000, "AF lens test MPU: EOS M 2.0.2 only");
+        return;
+    }
+    if (!afdiag_log)
+    {
+        NotifyBox(5000, "AF lens test MPU: set AF diag log to ON + MPU first");
+        return;
+    }
+    if (RECORDING || is_continuous_af() || slim_af_state != SLIM_AF_IDLE)
+    {
+        NotifyBox(5000, "AF lens test MPU: not while recording, Servo AF or AF sequence");
+        return;
+    }
+    if (afdiag_log != 2)
+        NotifyBox(3000, "AF diag log is not ON + MPU: sent messages will not be logged");
+
+    /* give the user time to close the menu and hands off the camera */
+    afdiag_mpu_abort_reason = 0;
+    NotifyBox(3000, "AF lens test MPU: close menu, starts in 3 s");
+    for (int t = 0; t < 3000; t += 100)
+    {
+        msleep(100);
+        if (!afdiag_lens_test) return;
+    }
+    while (gui_menu_shown())
+    {
+        msleep(200);
+        if (!afdiag_lens_test) return;
+    }
+
+    int total = 0;
+    for (int i = 0; i < (int) COUNT(afdiag_mpu_table); i++)
+        if (!afdiag_mpu_table[i].sw1_only || afdiag_lens_test >= 4) total++;
+
+    afdiag_mpu_sw1_on = 0;
+    afdiag_mpu_state_dirty = 0;
+    int done = 0;
+    for (int i = 0; i < (int) COUNT(afdiag_mpu_table); i++)
+    {
+        const struct afdiag_mpu_step *s = &afdiag_mpu_table[i];
+        if (s->sw1_only && afdiag_lens_test < 4) continue;
+        if (afdiag_mpu_step(done, total, s)) break;
+        done++;
+    }
+
+    /* Whatever happened: end the drive, release the half-press this run made,
+     * put (9,0x0B) back to Canon's idle value. */
+    if (afdiag_mpu_sw1_on) { SW1(0, 0); afdiag_mpu_sw1_on = 0; }
+    if (lv)
+    {
+        afdiag_mpu_stop();
+        if (afdiag_mpu_state_dirty)
+        {
+            const struct afdiag_mpu_step idle = { AFM_STATE, 2, 0, 0, 0, "idle" };
+            unsigned prop; uint8_t d[16]; int len;
+            afdiag_mpu_build(&idle, &prop, d, &len);
+            afdiag_mpu_canon_request(prop, d, len);
+        }
+    }
+    afdiag_mpu_state_dirty = 0;
+    afdiag_record(AFD_EV_MPUTEST, 8, 0xFF00 | 1, afdiag_mpu_abort_reason, done, total);
+    static const char * const why[] = { "done", "LV lost", "recording started", "menu opened", "switched off" };
+    NotifyBox(5000, "AF lens test MPU: %s (%d/%d steps)", why[afdiag_mpu_abort_reason], done, total);
+    afdiag_lens_test = 0;
+}
+
 /* Lens test (choice 1 "Remote": bursts of remote commands, size 3 vs 15;
  * choice 2 "Direct": a size-1 remote command, then one PROP_LV_FOCUS move
  * of 50/200 steps).  Never touches the card. */
@@ -6602,6 +6960,12 @@ static void afdiag_lens_task(void *unused)
         msleep(100);
         if (!afdiag_lens_test) { last_skip = 0; continue; }
         if (!lv) continue;
+        if (afdiag_lens_test >= 3)
+        {
+            afdiag_mpu_run();   /* one-shot; switches the test back to OFF */
+            afdiag_lens_test = 0;
+            continue;
+        }
         /* Remote bursts stay movie-only; A/B also runs in photo LV. */
         if (afdiag_lens_test == 1 && !is_movie_mode()) continue;
 
@@ -6704,13 +7068,14 @@ static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF lens test",
         .priv      = &afdiag_lens_test,
-        .max       = 2,
-        .choices   = CHOICES("OFF", "Remote", "A/B"),
+        .max       = 4,
+        .choices   = CHOICES("OFF", "Remote", "A/B", "MPU", "MPU+SW1"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY: move the focus motor back and forth in LV.",
         .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms (movie only). A/B: lens_focus 40 x size 1, 2, 3, each way, photo or movie.\n"
-                     "Works while recording too; pair with AF diag log. OFF after restart.",
+                     "MPU: one-shot series of raw MPU messages (needs AF diag log ON + MPU, LV, not recording, "
+                     "close the menu); MPU+SW1 adds a remote half-press (Canon runs AF). OFF after restart.",
     },
 };
 
