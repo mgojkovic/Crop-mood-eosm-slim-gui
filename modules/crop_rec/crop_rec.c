@@ -5944,7 +5944,16 @@ enum
                           * (centre 1/4 x 1/4 of the displayed LV buffer; Laplacian on luma) */
     AFD_EV_STEP_SHARP,   /* w0 = signed burst count, w1 = edge sum before the step, w2 = edge sum 300 ms after,
                           * w3 = mean luma after */
+    AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
+                          * w2 = bytes 4/5, w3 = byte 6 */
 };
+
+/* Found in the EOS M 2.0.2 ROM (handler 0xFF27AC18): the MPU reports the
+ * real focus motor position here, big-endian int16 in bytes 0..1.  ML's
+ * lens_info.focus_pos is not a position on this camera. */
+#define PROP_LV_FOCUS_PULSE_COUNT 0x8005001E
+static volatile int afdiag_fpc = INT_MIN;          /* last pulse count, INT_MIN = never seen */
+static volatile int afdiag_focus_done_count = 0;   /* PROP_LV_FOCUS_DONE events */
 
 struct afdiag_entry
 {
@@ -6054,7 +6063,17 @@ static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
     afdiag_record(property, len, w[0], w[1], w[2], w[3]);
 }
 
-PROP_HANDLER(PROP_LV_FOCUS_DONE)       { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_FOCUS_DONE)       { afdiag_focus_done_count++; afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_FOCUS_PULSE_COUNT)
+{
+    const uint8_t *b = (const uint8_t *)buf;
+    if (len < 2) return;
+    afdiag_fpc = (int16_t)((b[0] << 8) | b[1]);
+    afdiag_record(AFD_EV_FPC, len, afdiag_fpc,
+        len >= 4 ? (uint32_t)((b[2] << 8) | b[3]) : 0,
+        len >= 6 ? (uint32_t)((b[4] << 8) | b[5]) : 0,
+        len >= 7 ? b[6] : 0);
+}
 PROP_HANDLER(PROP_LV_AF_RESULT)        { slim_af_result_count++; afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_STATE)      { afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_STATUS)     { afdiag_prop(property, buf, len); }
@@ -6090,6 +6109,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_LENS_SKIP:          return "@LENS_SKIP";
         case AFD_EV_SHARP:              return "@SHARP";
         case AFD_EV_STEP_SHARP:         return "@STEP_SHARP";
+        case AFD_EV_FPC:                return "@FPC";
     }
     return "?";
 }
@@ -6216,7 +6236,35 @@ static void afdiag_flush(void)
     FIO_CloseFile(f);
 }
 
-/* Lens test: step the focus motor +1/-1 every 2 s.  Never touches the card. */
+/* Direct focus drive, as Canon's own LV code sends it (EOS M 2.0.2 ROM,
+ * 0xFF184494): PROP_LV_FOCUS, 5 bytes { 1, steps_hi, steps_lo, 0xFF, 0xFF },
+ * steps = signed 16-bit.  PROP_LV_LENS_DRIVE_REMOTE (what lens_focus sends)
+ * is decoded by the firmware into this same message with |steps| <= 15.
+ * Nothing on the main CPU consumes it, so prop_request_change_wait would
+ * never return: wait for PROP_LV_FOCUS_DONE instead.  Returns 1 when done. */
+static int afdiag_direct_focus(int steps)
+{
+    uint8_t f[5];
+    int done0 = afdiag_focus_done_count;
+    steps = COERCE(steps, -1000, 1000);
+    f[0] = 1;
+    f[1] = (steps >> 8) & 0xFF;
+    f[2] = steps & 0xFF;
+    f[3] = 0xFF;
+    f[4] = 0xFF;
+    prop_request_change(PROP_LV_FOCUS, f, 5);
+    for (int i = 0; i < 300; i++)   /* up to 3 s */
+    {
+        if (afdiag_focus_done_count != done0) return 1;
+        if (!lv || is_manual_focus()) return 0;
+        msleep(10);
+    }
+    return 0;
+}
+
+/* Lens test (choice 1 "Remote": bursts of lens_focus commands; choice 2
+ * "Direct": single PROP_LV_FOCUS moves of 10/50/200 steps).  Never touches
+ * the card. */
 static void afdiag_lens_task(void *unused)
 {
     int dir = 1;
@@ -6253,9 +6301,28 @@ static void afdiag_lens_task(void *unused)
         }
         last_skip = 0;
 
-        int before = lens_info.focus_pos;
+        int before = afdiag_fpc;
         int m0, n0, x0;
         uint32_t sharp_before = afdiag_sharpness(&m0, &n0, &x0);
+
+        if (afdiag_lens_test == 2)
+        {
+            /* +N then -N, so focus returns to where it started */
+            static const int moves[] = { 10, 50, 200 };
+            static int move_idx = 0;
+            int steps = dir * moves[move_idx];
+            int ok = afdiag_direct_focus(steps);
+            int elapsed = get_ms_clock() - now;
+            afdiag_record(AFD_EV_LENS_STEP, 16, steps, ok ? 2 : 0, before, elapsed);
+            msleep(AFDIAG_STEP_SETTLE);
+            int m1, n1, x1;
+            uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
+            afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_after, m1);
+            if (dir < 0) move_idx = (move_idx + 1) % COUNT(moves);
+            dir = -dir;
+            last_step = get_ms_clock();
+            continue;
+        }
         /* Field tests: single commands of size 1-3 were all accepted but
          * moved an STM lens too little to see or measure.  Send bursts of
          * size-3 commands instead: 50, 100, then 200 (+N then -N, so focus
@@ -6290,12 +6357,13 @@ static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF lens test",
         .priv      = &afdiag_lens_test,
-        .max       = 1,
-        .choices   = CHOICES("OFF", "ON"),
+        .max       = 2,
+        .choices   = CHOICES("OFF", "Remote", "Direct"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
-        .help      = "TEMPORARY diagnostics: nudge the focus motor +1/-1 every 2 s in movie LV.",
-        .help2     = "Works while recording too; pair with AF diag log. OFF after restart.",
+        .help      = "TEMPORARY: move the focus motor back and forth in movie LV.",
+        .help2     = "Remote: bursts of 50/100/200 ML focus commands. Direct: Canon focus drive 10/50/200 steps.\n"
+                     "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
 
@@ -9718,6 +9786,7 @@ MODULE_PROPHANDLERS_START()
     MODULE_PROPHANDLER(PROP_LV_ACTION)
     MODULE_PROPHANDLER(PROP_LV_DISPSIZE)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_DONE)
+    MODULE_PROPHANDLER(PROP_LV_FOCUS_PULSE_COUNT)
     MODULE_PROPHANDLER(PROP_LV_AF_RESULT)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_STATE)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_STATUS)
