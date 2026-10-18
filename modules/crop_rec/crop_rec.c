@@ -5199,9 +5199,12 @@ int crop_rec_lv_transition_busy(void)
     return eosm_lv_guard_busy;
 }
 
+static int eosm_lv_guard_t0; /* ms when the guard started holding LV, 0 = not yet */
+
 static void eosm_lv_guard_request(void)
 {
     eosm_lv_guard_pending = 1;
+    eosm_lv_guard_t0 = 0;
     eosm_lv_guard_busy = 1;
     eosm_lv_guard_started = 0;
     eosm_lv_guard_state = EOSM_LV_GUARD_WAIT;
@@ -5996,6 +5999,8 @@ enum
                           * The 2.0.2 firmware itself reads 0x24, 0x27 ("Po") and 0x2C (focal length). */
     AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
                           * w2 = bytes 4/5, w3 = byte 6 */
+    AFD_EV_GUARD,        /* EOS M LV guard: w0 = state | timeout << 8, w1 = readiness bits (see eosm_lv_guard_diag_bits),
+                          * w2 = stable frames | dispsize << 8 | PathDriveMode zoom << 16, w3 = ms since guard start */
     AFD_EV_MPU,          /* ICU -> MPU message (hook on Canon's packet builder): w0 = grp << 16 | op << 8 | len,
                           * w1..w3 = payload bytes 0-11 (byte 0 in the low byte), dropped repeats in len's top */
     AFD_EV_LVOBJ,        /* Canon LV AF state (RAM *(0x4069C+12)), logged on change: w0 = obj,
@@ -6220,6 +6225,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_REFOCUS:            return "@REFOCUS";
         case AFD_EV_LVOBJ:              return "@LVOBJ";
         case AFD_EV_MPU:                return "@MPU";
+        case AFD_EV_GUARD:              return "@GUARD";
     }
     return "?";
 }
@@ -8522,9 +8528,39 @@ int crop_rec_lv_transition_diag(char *buffer, int size)
 static void eosm_lv_guard_clear(void)
 {
     eosm_lv_guard_pending = 0;
+    eosm_lv_guard_t0 = 0;
     eosm_lv_guard_busy = 0;
     crop_rec_lv_dirty = 0;
     settings_changed = 0;
+}
+
+#define EOSM_LV_GUARD_TIMEOUT_MS 3000
+/* Side-effect-free copy of eosm_lv_guard_pipeline_ready()'s checks, for the
+ * @GUARD log: bit set = check passes.  0 display idle, 1 crop preset,
+ * 2 patch active, 3 movie mode, 4 dispsize 5, 5 PathDriveMode zoom 5,
+ * 6 raw geometry, 7 raw buffer, 8 display buffer, 9 raw buffer same as last,
+ * 10 display buffer same as last, 11 geometry ready, 12 no LV refresh needed,
+ * 13 display has content, 14 display route ready. */
+static uint32_t eosm_lv_guard_diag_bits(void)
+{
+    uint32_t b = 0;
+    uint32_t disp = get_yuv422_lv_display_addr();
+    if (liveview_display_idle())                         b |= 1 << 0;
+    if (CROP_PRESET_MENU)                                b |= 1 << 1;
+    if (patch_active)                                    b |= 1 << 2;
+    if (is_movie_mode())                                 b |= 1 << 3;
+    if (lv_dispsize == 5)                                b |= 1 << 4;
+    if (PathDriveMode && PathDriveMode->zoom == 5)       b |= 1 << 5;
+    if (raw_info.width > 0 && raw_info.height > 0 && raw_info.pitch > 0) b |= 1 << 6;
+    if (raw_info.buffer)                                 b |= 1 << 7;
+    if (disp)                                            b |= 1 << 8;
+    if ((uintptr_t)raw_info.buffer == eosm_lv_guard_raw_buffer) b |= 1 << 9;
+    if (disp == eosm_lv_guard_display_buffer)            b |= 1 << 10;
+    if (eosm_lv_guard_selected_geometry_ready())         b |= 1 << 11;
+    if (!crop_rec_needs_lv_refresh())                    b |= 1 << 12;
+    if (eosm_lv_guard_display_has_content())             b |= 1 << 13;
+    if (eosm_lv_guard_display_route_ready())             b |= 1 << 14;
+    return b;
 }
 
 static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
@@ -8556,6 +8592,37 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
     now = get_ms_clock();
     if (!eosm_lv_guard_started)
         eosm_lv_guard_started = now;
+    if (!eosm_lv_guard_t0)
+        eosm_lv_guard_t0 = now;
+
+    /* Field run 1 of this guard (never compiled before): it stayed busy
+     * forever and swallowed SET/arrows/INFO/touch.  Never hold LV longer
+     * than EOSM_LV_GUARD_TIMEOUT_MS, and log which readiness check failed. */
+    {
+        static int last_state = -1;
+        static uint32_t last_bits = 0xFFFFFFFF;
+        static int last_log_ms = 0;
+        uint32_t bits = eosm_lv_guard_diag_bits();
+        int timeout = now - eosm_lv_guard_t0 > EOSM_LV_GUARD_TIMEOUT_MS;
+        /* state changes and the timeout always; bit changes at most every 300 ms */
+        if (eosm_lv_guard_state != last_state || timeout ||
+            (bits != last_bits && now - last_log_ms >= 300))
+        {
+            last_log_ms = now;
+            afdiag_record(AFD_EV_GUARD, 16, eosm_lv_guard_state | (timeout << 8), bits,
+                          (eosm_lv_guard_stable_frames & 0xFF) | ((lv_dispsize & 0xFF) << 8) |
+                          ((PathDriveMode ? (PathDriveMode->zoom & 0xFF) : 0xFF) << 16),
+                          now - eosm_lv_guard_t0);
+            last_state = eosm_lv_guard_state;
+            last_bits = bits;
+        }
+        if (timeout)
+        {
+            NotifyBox(2000, "LV guard: timeout (state %d)", eosm_lv_guard_state);
+            eosm_lv_guard_clear();
+            return 0;
+        }
+    }
 
     eosm_lv_guard_busy = 1;
 
