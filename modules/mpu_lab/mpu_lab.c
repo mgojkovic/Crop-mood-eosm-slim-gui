@@ -224,7 +224,7 @@ struct mpu_dump
 
 static const struct mpu_dump mpu_dumps[] =
 {
-    { 0, 0x00000000, 1024 * 1024, "MPU-ROM.BIN" },  /* F749 ROM, same try as 5D3 */
+    { 0, 0x00000000,  768 * 1024, "MPU-ROM.BIN" },  /* F74964A ROM: code ends at 0xC0000 (FF after); reading past ~0xC5800 hangs the monitor */
     { 2, 0x00000000,    64 * 1024, "MPU-EEP.BIN" }, /* MPU EEPROM */
     { 0, 0xFFFF8000,    24 * 1024, "MPU-RAM.BIN" }, /* TX19A RAM address; harmless probe */
     { 0, 0x00000000,     4 * 1024, "MPU-TEST.BIN" } /* quick smoke test */
@@ -232,7 +232,7 @@ static const struct mpu_dump mpu_dumps[] =
 
 static const char * mpu_dump_choices[] =
 {
-    "ROM 1 MB", "EEPROM 64 KB", "RAM 24 KB", "test 4 KB"
+    "ROM 768 KB", "EEPROM 64 KB", "RAM 24 KB", "test 4 KB"
 };
 
 static int mpu_dump_choice = 0;
@@ -591,7 +591,7 @@ static struct menu_entry mpu_lab_menu[] =
                 .choices = mpu_dump_choices,
                 .edit_mode = EM_INLINE_ADJUST,
                 .help = "Which MPU memory range to dump.",
-                .help2 = "ROM 1 MB is the main goal; EEPROM 64 KB and RAM 24 KB are the 5D3/TX19A attempts.\n"
+                .help2 = "ROM 768 KB is the main goal; EEPROM 64 KB and RAM 24 KB are the 5D3/TX19A attempts.\n"
                          "Test 4 KB is a quick smoke test before a long dump."
             },
             {

@@ -258,7 +258,7 @@ module list in [`modules/Makefile.modules.user`](../modules/Makefile.modules.use
 Menu: **Focus → MPU lab** (the slim GUI's Focus tile is short and reachable;
 Settings was not). Entries:
 
-1. **Dump memory** — `ROM 1 MB`, `EEPROM 64 KB`, `RAM 24 KB`, `test 4 KB`
+1. **Dump memory** — `ROM 768 KB`, `EEPROM 64 KB`, `RAM 24 KB`, `test 4 KB`
 2. **Run dump** — read-only, starts after 2 s, writes `ML/LOGS/MPU-*.BIN`.
    Checks `MpuMonOpen` and every 1 KB `MpuMonRead` return value (non-zero =
    error: stop, show code and offset), always calls `MpuMonClose`, sleeps 10 ms
@@ -361,7 +361,7 @@ or to check the **Modules** menu for a link error.
 3. **Focus → MPU lab**.
 4. First run **Dump memory → test 4 KB → Run dump**. This proves the monitor
    works before a long read.
-5. Then **ROM 1 MB → Run dump**; optionally EEPROM and RAM.
+5. Then **ROM 768 KB → Run dump**; optionally EEPROM and RAM.
 6. Copy `ML/LOGS/MPU-*.BIN`, `ML/LOGS/MPULAB.LOG` and `ML/LOGS/AFDIAG.LOG` off the card.
 
 For a raw test, start with **`search end1 spd7`** or **`focus +15 spd7`**,
