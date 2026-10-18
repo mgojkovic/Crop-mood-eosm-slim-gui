@@ -77,6 +77,8 @@
 #include <fio-ml.h>
 #include <notify_box.h>
 #include <timer.h>
+#include <vram.h>
+#include <focus.h>
 
 #define MPU_MON_OPEN()  ((int (*)(void)) 0xFF1DD098)()
 #define MPU_MON_CLOSE() ((int (*)(void)) 0xFF1DD118)()
@@ -122,6 +124,7 @@ static struct cap caps[CAP_N] =
 };
 
 static volatile int cap_active = 0;
+static void drv_lvlens_note(const void *buf, unsigned int len);
 
 /* Called from the property task: store only, no file I/O, no waiting. */
 static void cap_note(int i, const void *buf, unsigned int len)
@@ -135,7 +138,7 @@ static void cap_note(int i, const void *buf, unsigned int len)
     c->count++;
 }
 
-PROP_HANDLER(MPL_LENS)       { cap_note(CAP_LENS, buf, len); }
+PROP_HANDLER(MPL_LENS)       { cap_note(CAP_LENS, buf, len); drv_lvlens_note(buf, len); }
 PROP_HANDLER(MPL_FOCUS_DONE) { cap_note(CAP_DONE, buf, len); }
 PROP_HANDLER(MPL_CAF_STATE)  { cap_note(CAP_CAF, buf, len); }
 PROP_HANDLER(MPL_FPC)        { cap_note(CAP_FPC, buf, len); }
@@ -147,10 +150,12 @@ PROP_HANDLER(MPL_FOCAL_DIST) { cap_note(CAP_DIST, buf, len); }
 static char log_line[1600];     /* only used from the (single) busy task */
 static int log_len = 0;
 
+static const char *log_path = LOG_PATH;   /* the drive test redirects this */
+
 static void log_flush(void)
 {
     if (!log_len) return;
-    FILE *f = FIO_CreateFileOrAppend(LOG_PATH);
+    FILE *f = FIO_CreateFileOrAppend(log_path);
     if (f)
     {
         FIO_WriteFile(f, log_line, log_len);
@@ -802,6 +807,288 @@ static void mpu_lab_seq_select(void *priv, int delta)
     run_in_separate_task(mpu_lab_seq_task, mpu_seq_choice);
 }
 
+/* ------------------------------------------------------------- drive test */
+/* One-shot test of the relative focus drive (9,1,5) [hi lo SPD x 00].
+ * Static RE (unverified): SPD == 0xFF makes the signed word a selector (only
+ * +-1..3 move the lens); SPD != 0xFF makes it a raw relative pulse count.
+ * Each step: read gate bytes, send, sample sharpness/luma/focus_dist/LV_LENS
+ * every ~50 ms for ~600 ms, read gate bytes again.  Nothing else is sent
+ * except a session open/close (9,0x25) around the test and a final (9,3,1)
+ * focus stop.  No (8,x) messages, no EEPROM.  Log: ML/LOGS/MPUDRIVE.LOG. */
+
+#define DRIVE_LOG_PATH   "ML/LOGS/MPUDRIVE.LOG"
+#define DRV_SAMPLE_MS    50
+#define DRV_WINDOW_MS    600
+#define DRV_MAX_SAMPLES  16
+
+static uint8_t drv_lvlens[128];
+static volatile int drv_lvlens_len = 0;
+/* PROP_LV_LENS is the same property as MPL_LENS (0x80050000); mirrored from
+ * its handler below because a second handler would be a duplicate. */
+static void drv_lvlens_note(const void *buf, unsigned int len)
+{
+    if (!buf || len > sizeof(drv_lvlens)) return;
+    memcpy(drv_lvlens, buf, len);
+    drv_lvlens_len = len;
+}
+
+static const uint32_t drv_gates[] =
+{
+    0xFFF84D4C, 0xFFF84D44, 0xFFFD8270, 0xFFFD8280, 0xFFF85D4C,
+    0xFFF81A79, 0xFFF81C89, 0xFFF81CD9, 0xFFF81C12, 0xFFF81C14,
+};
+
+/* Single-word kind 0 reads; a failure (0xFFFD8xxx may) is logged and skipped. */
+static void drv_read_gates(const char *tag, int step)
+{
+    char line[160];
+    int o = snprintf(line, sizeof(line), "%d GATES %s step=%d", get_ms_clock(), tag, step);
+    for (unsigned i = 0; i < COUNT(drv_gates); i++)
+    {
+        uint8_t b[8] = { 0 };
+        int e = MPU_MON_READ(0, drv_gates[i], 4, b);
+        if (e)
+            o += snprintf(line + o, sizeof(line) - o, " %x=ERR%d", drv_gates[i], e);
+        else
+            o += snprintf(line + o, sizeof(line) - o, " %x=%02x%02x%02x%02x",
+                          drv_gates[i], b[0], b[1], b[2], b[3]);
+        if (o > (int) sizeof(line) - 40)
+        {
+            log_add("%s\n", line);
+            o = snprintf(line, sizeof(line), "%d GATES %s step=%d(cont)", get_ms_clock(), tag, step);
+        }
+    }
+    log_add("%s\n", line);
+}
+
+/* Same centre-of-frame Laplacian as crop_rec afdiag_sharpness_ex. */
+static uint32_t drv_sharpness(int *luma_mean, uint32_t *gsum_out)
+{
+    uint32_t esum = 0, lsum = 0, gsum = 0;
+    int n = 0;
+    *luma_mean = 0;
+    *gsum_out = 0;
+
+    struct vram_info *vi = get_yuv422_vram();
+    if (!vi || !vi->vram) return 0;
+    int width = vi->width, height = vi->height, pitch = vi->pitch;
+    if (width < 64 || height < 64 || pitch < width * 2) return 0;
+
+    const uint8_t *vram = (const uint8_t *) UNCACHEABLE(vi->vram);
+    int x0 = width * 3 / 8,  x1 = width * 5 / 8;
+    int y0 = height * 3 / 8, y1 = height * 5 / 8;
+
+    for (int y = y0 + 2; y < y1 - 2; y += 2)
+    {
+        const uint8_t *row = vram + y * pitch;
+        for (int x = x0 + 2; x < x1 - 2; x += 2)
+        {
+            const uint8_t *c = row + x * 2 + 1;
+            int cv = c[0];
+            int e = 4 * cv - c[-2] - c[2] - c[-pitch] - c[pitch];
+            if (e < 0) e = -e;
+            esum += e;
+            lsum += cv;
+            int gx = c[2] - c[-2]; if (gx < 0) gx = -gx;
+            int gy = c[pitch] - c[-pitch]; if (gy < 0) gy = -gy;
+            gsum += gx + gy;
+            n++;
+        }
+    }
+    if (n)
+    {
+        *luma_mean = lsum / n;
+        *gsum_out = gsum;
+    }
+    return esum;
+}
+
+struct drv_step
+{
+    const char *name;
+    uint8_t data[5];
+};
+
+#define DS(NAME, HI, LO, SPD, X) { NAME, { HI, LO, SPD, X, 0x00 } }
+static const struct drv_step drv_steps[] =
+{
+    DS("spd07 +20",  0x00, 0x14, 0x07, 0x00),
+    DS("spd07 -20",  0xFF, 0xEC, 0x07, 0x00),
+    DS("spd07 +100", 0x00, 0x64, 0x07, 0x00),
+    DS("spd07 -100", 0xFF, 0x9C, 0x07, 0x00),
+    DS("spd07 +300", 0x01, 0x2C, 0x07, 0x00),
+    DS("spd07 -300", 0xFE, 0xD4, 0x07, 0x00),
+    DS("spd01 +100", 0x00, 0x64, 0x01, 0x00),
+    DS("spd01 -100", 0xFF, 0x9C, 0x01, 0x00),
+    DS("spd00 +100", 0x00, 0x64, 0x00, 0x00),
+    DS("spd00 -100", 0xFF, 0x9C, 0x00, 0x00),
+    DS("FF form +3", 0x00, 0x03, 0xFF, 0xFF),
+    DS("FF form -3", 0xFF, 0xFD, 0xFF, 0xFF),
+};
+
+struct drv_result
+{
+    int d0, d1;
+    int s0, s1;      /* edge sum first / last sample */
+    int ret;
+    int done;        /* FOCUS_DONE event count */
+};
+
+static struct drv_result drv_res[COUNT(drv_steps)];
+
+static void mpu_lab_drive_task(int unused)
+{
+    (void) unused;
+    if (mpu_lab_busy) return;
+    mpu_lab_busy = 1;
+
+    int opened = 0, session = 0, aborted = 0, nsteps = 0;
+    static const uint8_t stop = 0;
+    static const uint8_t zeros[16] = { 0 };
+    static const uint8_t open_s[16] = { 0x02 };
+
+    if (mpu_lab_refuse()) goto out;
+    if (!lv || is_manual_focus())
+    {
+        NotifyBox(4000, "Drive test: needs LiveView and AF mode");
+        goto out;
+    }
+
+    NotifyBox(4000, "Drive test (9,1): close menu now");
+    msleep(1500);
+    for (int i = 0; i < 70 && gui_menu_shown(); i++) msleep(100);
+    if (seq_must_abort())
+    {
+        NotifyBox(4000, "Drive test: aborted (menu open / no LV / recording)");
+        goto out;
+    }
+
+    log_path = DRIVE_LOG_PATH;
+    log_len = 0;
+    log_add("# MPUDRIVE t=%d lens=\"%s\" zoom=x%d crop_preset=n/a (see crop_rec) dist0=%d\n"
+            "# step lines: STEP id name payload; then GATES pre/post, SEND ret, FOCUS_DONE count,\n"
+            "# samples 'ms s g luma dist' (ms from send)\n",
+            get_ms_clock(), lens_info.name, lv_dispsize, (int) lens_info.focus_dist);
+
+    int e = MPU_MON_OPEN();
+    opened = 1;
+    log_add("%d MONOPEN err=%d\n", get_ms_clock(), e);
+
+    cap_begin();
+    cap_send(9, 0x25, 16, open_s);      /* same session open as the drive sequences */
+    session = 1;
+    msleep(300);
+    cap_active = 0;
+    log_add("%d SESSION open ret=%s\n", get_ms_clock(), win_ret);
+
+    for (unsigned i = 0; i < COUNT(drv_steps); i++)
+    {
+        const struct drv_step *st = &drv_steps[i];
+        if (seq_must_abort())
+        {
+            aborted = 1;
+            break;
+        }
+        struct drv_result *r = &drv_res[i];
+        char h[24];
+        hex_str(h, sizeof(h), st->data, 5);
+        log_add("%d STEP %d \"%s\" payload=[%s]\n", get_ms_clock(), (int) i + 1, st->name, h);
+
+        drv_read_gates("pre", i + 1);
+
+        int dist0 = lens_info.focus_dist;
+        cap_begin();
+        int t0 = get_ms_clock();
+        int ret = cap_send(9, 0x01, 5, st->data);
+        log_add("%d SEND ret=%d dist0=%d\n", t0, ret, dist0);
+
+        static struct { int t, s, g, luma, dist; } smp[DRV_MAX_SAMPLES];
+        int n = 0;
+        int lvl[4] = { 0 };
+        while (n < DRV_MAX_SAMPLES && get_ms_clock() - t0 <= DRV_WINDOW_MS)
+        {
+            int m;
+            uint32_t g;
+            smp[n].s = drv_sharpness(&m, &g);
+            smp[n].g = g;
+            smp[n].luma = m;
+            smp[n].dist = lens_info.focus_dist;
+            smp[n].t = get_ms_clock() - t0;
+            n++;
+            msleep(DRV_SAMPLE_MS);
+        }
+        cap_active = 0;
+
+        /* LV_LENS bytes 0x20..0x2F as four BE words, if the property arrived */
+        if (drv_lvlens_len >= 0x30)
+            for (int k = 0; k < 4; k++)
+                lvl[k] = (drv_lvlens[0x20 + 4*k] << 24) | (drv_lvlens[0x21 + 4*k] << 16) |
+                         (drv_lvlens[0x22 + 4*k] << 8) | drv_lvlens[0x23 + 4*k];
+        char dh[24];
+        hex_str(dh, sizeof(dh), caps[CAP_DONE].val, caps[CAP_DONE].vlen < 4 ? caps[CAP_DONE].vlen : 4);
+        log_add("%d RESULT step=%d FOCUS_DONE n=%d val=[%s] fpc n=%d cmd n=%d LV_LENS len=%d w=%08x %08x %08x %08x\n",
+                get_ms_clock(), (int) i + 1, caps[CAP_DONE].count, dh,
+                caps[CAP_FPC].count, caps[CAP_CMD].count, drv_lvlens_len,
+                lvl[0], lvl[1], lvl[2], lvl[3]);
+        log_add("# ms s g luma dist\n");
+        for (int k = 0; k < n; k++)
+            log_add("%d %d %d %d %d\n", smp[k].t, smp[k].s, smp[k].g, smp[k].luma, smp[k].dist);
+
+        drv_read_gates("post", i + 1);
+
+        r->d0 = dist0;
+        r->d1 = lens_info.focus_dist;
+        r->s0 = n ? smp[0].s : 0;
+        r->s1 = n ? smp[n - 1].s : 0;
+        r->ret = ret;
+        r->done = caps[CAP_DONE].count;
+        nsteps++;
+        log_flush();
+        msleep(200);
+    }
+
+    /* always: stop, close the session, close the monitor */
+    cap_begin();
+    cap_send(9, 3, 1, &stop);
+    msleep(500);
+    cap_active = 0;
+    log_add("%d STOP ret=%s dist=%d\n", get_ms_clock(), win_ret, (int) lens_info.focus_dist);
+    if (session)
+    {
+        cap_begin();
+        cap_send(9, 0x25, 16, zeros);
+        msleep(1000);
+        cap_active = 0;
+        log_add("%d SESSION close ret=%s\n", get_ms_clock(), win_ret);
+    }
+    if (opened) MPU_MON_CLOSE();
+    log_add("%d END steps=%d aborted=%d\n\n", get_ms_clock(), nsteps, aborted);
+    if (!RECORDING) log_flush();
+    log_len = 0;
+    log_path = LOG_PATH;
+
+    /* one NotifyBox per step: dist before->after, sharpness change in % */
+    for (int i = 0; i < nsteps; i++)
+    {
+        struct drv_result *r = &drv_res[i];
+        int pct = r->s0 ? (int) (((int64_t) r->s1 - r->s0) * 100 / r->s0) : 0;
+        NotifyBox(3000, "%d %s: dist %d>%d s %+d%% done%d", i + 1, drv_steps[i].name,
+                  r->d0, r->d1, pct, r->done);
+        msleep(3000);
+    }
+    NotifyBox(5000, "Drive test %s: MPUDRIVE.LOG", aborted ? "ABORTED" : "done");
+
+out:
+    mpu_lab_busy = 0;
+}
+
+static void mpu_lab_drive_select(void *priv, int delta)
+{
+    (void) priv;
+    (void) delta;
+    run_in_separate_task(mpu_lab_drive_task, 0);
+}
+
 /* --------------------------------------------------------------- notices */
 /* Neither TVAFLOG nor AF_LENS_SEARCH can be reached through the confirmed
  * ICU dispatch: the monitor text parser is serial-console-only and TVAFLOG
@@ -925,6 +1212,14 @@ static struct menu_entry mpu_lab_menu[] =
                 .select = mpu_lab_seq_select,
                 .help = "Run the sequence. Close the menu; it aborts if the menu reopens.",
                 .help2 = "Also aborts on recording or leaving LiveView; stop/close are still sent."
+            },
+            {
+                .name = "Drive test (9,1)",
+                .select = mpu_lab_drive_select,
+                .help = "One-shot relative focus drive test (9,1,5); logs ML/LOGS/MPUDRIVE.LOG.",
+                .help2 = "Needs LiveView + AF mode, menu closed. Sends SPD 07/01/00 raw counts and the FF form,\n"
+                         "alternating +/-, with gate bytes read before/after and a sharpness/dist trace.\n"
+                         "Lens ends near where it started; always ends with focus stop + session close."
             },
             MENU_EOL,
         }
