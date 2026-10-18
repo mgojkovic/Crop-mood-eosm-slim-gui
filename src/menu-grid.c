@@ -15,11 +15,11 @@ extern void lens_display_set_dirty(void);
 
 #ifdef CONFIG_SLIM_MENUS
 
-#define GRID_COLS       2
+#define GRID_COLS       3
 #define GRID_ROWS       2
 #define GRID_COUNT      (GRID_COLS * GRID_ROWS)
 /* One spacing value: left = mid = right = top = between = bottom. */
-#define GRID_SPACE      40
+#define GRID_SPACE      30
 #define GRID_RADIUS     36
 #define GRID_SEL_BORDER 6
 #define GRID_LABEL_PAD  16   /* baseline inset from bottom of each card */
@@ -122,12 +122,14 @@ static const grid_tile_t grid_tiles[GRID_COUNT] =
     { "Monitoring", "Overlay",  ICON_ML_OVERLAY },
     { "Movie",      "Movie",    ICON_ML_MOVIE   },
     { "Settings",   "Settings", ICON_ML_PREFS   },
+    { "Focus",      "Focus",    ICON_ML_FOCUS   }, /* ML lens control (AF work) */
+    { "Modules",    "Modules",  ICON_ML_MODULES },
 };
 
 static void grid_layout(int *ox, int *oy, int *cw, int *ch)
 {
-    *cw = (720 - 3 * GRID_SPACE) / GRID_COLS;
-    *ch = (480 - 3 * GRID_SPACE) / GRID_ROWS;
+    *cw = (720 - (GRID_COLS + 1) * GRID_SPACE) / GRID_COLS;
+    *ch = (480 - (GRID_ROWS + 1) * GRID_SPACE) / GRID_ROWS;
     *ox = GRID_SPACE;
     *oy = GRID_SPACE;
 }
