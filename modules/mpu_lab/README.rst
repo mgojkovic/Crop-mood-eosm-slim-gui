@@ -1,11 +1,14 @@
 mpu_lab
-========
+=======
 
-Please write a one-page description for your module here.
+Temporary EOS M (2.0.2) MPU investigation tool.  Menu: **Focus -> MPU lab**.
 
-You may also add some metadata:
+- Dump memory: read-only dumps through Canon's MPU monitor to
+  ``ML/LOGS/MPU-*.BIN``; stops on a MonRead error, logs byte counts, 00/FF counts
+  and a checksum, and says if the dump looks empty.
+- MPU command: one raw ICU->MPU message, with reply capture.
+- MPU sequence: session / drive / search sequences, always ending with a focus
+  stop and a session close.
+- Every command logs the MPU->ICU replies to ``ML/LOGS/MPULAB.LOG``.
 
-:Author: <your name here>
-:License: <your license here>
-:Website: <your website here>
-
+Needs an empty ``ML/SETTINGS/mpu_lab.en`` to load.

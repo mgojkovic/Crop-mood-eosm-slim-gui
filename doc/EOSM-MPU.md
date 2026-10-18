@@ -255,17 +255,54 @@ why the MPU ROM/EEPROM dump comes first.
 New temporary module: [`modules/mpu_lab`](../modules/mpu_lab). It is in the slim
 module list in [`modules/Makefile.modules.user`](../modules/Makefile.modules.user).
 
-Menu: **Settings → MPU lab**, with:
+Menu: **Focus → MPU lab** (the slim GUI's Focus tile is short and reachable;
+Settings was not). Entries:
 
 1. **Dump memory** — `ROM 1 MB`, `EEPROM 64 KB`, `RAM 24 KB`, `test 4 KB`
-2. **Run dump** — read-only, starts after 2 s, writes `ML/LOGS/MPU-*.BIN`
+2. **Run dump** — read-only, starts after 2 s, writes `ML/LOGS/MPU-*.BIN`.
+   Checks `MpuMonOpen` and every 1 KB `MpuMonRead` return value (non-zero =
+   error: stop, show code and offset), always calls `MpuMonClose`, sleeps 10 ms
+   per chunk, and logs the result (see below). The screen says if the dump is
+   all 00 or all FF.
 3. **MPU command** — raw one-shot commands:
    - `(9,0x13,4)` search-drive variants (`[0/1, end, speed, 0]`)
    - `(9,0x01,5)` focus drive with speed byte `0x07`, ±1/15/50
    - `(9,0x25,16)` AF session `02/00/01`
    - `(9,0x03,1)` focus stop, `(9,0x0B,2)` focus state
 4. **Run command** — sends the selected raw message after 1.5 s; refused while
-   recording; a stop is sent after the two drive commands
+   recording; a stop is sent after the drive/search commands
+5. **MPU sequence** / **Run sequence** — multi-step tests (table
+   `mpu_seqs` in `mpu_lab.c`, easy to extend):
+
+   | Sequence | Steps (then always: `(9,3,1)` stop, and session close if opened) |
+   |---|---|
+   | session + drive spd7 | `(9,0x25,16)` `[02,0…]` → 200 ms → `(9,1,5)` `[00 32 07 00 00]` → 800 ms → `[FF CE 07 00 00]` → 800 ms |
+   | session + drive ML form | same with `[00 32 FF FF 00]` / `[FF CE FF FF 00]` |
+   | search near/far | `(9,0x13,4)` `[00 01 07 00]` → 1.5 s → stop → `[00 00 07 00]` → 1.5 s → stop |
+   | session + search | open session, the search pair, stop |
+
+   Session close is `(9,0x25,16)` with an all-zero payload. Sequences need LV,
+   wait up to 7 s for you to close the menu, and abort between steps if
+   recording starts, LV is lost or the menu is opened; the final stop/close is
+   still sent.
+
+**Reply capture.** `mpu_lab` has its own `PROP_HANDLER`s for the MPU→ICU
+properties `0x80050000` LV_LENS, `0x80050002` LV_FOCUS_DONE, `0x8005001B`,
+`0x8005001E` (focus pulse count), `0x80050027`, `0x80050028`, `0x80050029`
+LV_AF_RESULT and `0x80050045` focal distance. From the send until the end of
+the step (2 s for single commands; the step's wait time in a sequence) each
+handler counts arrivals and keeps the first 8 bytes of the last value. Handlers
+never touch the file; the command task writes the log afterwards and shows a
+NotifyBox such as `done:3 fpc:0 cmd:1 dist 98->85`.
+
+**`ML/LOGS/MPULAB.LOG`** (appended; timestamps are `get_ms_clock()`):
+
+```
+<ms> CMD name=<cmd> seq=<seq|-> step=<n> sent=[GG.OO.LL:hex bytes | ...] ret=<r1,r2> dist=<before>-><after> win=<ms>ms
+<ms> REPLY name=<cmd> prop=<hex> tag=<tag> n=<arrivals> len=<last length> last=[first 8 bytes hex]
+        (one REPLY line per watched property, n=0 when nothing arrived)
+<ms> DUMP file=<f> kind=<k> addr=<hex> req=<n> got=<n> zero=<n> ff=<n> sum=<hex32> empty=<YES|no> result=<ok|ERROR> err=<code>@<offset> ms=<t>
+```
 
 The module uses Canon's MPU monitor addresses directly and the ICU packet
 builder at `0x38C4`. It does **not** write EEPROM or MPU memory.
@@ -321,15 +358,16 @@ or to check the **Modules** menu for a link error.
 1. Boot the camera with the card.
 2. **Settings → AF diag log → ON + MPU** (captures raw `@MPU` sends in
    `ML/LOGS/AFDIAG.LOG`).
-3. **Settings → MPU lab**.
+3. **Focus → MPU lab**.
 4. First run **Dump memory → test 4 KB → Run dump**. This proves the monitor
    works before a long read.
 5. Then **ROM 1 MB → Run dump**; optionally EEPROM and RAM.
-6. Copy `ML/LOGS/MPU-*.BIN` and `ML/LOGS/AFDIAG.LOG` off the card.
+6. Copy `ML/LOGS/MPU-*.BIN`, `ML/LOGS/MPULAB.LOG` and `ML/LOGS/AFDIAG.LOG` off the card.
 
 For a raw test, start with **`search end1 spd7`** or **`focus +15 spd7`**,
 one command per run, and watch the lens / `focus_dist`. The `session` commands
-should wait until the MPU ROM has been inspected.
+should wait until the MPU ROM has been inspected, or be run via the
+**MPU sequence** entries (which close the session afterwards).
 
 ## 8. Next steps (in order)
 
