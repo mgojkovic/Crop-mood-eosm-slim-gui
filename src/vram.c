@@ -447,6 +447,11 @@ void yuv422_buffer_check()
     }
 }
 
+uint32_t get_yuv422_lv_display_addr(void)
+{
+    return YUV422_LV_BUFFER_DISPLAY_ADDR;
+}
+
 static inline void * get_yuv422buffer(int offset)
 {
     /* 5D3 1.2.3 has quad-buffered LV, so the old switch can't work */

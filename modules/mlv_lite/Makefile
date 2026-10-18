@@ -2,6 +2,10 @@
 # define the module name - make sure name is max 8 characters
 MODULE_NAME=mlv_lite
 MODULE_OBJS=mlv_lite.o ../mlv_rec/mlv.o ../silent/lossless.o
+# When built from platform/MODEL.*, pass CONFIG_EOSM etc. into the module.
+ifdef MODEL
+MODULE_CFLAGS += -DCONFIG_$(MODEL)=1
+endif
 
 # include modules environment
 include ../Makefile.modules

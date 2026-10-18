@@ -15,6 +15,7 @@
 #include <lens.h>
 #include <focus.h>
 #include <vram.h>
+#include <zebra.h>
 #include "../mlv_lite/mlv_lite.h"
 #include "../dual_iso/dual_iso.h"
 #include "histogram.h"
@@ -8374,7 +8375,7 @@ static int eosm_lv_guard_pipeline_ready(void)
 
     /* Dimensions alone are not enough: early boot may still expose the
      * previous RAW geometry while Canon is replacing the actual buffers. */
-    display_buffer = YUV422_LV_BUFFER_DISPLAY_ADDR;
+    display_buffer = get_yuv422_lv_display_addr();
     if (raw_info.width <= 0 || raw_info.height <= 0 || raw_info.pitch <= 0 ||
         !raw_info.buffer || !display_buffer)
         return 0;
@@ -8444,11 +8445,11 @@ static int eosm_lv_guard_display_luma_max(void)
     static const uint8_t x_pos[] = { 2, 4, 6, 8 };
     static const uint8_t y_pos[] = { 3, 5, 7 };
 
-    if (!YUV422_LV_BUFFER_DISPLAY_ADDR || width < 64 || height < 64 ||
+    if (!get_yuv422_lv_display_addr() || width < 64 || height < 64 ||
         pitch < width * 2)
         return 255; /* unavailable data is handled by the geometry guard */
 
-    vram = (const uint8_t *)UNCACHEABLE(YUV422_LV_BUFFER_DISPLAY_ADDR);
+    vram = (const uint8_t *)UNCACHEABLE(get_yuv422_lv_display_addr());
     for (y = 0; y < COUNT(y_pos); y++)
     {
         int py = height * y_pos[y] / 10;
