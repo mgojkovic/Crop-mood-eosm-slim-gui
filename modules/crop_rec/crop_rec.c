@@ -6394,17 +6394,30 @@ static void afdiag_sweep_phase(int phase, int signed_size, int end_dist, int cap
  * same waiting way (same nominal travel).  @SWEEP: w0 = signed nominal
  * steps, w1 = 3 (control) or 15 (variant), w2 = elapsed ms,
  * w3 = focus_dist before << 16 | after. */
+/* Field run 14: in movie mode every command was acknowledged (~30 ms each)
+ * yet focus never moved, and the earlier "movement" turned out to be
+ * unrelated.  ML's own focus stacking refuses movie mode on all cameras but
+ * the 5D2 (src/focus.c), so the drive is probably gated by movie mode.
+ * Now: lens_focus 100 x size 3, each way, in whatever mode the camera is in.
+ * w1 = movie << 12 | lv_dispsize << 4 | size, so one session can compare
+ * photo/movie and x1/x5.  A @STEP_SHARP follows each move (w1 = before,
+ * w2 = 300 ms after). */
 static void afdiag_ab_move(int dir, int variant)
 {
+    (void)variant;
+    int m, n, x;
+    uint32_t s0 = afdiag_sharpness(&m, &n, &x);
     int t0 = get_ms_clock();
     int d0 = lens_info.focus_dist;
-    if (!variant)
-        lens_focus(dir * 60, 3, 1, 0);
-    else
-        for (int i = 0; i < 12 && afdiag_lens_test == 2; i++)
-            if (!afdiag_remote_cmd_wait(dir * 15)) break;
-    afdiag_record(AFD_EV_SWEEP, 16, dir * 180, variant ? 15 : 3,
-                  get_ms_clock() - t0, ((d0 & 0xFFFF) << 16) | (lens_info.focus_dist & 0xFFFF));
+    lens_focus(dir * 100, 3, 1, 0);
+    int elapsed = get_ms_clock() - t0;
+    int d1 = lens_info.focus_dist;
+    msleep(300);
+    uint32_t s1 = afdiag_sharpness(&m, &n, &x);
+    afdiag_record(AFD_EV_SWEEP, 16, dir * 300,
+                  (is_movie_mode() << 12) | ((lv_dispsize & 0xFF) << 4) | 3,
+                  elapsed, ((d0 & 0xFFFF) << 16) | (d1 & 0xFFFF));
+    afdiag_record(AFD_EV_STEP_SHARP, 16, dir * 100, s0, s1, m);
     msleep(1500);
 }
 
@@ -6413,8 +6426,6 @@ static void afdiag_sweep(int size)
     (void)size;
     afdiag_ab_move(+1, 0);
     afdiag_ab_move(-1, 0);
-    afdiag_ab_move(+1, 1);
-    afdiag_ab_move(-1, 1);
 }
 
 /* Lens test (choice 1 "Remote": bursts of remote commands, size 3 vs 15;
@@ -6430,7 +6441,9 @@ static void afdiag_lens_task(void *unused)
     {
         msleep(100);
         if (!afdiag_lens_test) { last_skip = 0; continue; }
-        if (!lv || !is_movie_mode()) continue;
+        if (!lv) continue;
+        /* Remote bursts stay movie-only; A/B also runs in photo LV. */
+        if (afdiag_lens_test == 1 && !is_movie_mode()) continue;
 
         int now = get_ms_clock();
         if (now - last_step < AFDIAG_LENS_PERIOD) continue;
@@ -6448,7 +6461,8 @@ static void afdiag_lens_task(void *unused)
                 afdiag_record(AFD_EV_LENS_SKIP, 4, skip, 0, 0, 0);
                 /* say it on screen too: the first field test silently did nothing */
                 if (skip == 1) NotifyBox(3000, "AF lens test: lens is in MF");
-                if (skip == 2) NotifyBox(3000, "AF lens test: turn off Movie Servo AF");
+                if (skip == 2) NotifyBox(3000, is_movie_mode() ? "AF lens test: turn off Movie Servo AF"
+                                                               : "AF lens test: turn off Continuous AF");
             }
             last_skip = skip;
             last_step = now;
@@ -6533,8 +6547,8 @@ static struct menu_entry afdiag_menu[] = {
         .choices   = CHOICES("OFF", "Remote", "A/B"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
-        .help      = "TEMPORARY: move the focus motor back and forth in movie LV.",
-        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms. A/B: lens_focus 60 x size 3 vs 12 x size 15, each way.\n"
+        .help      = "TEMPORARY: move the focus motor back and forth in LV.",
+        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms (movie only). A/B: lens_focus 100 x size 3 each way, photo or movie.\n"
                      "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
