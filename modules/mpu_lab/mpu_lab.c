@@ -15,6 +15,46 @@
  *     be tested, including the (9,0x13) lens search drive and (9,0x01) focus
  *     drive with Canon's speed byte.
  *
+ *  3. EXPERIMENTAL: group 8 is the MPU monitor / factory-debug channel.  The
+ *     ICU ROM functions prove the exact format (EOS M 2.0.2, ICU ROM):
+ *
+ *       MpuMonRead  (0xFF1DD2B8) -> (8, 1, 13) payload
+ *           [kind:4 BE][addr:4 BE][size:4 BE][00]   (size is chunked to 16)
+ *       MpuMonWrite (0xFF1DD474) -> (8, 0, 17+n) payload
+ *           [kind:4 BE][addr:4 BE][size:4 BE][data:n][~sum(data):4 BE][00]
+ *
+ *     The MPU-side group 8 receive/consumer path (MPU ROM): 0x552B0 copies a
+ *     32-byte payload to RAM 0xFFF84CEB and enqueues (group, subcommand);
+ *     0x559E0 handles it (op 1 = read, op 0 = write, op 2 = EXEC/type 2).
+ *     For op 2 it reads bytes 4..7 of the payload as a big-endian index into
+ *     the 128-entry handler table at MPU ROM 0x1417C and calls
+ *     handler(index) with r4 = 0xFFF80000.
+ *
+ *     0x1417C[16] = 0x33794.  The corrected monitor command table (name first
+ *     at MPU ROM 0x147B0/+0, handler at +0x24, stride 0x28) gives
+ *     AF_LENS_SEARCH = 0x33794, TVAFLOG = 0x6F81A (argc==4, three hex args,
+ *     usage strings 0x150E8/0x15118/0x15144/0x1516C), EXEC = 0x6F526,
+ *     VLENS_SET = 0x6FCD2, VLENS_DRIVE = 0x6FDAC, EEPR = 0x6EAF4,
+ *     EEPW = 0x6EB7C, UPBNY = 0x70574, ABOUT_LENS = 0x206FE.
+ *
+ *     So (8, 2, 32) with payload[4..7] = 00 00 00 10 is the candidate
+ *     "run AF_LENS_SEARCH" message (confirmed in MPU disassembly, unverified
+ *     on camera).  The 0x38C4 builder writes the size byte itself: the wire
+ *     bytes are 24 08 02 00 00 00 00 00 00 00 10 then 24 zero bytes (35 bytes
+ *     total).  Expected reply record: 08 08 02 <BE32 ret> 00.  That reply is a
+ *     raw group 8 message, not an 0x8005xxxx property, so the REPLY lines of
+ *     MPULAB.LOG will not show it; the module logs an EXPECT line instead.
+ *     The no-op control is index 0x14 = 0x71892 (an rts stub); index 0 =
+ *     0x30E4C is a lens-command-family worker and is a probe as well.  Indices
+ *     0x4C/0x4D = 0x1C610/0x1C612 are rts stubs in the 0x1C1xx AF family and
+ *     0x50 = 0x1C554 is an AF-family worker.
+ *
+ *     The monitor text parser itself (0x71CAC/0x71D2A) is serial-console-only;
+ *     TVAFLOG needs argc/argv and is therefore NOT reachable from any ICU
+ *     message found so far.  AF_LENS_SEARCH (0x33794) is reachable only via
+ *     the unverified (8,2) EXEC route above; (9,0x25)+(9,0x13) remains the
+ *     search proxy.
+ *
  * SAFETY: the dumps are read-only.  Raw messages are one-shot, delayed by
  * 1.5 s, and refused while recording.  Do not add EEPROM/MEMW experiments
  * here until the MPU ROM has been dumped and disassembled.
@@ -117,6 +157,40 @@ static void log_flush(void)
         FIO_CloseFile(f);
     }
     log_len = 0;
+}
+
+static void log_add(const char *fmt, ...);
+
+/* Read a 32-bit word from the MPU through Canon's monitor.  Tries kind 0..2
+ * because the EOS M RAM kind is not documented; logs each attempt. */
+static volatile uint32_t exp_shutter, exp_aperture, exp_iso, exp_bv;
+static volatile uint32_t exp_lvstate, exp_dispsize;
+
+PROP_HANDLER(PROP_SHUTTER)   { if (buf && len >= 4) exp_shutter   = *(uint32_t *)buf; }
+PROP_HANDLER(PROP_APERTURE)  { if (buf && len >= 4) exp_aperture  = *(uint32_t *)buf; }
+PROP_HANDLER(PROP_ISO)       { if (buf && len >= 4) exp_iso       = *(uint32_t *)buf; }
+PROP_HANDLER(PROP_LV_BV)     { if (buf && len >= 4) exp_bv        = *(uint32_t *)buf; }
+PROP_HANDLER(PROP_LV_STATE)  { if (buf && len >= 4) exp_lvstate   = *(uint32_t *)buf; }
+PROP_HANDLER(PROP_LV_DISPSIZE) { if (buf && len >= 4) exp_dispsize = *(uint32_t *)buf; }
+
+static void mpu_log_exposure(const char *tag)
+{
+    log_add("%d EXP %s shutter=%x aperture=%x iso=%x bv=%x lvstate=%x dispsize=%x\n",
+            get_ms_clock(), tag, exp_shutter, exp_aperture, exp_iso,
+            exp_bv, exp_lvstate, exp_dispsize);
+}
+
+static void mpu_log_read(const char *tag, uint32_t addr)
+{
+    uint8_t b[8];
+    for (int kind = 0; kind <= 2; kind++)
+    {
+        memset(b, 0, sizeof(b));
+        int e = MPU_MON_READ(kind, addr, 4, b);
+        log_add("%d MON %s kind=%d addr=%x err=%d val=%02x%02x%02x%02x\n",
+                get_ms_clock(), tag, kind, addr, e, b[0], b[1], b[2], b[3]);
+        if (!e) break;
+    }
 }
 
 static void log_add(const char *fmt, ...)
@@ -334,14 +408,17 @@ static void mpu_lab_dump_select(void *priv, int delta)
 
 /* ------------------------------------------------------------- raw commands */
 
+#define MPU_CMD_DATA   32
+
 struct mpu_cmd
 {
     uint8_t grp;
     uint8_t op;
     uint8_t len;
-    uint8_t data[16];
+    uint8_t data[MPU_CMD_DATA];
     uint8_t stop_after;    /* send (9,3,1) after the settle time */
     const char *name;
+    uint16_t win_ms;       /* capture/settle window; 0 = default */
 };
 
 /* Payload notes:
@@ -351,7 +428,25 @@ struct mpu_cmd
  *    0x07 = driving speed.  ML's property path always sends [hi lo FF FF 00].
  *  - (9,0x25,16) AF session: Canon EOS M sends [02 00 ...] on half-press.
  *  - (9,0x0B,2) is PROP_LV_FOCUS_STATE, not AF_RESULT when sent to the MPU.
+ *  - (8,1,13) is Canon's own MpuMonRead request: [kind][addr][size][00], all
+ *    32-bit big-endian (see the header comment).  Read-only.
+ *  - (8,2,32) is the candidate factory-debug EXEC message that reaches the
+ *    MPU group 8 consumer: the 32-byte payload is copied to RAM 0xFFF84CEB,
+ *    and the big-endian dword at payload[4..7] is the 0x1417C handler index.
+ *    0x1417C[16] = 0x33794 = the corrected AF_LENS_SEARCH handler.  The
+ *    (8,2,13) variants use the same consumer with the ICU's 13-byte layout.
+ *    Exposed indices: 0x00 (0x30E4C lens-family worker), 0x0F (0x33730),
+ *    0x10 (0x33794 AF_LENS_SEARCH), 0x14 (0x71892 no-op stub control),
+ *    0x4C/0x4D (0x1C610/0x1C612 AF-region rts stubs), 0x50 (0x1C554
+ *    AF-family worker).  UNVERIFIED ON CAMERA - all experimental.
+ *  - (7,8,1) is the assistmpu/COM_CPU "finish" byte, a low-risk group 7 probe.
  */
+#define X8_EXEC(IDX) \
+    { 0, 0, 0, 0, 0, 0, 0, (IDX), 0, 0, 0, 0, 0 }
+#define X8_EXEC32(IDX) \
+    { 0, 0, 0, 0, 0, 0, 0, (IDX), 0, 0, 0, 0, 0, 0, 0, 0, \
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
 static const struct mpu_cmd mpu_cmds[] =
 {
     { 9, 0x13, 4, { 0x00, 0x01, 0x07, 0x00 }, 1, "search end1 spd7" },
@@ -370,7 +465,25 @@ static const struct mpu_cmd mpu_cmds[] =
     { 9, 0x25, 16, { 0x01 }, 0, "session 01" },
     { 9, 0x03, 1, { 0x00 }, 0, "focus stop" },
     { 9, 0x0B, 2, { 0x00, 0x00 }, 0, "focus state 0" },
-    { 9, 0x0B, 2, { 0x02, 0x00 }, 0, "focus state 2" }
+    { 9, 0x0B, 2, { 0x02, 0x00 }, 0, "focus state 2" },
+
+    /* Experimental group 8 / group 7 probes.  Everything below is UNVERIFIED
+     * on camera; the (8,2) entries reach the MPU group 8 EXEC consumer and
+     * call an MPU handler by index.  Keep all of them one-shot. */
+    { 8, 0x02, 32, X8_EXEC32(0x10), 0, "E 8.2.32 AF_SEARCH idx16", 6000 },
+    { 8, 0x02, 32, X8_EXEC32(0x10), 0, "AF search (MPU) 8s", 8000 },
+    { 8, 0x02, 32, X8_EXEC32(0x10), 0, "AF search (MPU) 2s + stop", 2000 },
+    { 8, 0x02, 32, X8_EXEC32(0x14), 0, "E 8.2.32 no-op ctl idx20" },
+    { 8, 0x02, 32, X8_EXEC32(0x00), 0, "E 8.2.32 lens? ctl idx0" },
+    { 8, 0x02, 13, X8_EXEC(0x10), 0, "E 8.2.13 AF_SEARCH idx16" },
+    { 8, 0x02, 13, X8_EXEC(0x14), 0, "E 8.2.13 no-op ctl idx20" },
+    { 8, 0x02, 13, X8_EXEC(0x0F), 0, "E 8.2.13 idx15 0x33730" },
+    { 8, 0x02, 13, X8_EXEC(0x4C), 0, "E 8.2.13 AFstub idx4C" },
+    { 8, 0x02, 13, X8_EXEC(0x4D), 0, "E 8.2.13 AFstub idx4D" },
+    { 8, 0x02, 13, X8_EXEC(0x50), 0, "E 8.2.13 AFfam idx50" },
+    { 8, 0x01, 13, { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0 }, 0,
+      "E 8.1 MonRead raw @0" },
+    { 7, 0x08, 1, { 0x00 }, 0, "E 7.8 COM_CPU finish" }
 };
 
 static const char * mpu_cmd_choices[] =
@@ -380,7 +493,16 @@ static const char * mpu_cmd_choices[] =
     "focus +1 spd7", "focus +15 spd7", "focus +50 spd7",
     "focus -15 spd7", "focus -50 spd7",
     "session 02", "session 00", "session 01",
-    "focus stop", "focus state 0", "focus state 2"
+    "focus stop", "focus state 0", "focus state 2",
+    "E 8.2.32 AF_SEARCH idx16", "AF search (MPU) 8s",
+    "AF search (MPU) 2s + stop",
+    "E 8.2.32 no-op ctl idx20",
+    "E 8.2.32 lens? ctl idx0",
+    "E 8.2.13 AF_SEARCH idx16", "E 8.2.13 no-op ctl idx20",
+    "E 8.2.13 idx15 0x33730",
+    "E 8.2.13 AFstub idx4C", "E 8.2.13 AFstub idx4D",
+    "E 8.2.13 AFfam idx50",
+    "E 8.1 MonRead raw @0", "E 7.8 COM_CPU finish"
 };
 
 static int mpu_cmd_choice = 0;
@@ -395,6 +517,57 @@ static void mpu_lab_cmd_task(int idx)
 
     const struct mpu_cmd *c = &mpu_cmds[idx];
 
+    /* Strict bounds for the group 8 probes: the EXEC index is the second
+     * 32-bit big-endian payload word and must be one of the handlers we have
+     * reviewed in the MPU ROM.  Nothing outside this list can be sent, even if
+     * the table is edited carelessly. */
+    uint32_t exec_index = 0;
+    int is_exec = 0;
+    if (c->grp == 8)
+    {
+        if (c->op != 0x01 && c->op != 0x02)
+        {
+            NotifyBox(5000, "MPU lab: group 8 op %d refused", c->op);
+            goto out;
+        }
+        if (c->op == 0x01 && c->len != 13)
+        {
+            NotifyBox(5000, "MPU lab: MonRead len %d refused", c->len);
+            goto out;
+        }
+        if (c->op == 0x02)
+        {
+            if (c->len != 13 && c->len != 32)
+            {
+                NotifyBox(5000, "MPU lab: exec len %d refused", c->len);
+                goto out;
+            }
+            is_exec = 1;
+            exec_index = ((uint32_t) c->data[4] << 24) |
+                         ((uint32_t) c->data[5] << 16) |
+                         ((uint32_t) c->data[6] << 8) |
+                         (uint32_t) c->data[7];
+            if (exec_index != 0x00 && exec_index != 0x0F &&
+                exec_index != 0x10 && exec_index != 0x14 &&
+                exec_index != 0x4C && exec_index != 0x4D &&
+                exec_index != 0x50)
+            {
+                NotifyBox(5000, "MPU lab: exec index %x refused", exec_index);
+                goto out;
+            }
+        }
+    }
+
+    /* The 00:19 test hung when AF search was started with the lens already at
+     * infinity.  Refuse that known-bad state; move focus in first. */
+    if (is_exec && exec_index == 0x10 && lens_info.focus_dist >= 60000)
+    {
+        log_add("%d REFUSE AF search: lens at infinity (%d)\n",
+                get_ms_clock(), lens_info.focus_dist);
+        NotifyBox(5000, "MPU lab: lens at infinity - focus nearer first");
+        goto out;
+    }
+
     NotifyBox(2500, "MPU lab: %s", c->name);
     msleep(1500);
     if (RECORDING)
@@ -403,15 +576,62 @@ static void mpu_lab_cmd_task(int idx)
         goto out;
     }
 
+    /* Extra confirmation: the group 8 EXEC probes run an MPU-internal
+     * function by index (0x1417C[]), which is not verified on camera.
+     * Everything is still one-shot and logged. */
+    if (is_exec)
+    {
+        NotifyBox(2500, "EXPERIMENTAL exec idx%02X in 2 s", exec_index);
+        msleep(2000);
+        if (RECORDING || gui_menu_shown())
+        {
+            NotifyBox(4000, "MPU lab: aborted before exec");
+            goto out;
+        }
+    }
+
+    if (is_exec)
+        log_add("%d EXPECT group8 exec idx=%x reply=08 08 02 <BE32 ret> 00\n",
+                get_ms_clock(), exec_index);
+
+    if (is_exec)
+    {
+        int e = MPU_MON_OPEN();
+        log_add("%d MONOPEN err=%d\n", get_ms_clock(), e);
+        mpu_log_read("PRE_80000", 0xFFF80000);
+        mpu_log_read("PRE_825DA", 0xFFF825DA);
+        mpu_log_exposure("PRE");
+    }
+
     cap_begin();
     cap_send(c->grp, c->op, c->len, c->data);
     msleep(800);
+
+    if (is_exec) mpu_log_exposure("MID");
     if (c->stop_after)
     {
         uint8_t stop = 0;
         cap_send(9, 3, 1, &stop);
     }
-    msleep(1200);   /* capture window: ~2 s after the command */
+    {
+        /* The successful AF search finishes after the old 2 s window. */
+        int win = c->win_ms ? c->win_ms : (is_exec ? 6000 : 1200);
+        msleep(win);
+    }
+    if (is_exec)
+    {
+        /* Always end an AF search with FOCUS_STOP, even if the handler is
+         * still waiting: the 00:19 infinity-start test hung. */
+        uint8_t stop = 0;
+        cap_send(9, 3, 1, &stop);
+        log_add("%d STOP after group 8 exec\n", get_ms_clock());
+        msleep(300);
+        mpu_log_read("POST_80000", 0xFFF80000);
+        mpu_log_read("POST_825DA", 0xFFF825DA);
+        mpu_log_read("POST_825E0", 0xFFF825E0);
+        mpu_log_exposure("POST");
+        MPU_MON_CLOSE();
+    }
     cap_end(c->name, NULL, 0, 1);
 
 out:
@@ -432,7 +652,7 @@ struct seq_step
     uint8_t grp;
     uint8_t op;
     uint8_t len;
-    uint8_t data[16];
+    uint8_t data[MPU_CMD_DATA];
     uint16_t wait_ms;      /* capture/settle time after sending */
     const char *name;
 };
@@ -476,18 +696,33 @@ static const struct seq_step seq_session_search[] =
     S_OPEN, S_NEAR, S_STOP, S_FAR, S_STOP,
 };
 
+/* The AF_LENS_SEARCH monitor handler is 0x33794 == 0x1417C[16] in the
+ * corrected map.  The candidate group 8 message that reaches it is
+ * (8,2,32) with payload[4..7] = 00 00 00 10; this is UNVERIFIED on camera.
+ * The sequence below sends that probe first and then drives Canon's own
+ * (9,0x25)+(9,0x13) search proxy so the run still exercises the lens even if
+ * the group 8 message is ignored.  TVAFLOG (0x6F81A) needs argc/argv and is
+ * serial-monitor only, so there is no sequence for it. */
+static const struct seq_step seq_afexec_search[] =
+{
+    { 8, 0x02, 32, X8_EXEC32(0x10), 1500, "8.2.32 AF_SEARCH idx16" },
+    S_OPEN, S_NEAR, S_STOP, S_FAR, S_STOP,
+};
+
 static const struct mpu_seq mpu_seqs[] =
 {
     { "session + drive spd7", seq_drive_spd7,    COUNT(seq_drive_spd7) },
     { "session + drive ML form", seq_drive_ml,   COUNT(seq_drive_ml) },
-    { "search near/far",     seq_search,         COUNT(seq_search) },
-    { "session + search",    seq_session_search, COUNT(seq_session_search) },
+    { "AF search near/far",  seq_search,         COUNT(seq_search) },
+    { "AF_LENS_SEARCH proxy", seq_session_search, COUNT(seq_session_search) },
+    { "8.2 idx16 + search", seq_afexec_search, COUNT(seq_afexec_search) },
 };
 
 static const char * mpu_seq_choices[] =
 {
     "session + drive spd7", "session + drive ML form",
-    "search near/far", "session + search"
+    "AF search near/far", "AF_LENS_SEARCH proxy",
+    "8.2 idx16 + search"
 };
 
 static int mpu_seq_choice = 0;
@@ -567,6 +802,45 @@ static void mpu_lab_seq_select(void *priv, int delta)
     run_in_separate_task(mpu_lab_seq_task, mpu_seq_choice);
 }
 
+/* --------------------------------------------------------------- notices */
+/* Neither TVAFLOG nor AF_LENS_SEARCH can be reached through the confirmed
+ * ICU dispatch: the monitor text parser is serial-console-only and TVAFLOG
+ * needs argc/argv.  AF_LENS_SEARCH is only an unverified group 8 EXEC probe.
+ * These entries send nothing; they explain the state of the investigation. */
+
+static void mpu_lab_notice_task(int which)
+{
+    if (mpu_lab_busy) return;
+    mpu_lab_busy = 1;
+
+    if (which == 0)
+        NotifyBox(9000,
+            "AF_LENS_SEARCH = MPU 0x33794 = 0x1417C[16]. Candidate msg: "
+            "(8,2,32) payload 00 00 00 00 00 00 00 10 00 ... - UNVERIFIED. "
+            "Use '8.2.32 AF_SEARCH idx16' (one-shot, logged) or the search proxy.");
+    else
+        NotifyBox(9000,
+            "TVAFLOG = MPU 0x6F81A: serial-monitor command, needs argc==4 + 3 hex args. "
+            "No ICU group 7/8/9 message reaches it; nothing is sent here. "
+            "Use the (9,0x25)+(9,0x13) AF search proxy.");
+
+    mpu_lab_busy = 0;
+}
+
+static void mpu_lab_af_note_select(void *priv, int delta)
+{
+    (void) priv;
+    (void) delta;
+    run_in_separate_task(mpu_lab_notice_task, 0);
+}
+
+static void mpu_lab_tvaf_note_select(void *priv, int delta)
+{
+    (void) priv;
+    (void) delta;
+    run_in_separate_task(mpu_lab_notice_task, 1);
+}
+
 /* ------------------------------------------------------------------- menu */
 
 static struct menu_entry mpu_lab_menu[] =
@@ -581,7 +855,9 @@ static struct menu_entry mpu_lab_menu[] =
         .icon_type = IT_ACTION,
         .help = "TEMPORARY: dump MPU memory and send raw ICU->MPU messages.",
         .help2 = "Dumps go to ML/LOGS/MPU-*.BIN, every command logs replies to ML/LOGS/MPULAB.LOG.\n"
-                 "Raw commands are one-shot and refused while recording. OFF after restart.",
+                 "Raw commands are one-shot and refused while recording. OFF after restart.\n"
+                 "The 8.2 EXEC probes are UNVERIFIED: they call MPU 0x1417C[index] via group 8;\n"
+                 "index 16 is the corrected AF_LENS_SEARCH handler. The search entries drive the lens.",
         .children = (struct menu_entry[])
         {
             {
@@ -608,7 +884,11 @@ static struct menu_entry mpu_lab_menu[] =
                 .edit_mode = EM_INLINE_ADJUST,
                 .help = "Raw message to send to the MPU (one shot, after 1.5 s).",
                 .help2 = "(9,0x13) is LensSearchDriveStart; (9,0x01) is the focus drive with speed byte 0x07.\n"
-                         "The first focus/search tests are the ones Canon EOS M firmware never sends."
+                         "E 8.2.32 / 8.2.13 are UNVERIFIED group 8 EXEC probes: [..][00 00 00 IDX][..];\n"
+                         "IDX 10 = AF_LENS_SEARCH (MPU 0x33794), 14 = no-op control, 0F/4C/4D/50 = AF family.\n"
+                         "AF search (MPU) 8s is the confirmed long-window action; it watches for 8 s.\n"
+                         "8.1 is a raw MpuMonRead request; 7.8 is a group 7 probe.\n"
+                         "(8,0) MpuMonWrite / MEMW is intentionally not implemented: it writes MPU memory."
             },
             {
                 .name = "Run command",
@@ -617,13 +897,28 @@ static struct menu_entry mpu_lab_menu[] =
                 .help2 = "Close the menu and keep the camera still. Summary: done/fpc/cmd counts, focus dist."
             },
             {
+                .name = "AF_SEARCH path (info)",
+                .select = mpu_lab_af_note_select,
+                .help = "Where AF_LENS_SEARCH lives and the candidate bytes (sends nothing).",
+                .help2 = "AF_LENS_SEARCH = MPU 0x33794 = 0x1417C[16]; candidate (8,2,32) payload 00..10.."
+            },
+            {
+                .name = "TVAFLOG (serial only)",
+                .select = mpu_lab_tvaf_note_select,
+                .help = "TVAFLOG is a serial-monitor command; no ICU message sends it.",
+                .help2 = "Handler 0x6F81A needs argc==4 and three hex args. This entry sends nothing."
+            },
+            {
                 .name = "MPU sequence",
                 .priv = &mpu_seq_choice,
                 .max = COUNT(mpu_seqs) - 1,
                 .choices = mpu_seq_choices,
                 .edit_mode = EM_INLINE_ADJUST,
-                .help = "Multi-step test (session, drive, search). Needs LiveView.",
-                .help2 = "Always ends with focus stop and, if a session was opened, a session close."
+                .help = "Multi-step test (session, drive, search, 8.2 probe). Needs LiveView.",
+                .help2 = "'AF_LENS_SEARCH proxy' uses Canon's (9,0x25)+(9,0x13) search path (confirmed).\n"
+                         "'8.2 idx16 + search' first sends the UNVERIFIED (8,2,32) AF_LENS_SEARCH probe.\n"
+                         "TVAFLOG (0x6F81A) is serial-monitor only and has no sequence.\n"
+                         "Always ends with focus stop and, if a session was opened, a session close."
             },
             {
                 .name = "Run sequence",

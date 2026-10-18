@@ -6029,6 +6029,8 @@ enum
                           *        during the step, 0x10 pulse count changed, 0x40 aborted
                           * end of run: w0 = 0xFF01, w1 = stop reason (0 none, 1 LV lost, 2 recording,
                           * 3 menu, 4 switched off), w2 = steps done, w3 = steps planned */
+    AFD_EV_MPUSRCH,      /* MPU AF search with sharpness stop: w0 = stopped, w1 = peak, w2 = elapsed ms,
+                          * w3 = lens_info.focus_dist at stop */
     AFD_EV_REFOCUS,      /* auto refocus: w0 = what (1 trigger, 2 AF ok, 3 AF failed, 4 request not started,
                           * 5 paused, 6 resumed, 7 reference taken, 8 AF frame, 9 AF ok but still blurry,
                           * 10 periodic decision record, 11 ineligible gates, 12 new scene - peak forgotten),
@@ -7138,6 +7140,90 @@ static void afdiag_lens_task(void *unused)
     }
 }
 
+/* One-shot MPU AF search with a sharpness-peak stop.  This is the bridge
+ * between the confirmed (8,2,32) actuator and a real autofocus: the MPU only
+ * scans; the ICU samples sharpness and sends FOCUS_STOP when the peak is
+ * passed.  Experimental, temporary diagnostics menu only. */
+static volatile int afdiag_afsearch_busy = 0;
+
+static void afdiag_afsearch_task(void *unused)
+{
+    (void) unused;
+    if (afdiag_afsearch_busy) return;
+    afdiag_afsearch_busy = 1;
+
+    if (!is_EOSM || !lv || RECORDING ||
+        is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
+    {
+        NotifyBox(4000, "AF search MPU: needs AF mode, LV, idle, not recording");
+        goto out;
+    }
+    if (lens_info.focus_dist >= 60000)
+    {
+        NotifyBox(5000, "AF search MPU: lens at infinity - focus nearer first");
+        goto out;
+    }
+
+    NotifyBox(3000, "AF search MPU: close menu, starts in 2 s");
+    msleep(1500);
+    for (int i = 0; i < 50 && gui_menu_shown(); i++) msleep(100);
+    if (!lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
+        goto out;
+
+    int e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
+    if (e)
+    {
+        NotifyBox(4000, "AF search MPU: MonOpen failed %d", e);
+        goto out;
+    }
+
+    uint8_t payload[32] = {0};
+    payload[7] = 0x10;   /* (8,2,32), index 16 = 0x33794 AF_LENS_SEARCH */
+    int ret = ((int (*)(int,int,int,const void *)) 0x38C4)(8, 2, 32, payload);
+
+    int t0 = get_ms_clock();
+    int peak_t = 0;
+    uint32_t peak = 0;
+    int stopped = 0;
+
+    /* The scan moves near first, then to infinity.  Watch the centre
+     * sharpness; stop shortly after it has passed its peak. */
+    while (get_ms_clock() - t0 < 3000)
+    {
+        int m = 0, n = 0, x = 0;
+        uint32_t s = afdiag_sharpness(&m, &n, &x);
+        int now = get_ms_clock();
+        if (s > peak) { peak = s; peak_t = now; }
+        if (peak > 0 && now - peak_t > 120 && s * 100 < peak * 80)
+        {
+            stopped = 1;
+            break;
+        }
+        msleep(50);
+    }
+
+    uint8_t stop = 0;
+    ((int (*)(int,int,int,const void *)) 0x38C4)(9, 3, 1, &stop);
+    int ms = get_ms_clock() - t0;
+    int dist = lens_info.focus_dist;
+    ((int (*)(void)) 0xFF1DD118)();            /* MpuMonClose */
+
+    afdiag_record(AFD_EV_MPUSRCH, 16, (uint32_t) stopped, peak,
+                  (uint32_t) ms, (uint32_t) dist);
+    NotifyBox(5000, "AF search MPU: %s peak=%d %dms ret=%d",
+              stopped ? "stop" : "timeout", peak, ms, ret);
+
+out:
+    afdiag_afsearch_busy = 0;
+}
+
+static MENU_SELECT_FUNC(afdiag_afsearch_select)
+{
+    (void) priv;
+    (void) delta;
+    task_create("afdiag_afsearch", 0x1e, 0x2000, afdiag_afsearch_task, (void*)0);
+}
+
 static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF diag log",
@@ -7161,6 +7247,15 @@ static struct menu_entry afdiag_menu[] = {
         .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms (movie only). A/B: lens_focus 40 x size 1, 2, 3, each way, photo or movie.\n"
                      "MPU: one-shot series of raw MPU messages (needs AF diag log ON + MPU, LV, not recording, "
                      "close the menu); MPU+SW1 adds a remote half-press (Canon runs AF). OFF after restart.",
+    },
+    {
+        .name      = "AF search (MPU)",
+        .select    = afdiag_afsearch_select,
+        .icon_type = IT_DICE,
+        .help      = "EXPERIMENTAL: run the MPU AF search once, stop at sharpness peak.",
+        .help2     = "Sends the confirmed (8,2,32) index-16 message and samples sharpness in the centre;\n"
+                     "stops with (9,3,1) when sharpness passes its peak (max 3 s). Needs AF mode, LV,\n"
+                     "not recording; refuses if the lens is at infinity.",
     },
 };
 
