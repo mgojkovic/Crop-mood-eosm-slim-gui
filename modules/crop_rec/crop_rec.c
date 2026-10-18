@@ -5900,13 +5900,15 @@ static int slim_touch_crop_ready_at = 0;
  * acceptable for a diagnostic. */
 #define AFDIAG_LOG_FILE      "ML/LOGS/AFDIAG.LOG"
 #define AFDIAG_LOG_DIR       "ML/LOGS"
-#define AFDIAG_RING          512
+#define AFDIAG_RING          1024
 #define AFDIAG_MAX_FILE      (256 * 1024)
 #define AFDIAG_FLUSH_MS      2000
 #define AFDIAG_DATA_MIN_MS   100   /* PROP_LV_FOCUS_DATA: normal spacing */
 #define AFDIAG_DATA_FAST_MS  20    /* ... when a value jumped by a lot */
 #define AFDIAG_DATA_JUMP     256
 #define AFDIAG_LENS_PERIOD   2000
+#define AFDIAG_SHARP_MS      100   /* @SHARP spacing */
+#define AFDIAG_STEP_SETTLE   300   /* ms between lens_focus and the 'after' reading */
 
 static int afdiag_log = 0;        /* not CONFIG_INT: OFF after restart */
 static int afdiag_lens_test = 0;  /* not CONFIG_INT: OFF after restart */
@@ -5919,6 +5921,10 @@ enum
     AFD_EV_REC,          /* w0 = RECORDING, w1 = RECORDING_RAW */
     AFD_EV_LENS_STEP,    /* w0 = dir, w1 = lens_focus ret, w2 = pos before, w3 = elapsed ms */
     AFD_EV_LENS_SKIP,    /* w0 = reason: 1 manual focus, 2 continuous AF, 3 slim AF busy, 4 not LV movie */
+    AFD_EV_SHARP,        /* w0 = edge sum, w1 = mean luma, w2 = samples, w3 = max edge
+                          * (centre 1/4 x 1/4 of the displayed LV buffer; Laplacian on luma) */
+    AFD_EV_STEP_SHARP,   /* w0 = dir, w1 = edge sum before the step, w2 = edge sum 300 ms after,
+                          * w3 = mean luma after */
 };
 
 struct afdiag_entry
@@ -5940,6 +5946,54 @@ static volatile unsigned afdiag_head = 0;   /* total entries ever recorded */
 static unsigned afdiag_tail = 0;            /* total entries already flushed */
 static char afdiag_header[320];
 static volatile int afdiag_header_pending = 0;
+
+/* Centre-of-frame sharpness from the displayed UYVY LV buffer: Laplacian on
+ * luma over the centre 1/4 x 1/4, every 2nd row and 2nd pixel.  Read-only and
+ * cheap (a few thousand samples).  Returns the edge sum; 0 and samples=0 if
+ * the buffer is unavailable. */
+static uint32_t afdiag_sharpness(int *luma_mean, int *samples, int *emax)
+{
+    uint32_t esum = 0, lsum = 0, emx = 0;
+    int n = 0;
+    *luma_mean = 0; *samples = 0; *emax = 0;
+
+    /* YUV422_LV_BUFFER_DISPLAY_ADDR is not visible to modules: use the core
+     * accessor, which returns the same displayed LV buffer. */
+    struct vram_info *vi = get_yuv422_vram();
+    if (!vi || !vi->vram) return 0;
+    int width = vi->width;
+    int height = vi->height;
+    int pitch = vi->pitch;
+    if (width < 64 || height < 64 || pitch < width * 2)
+        return 0;
+
+    const uint8_t *vram = (const uint8_t *)UNCACHEABLE(vi->vram);
+    int x0 = width * 3 / 8,  x1 = width * 5 / 8;
+    int y0 = height * 3 / 8, y1 = height * 5 / 8;
+
+    for (int y = y0 + 2; y < y1 - 2; y += 2)
+    {
+        const uint8_t *row = vram + y * pitch;
+        for (int x = x0 + 2; x < x1 - 2; x += 2)
+        {
+            const uint8_t *c = row + x * 2 + 1;
+            int cv = c[0];
+            int e = 4 * cv - c[-2] - c[2] - c[-pitch] - c[pitch];
+            if (e < 0) e = -e;
+            esum += e;
+            lsum += cv;
+            if ((uint32_t)e > emx) emx = e;
+            n++;
+        }
+    }
+    if (n)
+    {
+        *luma_mean = lsum / n;
+        *samples = n;
+        *emax = emx;
+    }
+    return esum;
+}
 
 static void afdiag_record(uint32_t code, int len, uint32_t a, uint32_t b, uint32_t c, uint32_t d)
 {
@@ -6015,6 +6069,8 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_REC:                return "@REC";
         case AFD_EV_LENS_STEP:          return "@LENS_STEP";
         case AFD_EV_LENS_SKIP:          return "@LENS_SKIP";
+        case AFD_EV_SHARP:              return "@SHARP";
+        case AFD_EV_STEP_SHARP:         return "@STEP_SHARP";
     }
     return "?";
 }
@@ -6064,6 +6120,18 @@ static void afdiag_sample(void)
         afdiag_record(AFD_EV_FOCUS, 16, last_pos, lens_info.focus_pos, last_dist, lens_info.focus_dist);
         last_pos = lens_info.focus_pos;
         last_dist = lens_info.focus_dist;
+    }
+    if (lv)
+    {
+        static int last_sharp = 0;
+        int now = get_ms_clock();
+        if (now - last_sharp >= AFDIAG_SHARP_MS)
+        {
+            int mean, n, emax;
+            uint32_t es = afdiag_sharpness(&mean, &n, &emax);
+            last_sharp = now;
+            afdiag_record(AFD_EV_SHARP, 16, es, mean, n, emax);
+        }
     }
     if (rec != last_rec || rraw != last_rraw)
     {
@@ -6160,9 +6228,15 @@ static void afdiag_lens_task(void *unused)
         last_skip = 0;
 
         int before = lens_info.focus_pos;
+        int m0, n0, x0;
+        uint32_t sharp_before = afdiag_sharpness(&m0, &n0, &x0);
         int ret = lens_focus(dir, 1, 1, 0);
         int elapsed = get_ms_clock() - now;
         afdiag_record(AFD_EV_LENS_STEP, 16, dir, ret, before, elapsed);
+        msleep(AFDIAG_STEP_SETTLE);
+        int m1, n1, x1;
+        uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
+        afdiag_record(AFD_EV_STEP_SHARP, 16, dir, sharp_before, sharp_after, m1);
         dir = -dir;
         last_step = get_ms_clock();
     }
