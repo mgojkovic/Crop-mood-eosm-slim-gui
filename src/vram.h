@@ -76,6 +76,9 @@ void display_filter_get_buffers(uint32_t** src_buf, uint32_t** dst_buf);
 int display_filter_enabled();
 void vram_clear_lv();
 
+/* current LV YUV buffer being displayed (platform consts.h macro, not visible to modules) */
+uint32_t get_yuv422_lv_display_addr(void);
+
 /* Coordinate transformations between different VRAMs */
 /* http://magiclantern.wikia.com/wiki/VRAM/Geometry */
 

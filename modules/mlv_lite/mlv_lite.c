@@ -78,6 +78,8 @@
 #include "ml-cbr.h"
 #include "../crop_rec/crop_rec.h"
 
+/* defined further down; used earlier by the EOS M cleanup path */
+static int preview_dirty;
 #define MAX_PATH 100
 
 THREAD_ROLE(RawRecTask);            /* our raw recording task */
