@@ -439,6 +439,11 @@ enum slim_af_state
 };
 
 static volatile int slim_af_request = 0;
+/* PROP_LV_AF_RESULT fires once at the end of every Canon AF run on EOS M
+ * (0 = focused, 1 = failed); field logs showed it ~0.3-1 s after the AF
+ * request.  PROP_LV_FOCUS_STATUS never reports "focusing" on this camera. */
+static volatile int slim_af_result_count = 0;
+static int slim_af_result_seen = 0;
 static int slim_af_state = SLIM_AF_IDLE;
 static int slim_af_since = 0;
 static int slim_af_sw1_held = 0;
@@ -482,6 +487,7 @@ static int slim_af_step(void)
         slim_zoom_to_x10();
         if (lv_dispsize != 10) return 0;
 
+        slim_af_result_seen = slim_af_result_count;
         slim_af_state = SLIM_AF_SETTLE;
         slim_af_since = now;
         return 1;
@@ -497,6 +503,14 @@ static int slim_af_step(void)
     switch (slim_af_state)
     {
         case SLIM_AF_SETTLE:
+            /* Canon often starts AF on its own from the physical press as
+             * soon as x10 is up; if that run already finished, we are done. */
+            if (slim_af_result_count != slim_af_result_seen)
+            {
+                slim_af_state = SLIM_AF_RELEASE;
+                slim_af_since = now;
+                return 1;
+            }
             if (now - slim_af_since < SLIM_AF_SETTLE_MS)
                 return 1;
             slim_af_sw1(1);
@@ -505,9 +519,13 @@ static int slim_af_step(void)
             return 1;
 
         case SLIM_AF_WAIT_START:
-            /* PROP_LV_FOCUS_STATUS: 3 = focusing.  It is not confirmed on
-             * EOS M, so fall back to a fixed AF time if it never shows up. */
-            if (lv_focus_status == 3)
+            /* End on Canon's AF result.  Fixed AF time only as a fallback. */
+            if (slim_af_result_count != slim_af_result_seen)
+            {
+                slim_af_state = SLIM_AF_RELEASE;
+                slim_af_since = now;
+            }
+            else if (lv_focus_status == 3)
                 slim_af_state = SLIM_AF_RUNNING;
             else if (now - slim_af_since >= SLIM_AF_BLIND_MS)
             {
@@ -517,7 +535,8 @@ static int slim_af_step(void)
             return 1;
 
         case SLIM_AF_RUNNING:
-            if (lv_focus_status != 3 || now - slim_af_since >= SLIM_AF_MAX_MS)
+            if (lv_focus_status != 3 || slim_af_result_count != slim_af_result_seen ||
+                now - slim_af_since >= SLIM_AF_MAX_MS)
             {
                 slim_af_state = SLIM_AF_RELEASE;
                 slim_af_since = now;
@@ -6036,7 +6055,7 @@ static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
 }
 
 PROP_HANDLER(PROP_LV_FOCUS_DONE)       { afdiag_prop(property, buf, len); }
-PROP_HANDLER(PROP_LV_AF_RESULT)        { afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_AF_RESULT)        { slim_af_result_count++; afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_STATE)      { afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_STATUS)     { afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_DATA)       { afdiag_prop(property, buf, len); }
