@@ -5984,6 +5984,8 @@ enum
                           * The 2.0.2 firmware itself reads 0x24, 0x27 ("Po") and 0x2C (focal length). */
     AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
                           * w2 = bytes 4/5, w3 = byte 6 */
+    AFD_EV_LVOBJ,        /* Canon LV AF state (RAM *(0x4069C+12)), logged on change: w0 = obj,
+                          * w1 = +0x184 LV mode, w2 = +0x710 AF method/zoom tag, w3 = +0xC7C servo << 8 | +0xC88 */
     AFD_EV_REFOCUS,      /* auto refocus: w0 = what (1 trigger, 2 AF ok, 3 AF failed, 4 request not started,
                           * 5 paused, 6 resumed, 7 reference taken), w1 = current sharpness,
                           * w2 = S_ref, w3 = lv_dispsize | RECORDING << 8 | consecutive fails << 16 */
@@ -6202,6 +6204,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_LVLENS:             return "@LVLENS";
         case AFD_EV_SWEEP:              return "@SWEEP";
         case AFD_EV_REFOCUS:            return "@REFOCUS";
+        case AFD_EV_LVOBJ:              return "@LVOBJ";
     }
     return "?";
 }
@@ -6240,6 +6243,29 @@ static void afdiag_sample(void)
     }
     last_log = afdiag_log;
     if (!afdiag_log) return;
+
+    /* Read-only peek at Canon's LV AF state object (EOS M 2.0.2 ROM: pointer at
+     * 0x4069C+12, from the literal at 0xFF1835F4).  Movie Servo may only start
+     * when +0xC7C == 1, +0x184 == 2 and +0x710 == 1 (0xFF18597C); zooming
+     * writes 5 / 0x81 / 10 into +0x710 (0xFF18EDB8).  Log on change. */
+    if (is_camera("EOSM", "2.0.2"))
+    {
+        static uint32_t last_o[4] = { 1, 1, 1, 1 };
+        uint32_t obj = *(volatile uint32_t *)(0x4069C + 12);
+        uint32_t v[4] = { obj, 0, 0, 0 };
+        if (obj >= 0x1000 && obj < 0x20000000 && !(obj & 3))
+        {
+            v[1] = *(volatile uint32_t *)(obj + 0x184);
+            v[2] = *(volatile uint32_t *)(obj + 0x710);
+            v[3] = ((*(volatile uint32_t *)(obj + 0xC7C) & 0xFF) << 8) |
+                    (*(volatile uint32_t *)(obj + 0xC88) & 0xFF);
+        }
+        if (memcmp(v, last_o, sizeof(v)))
+        {
+            afdiag_record(AFD_EV_LVOBJ, 16, v[0], v[1], v[2], v[3]);
+            memcpy(last_o, v, sizeof(v));
+        }
+    }
 
     if (slim_af_state != last_af)
     {
