@@ -6172,9 +6172,11 @@ static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
 }
 
 static volatile int afdiag_focus_done_err = 0;
+static volatile uint32_t afdiag_focus_done_val = 0;   /* first word of the last FOCUS_DONE, for AF drive */
 PROP_HANDLER(PROP_LV_FOCUS_DONE)
 {
     afdiag_focus_done_err = (buf && len >= 4 && (buf[0] & 0x1000)) ? 1 : 0;
+    afdiag_focus_done_val = (buf && len >= 4) ? (uint32_t) buf[0] : 0;
     afdiag_focus_done_count++;
     afdiag_prop(property, buf, len);
 }
@@ -7175,6 +7177,7 @@ struct afs_sample
 };
 
 static volatile int afdiag_afsearch_busy = 0;
+static volatile int afdiag_afdrive_busy;   /* defined with the AF drive code below */
 static struct afs_sample afs_samples[AFS_MAX_SAMPLES];
 static char afs_buf[1024];
 
@@ -7233,7 +7236,7 @@ static void afs_write_log(int n, int dist0, int ret, int stopped, int armed_ms,
 static void afdiag_afsearch_task(void *unused)
 {
     (void) unused;
-    if (afdiag_afsearch_busy) return;
+    if (afdiag_afsearch_busy || afdiag_afdrive_busy) return;
     afdiag_afsearch_busy = 1;
 
     if (!is_EOSM || !lv || RECORDING ||
@@ -7349,6 +7352,351 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
     task_create("afdiag_afsearch", 0x1e, 0x2000, afdiag_afsearch_task, (void*)0);
 }
 
+/* ---- AF drive (MPU): first contrast-detect autofocus, one-shot ------------
+ * Moves the lens with the confirmed (9,1,5) relative move [hi lo 07 00 00]
+ * (signed 16-bit pulses), same session framing as mpu_lab "Drive test".
+ * lens_info.focus_dist does not follow these moves, so the position is the
+ * sum of commanded pulses (relative to the start; + is probably toward near).
+ * Phases: probe direction, coarse climb, return to best, fine climb, return.
+ * FOCUS_DONE (PROP_LV_FOCUS_DONE) is counted by the handler above; a move
+ * waits for the count to increase (error bits are only logged) and in any
+ * case for AFD_MIN_BASE_MS + |n|*AFD_MIN_PER_PULSE, then 2 LV frames. */
+#define AFD_LOG_FILE         "ML/LOGS/AFDRIVE.LOG"
+#define AFD_SPEED            0x07
+#define AFD_COARSE           80
+#define AFD_FINE             20
+#define AFD_PROBE_PCT        95     /* probe: < this % of s0 = wrong way, within +-5% = ambiguous */
+#define AFD_COARSE_DROP_PCT  85     /* coarse stop: below this % of best ... */
+#define AFD_COARSE_DROP_N    2      /* ... this many moves in a row */
+#define AFD_FLAT_PCT         3      /* stop: |change| below this % ... */
+#define AFD_FLAT_N           3      /* ... this many moves in a row */
+#define AFD_MAX_TRAVEL       1500   /* coarse phase, total |pulses| */
+#define AFD_MAX_COARSE       25     /* coarse phase moves (probes included) */
+#define AFD_FINE_DROP_PCT    95     /* fine stop: one move below this % of best */
+#define AFD_MAX_FINE         8
+#define AFD_DONE_TIMEOUT_MS  800
+#define AFD_MIN_BASE_MS      100
+#define AFD_MIN_PER_PULSE    2
+#define AFD_MIN_CAP_MS       700
+#define AFD_MIN_S            2000   /* below this s0 the scene has no contrast: skip */
+#define AFD_FRAME_MS         45     /* one LV frame, between the two samples */
+#define AFD_SETTLE_MS        90     /* 2 frames after the move has settled */
+#define AFD_LOG_SIZE         8192
+
+static volatile int afdiag_afdrive_busy = 0;
+static int afdiag_afdrive_mon = 0;   /* 0: no MpuMonOpen/Close (default), 1: as mpu_lab */
+static char afd_buf[AFD_LOG_SIZE];
+static int afd_len, afd_pos, afd_moves, afd_t0, afd_aborted, afd_lowcontrast;
+static uint32_t afd_best_s;
+static int afd_best_pos;
+
+static void afd_log(const char *fmt, ...)
+{
+    if (afd_len >= (int) sizeof(afd_buf) - 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(afd_buf + afd_len, sizeof(afd_buf) - afd_len, fmt, ap);
+    va_end(ap);
+    if (k > 0) afd_len += MIN(k, (int) sizeof(afd_buf) - afd_len - 1);
+}
+
+static int afd_must_abort(void)
+{
+    return RECORDING || RECORDING_RAW || !lv || gui_menu_shown() || is_manual_focus();
+}
+
+/* mean of 2 samples one LV frame apart */
+static uint32_t afd_sample(uint32_t *g_out, int *luma_out)
+{
+    int m1 = 0, m2 = 0, c = 0, x = 0;
+    uint32_t g1 = 0, g2 = 0;
+    uint32_t s1 = afdiag_sharpness_ex(&m1, &c, &x, &g1);
+    msleep(AFD_FRAME_MS);
+    uint32_t s2 = afdiag_sharpness_ex(&m2, &c, &x, &g2);
+    *g_out = (g1 + g2) / 2;
+    *luma_out = (m1 + m2) / 2;
+    return (s1 + s2) / 2;
+}
+
+static void afd_luma_probe(const char *tag)
+{
+    int m = 0, c = 0, x = 0;
+    uint32_t g = 0;
+    uint32_t sv = afdiag_sharpness_ex(&m, &c, &x, &g);
+    afd_log("# luma %s t=%d luma=%d s=%d g=%d\n", tag, get_ms_clock() - afd_t0, m, (int) sv, (int) g);
+}
+
+/* Move by n pulses (0: just sample), settle, sample; logs one line.
+ * Returns the sharpness, or 0 after setting afd_aborted. */
+static uint32_t afd_move(char phase, int n)
+{
+    if (afd_must_abort())
+    {
+        afd_aborted = 1;
+        return 0;
+    }
+    uint32_t g;
+    int luma;
+    int done_val = 0, done_ms = -1, ret = 0;
+    if (n)
+    {
+        uint8_t d[5] = { (uint8_t)((n >> 8) & 0xFF), (uint8_t)(n & 0xFF), AFD_SPEED, 0, 0 };
+        int cnt0 = afdiag_focus_done_count;
+        int t = get_ms_clock();
+        ret = ((int (*)(int,int,int,const void *)) 0x38C4)(9, 1, 5, d);
+        afd_pos += n;
+        int min_ms = AFD_MIN_BASE_MS + ABS(n) * AFD_MIN_PER_PULSE;
+        if (min_ms > AFD_MIN_CAP_MS) min_ms = AFD_MIN_CAP_MS;
+        while (get_ms_clock() - t < AFD_DONE_TIMEOUT_MS)
+        {
+            if (done_ms < 0 && afdiag_focus_done_count != cnt0)
+            {
+                done_ms = get_ms_clock() - t;
+                done_val = (int) afdiag_focus_done_val;
+            }
+            if (done_ms >= 0 && get_ms_clock() - t >= min_ms) break;
+            msleep(10);
+        }
+        msleep(AFD_SETTLE_MS);
+    }
+    uint32_t s = afd_sample(&g, &luma);
+    afd_moves += n ? 1 : 0;
+    afd_log("%d %c %d %d %d %d %d %08x %d ret%d dist=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
+            (int) s, (int) g, luma, done_val, done_ms, ret, (int) lens_info.focus_dist);
+    if (s > afd_best_s)
+    {
+        afd_best_s = s;
+        afd_best_pos = afd_pos;
+    }
+    return s;
+}
+
+/* a < b * pct / 100 */
+static int afd_below(uint32_t a, uint32_t b, int pct)
+{
+    return (uint64_t) a * 100 < (uint64_t) b * pct;
+}
+
+/* returns the final sharpness; fills result fields */
+static uint32_t afd_run(uint32_t *best_out)
+{
+    uint32_t g;
+    int luma;
+    afd_best_s = 0;
+    afd_best_pos = 0;
+
+    /* 1. baseline (logged as a zero move) */
+    uint32_t s0 = afd_move('i', 0);
+    uint32_t s1 = afd_sample(&g, &luma);
+    s0 = (s0 + s1) / 2;
+    afd_best_s = s0;
+    afd_best_pos = 0;
+    afd_log("# s0=%d g=%d luma=%d\n", (int) s0, (int) g, luma);
+    if (afd_aborted) return s0;
+    if (s0 < AFD_MIN_S)
+    {
+        afd_lowcontrast = 1;
+        return s0;
+    }
+
+    /* 3. direction probe */
+    int dir = 1;
+    int cmoves = 0, travel = 0;
+    uint32_t s = afd_move('p', AFD_COARSE);
+    cmoves++; travel += AFD_COARSE;
+    if (afd_aborted) return s;
+    if (afd_below(s, s0, AFD_PROBE_PCT))
+    {
+        dir = -1;
+        s = afd_move('p', -2 * AFD_COARSE);
+        cmoves++; travel += 2 * AFD_COARSE;
+    }
+    else if (!afd_below(s0, s, AFD_PROBE_PCT) && !((uint64_t) s * 100 > (uint64_t) s0 * (200 - AFD_PROBE_PCT)))
+    {
+        /* within +-5%: try the other side, keep the better one */
+        uint32_t sp = s;
+        uint32_t sm = afd_move('p', -2 * AFD_COARSE);
+        cmoves++; travel += 2 * AFD_COARSE;
+        if (afd_aborted) return sm;
+        if (sm > sp)
+        {
+            dir = -1;
+            s = sm;
+        }
+        else
+        {
+            dir = 1;
+            s = afd_move('p', 2 * AFD_COARSE);
+            cmoves++; travel += 2 * AFD_COARSE;
+        }
+    }
+    if (afd_aborted) return s;
+
+    /* 4. coarse climb */
+    int drops = 0, flats = 0;
+    uint32_t prev = s;
+    if (afd_below(s, afd_best_s, AFD_COARSE_DROP_PCT)) drops = 1;
+    while (!afd_aborted && cmoves < AFD_MAX_COARSE && travel + AFD_COARSE <= AFD_MAX_TRAVEL)
+    {
+        s = afd_move('c', dir * AFD_COARSE);
+        cmoves++; travel += AFD_COARSE;
+        if (afd_aborted) return s;
+        drops = afd_below(s, afd_best_s, AFD_COARSE_DROP_PCT) ? drops + 1 : 0;
+        uint32_t d = s > prev ? s - prev : prev - s;
+        flats = (d * 100 < (uint64_t) prev * AFD_FLAT_PCT) ? flats + 1 : 0;
+        prev = s;
+        if (drops >= AFD_COARSE_DROP_N || flats >= AFD_FLAT_N) break;
+    }
+
+    /* 5. return to the coarse best */
+    int coarse_pos = afd_best_pos;
+    uint32_t coarse_best_s = afd_best_s;
+    if (afd_pos != coarse_pos)
+        s = afd_move('r', coarse_pos - afd_pos);
+    else
+        s = afd_move('r', 0);
+    if (afd_aborted) return s;
+    afd_log("# coarse best_pos=%d coarse_best_s=%d after_return_s=%d\n", coarse_pos, (int) coarse_best_s, (int) s);
+
+    /* 6. fine: the reference is what we actually measure after the return */
+    afd_best_s = s;
+    afd_best_pos = afd_pos;
+    int fmoves = 0;
+    dir = 1;
+    uint32_t ref = afd_best_s;   /* afd_move() raises afd_best_s: compare to a snapshot */
+    s = afd_move('f', AFD_FINE);
+    fmoves++;
+    int go = !afd_aborted;
+    if (go && s <= ref)
+    {
+        s = afd_move('f', -2 * AFD_FINE);
+        fmoves++;
+        dir = -1;
+        if (s <= ref) go = 0;   /* peak is at the start of the fine phase */
+    }
+    while (go && !afd_aborted && fmoves < AFD_MAX_FINE)
+    {
+        s = afd_move('f', dir * AFD_FINE);
+        fmoves++;
+        if (afd_below(s, afd_best_s, AFD_FINE_DROP_PCT)) break;
+    }
+    if (afd_aborted) return s;
+    if (afd_pos != afd_best_pos)
+        s = afd_move('r', afd_best_pos - afd_pos);
+    else
+        s = afd_move('r', 0);
+    *best_out = afd_best_s;
+    return s;
+}
+
+static void afdiag_afdrive_task(void *unused)
+{
+    (void) unused;
+    if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
+    afdiag_afdrive_busy = 1;
+
+    if (!is_EOSM || !lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
+    {
+        NotifyBox(4000, "AF drive MPU: needs AF mode, LV, idle, not recording");
+        goto out;
+    }
+
+    NotifyBox(3000, "AF drive MPU: close menu, starts in 2 s");
+    msleep(1500);
+    for (int i = 0; i < 50 && gui_menu_shown(); i++) msleep(100);
+    if (!lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE || gui_menu_shown())
+    {
+        NotifyBox(3000, "AF drive MPU: aborted");
+        goto out;
+    }
+
+    afd_len = 0;
+    afd_pos = 0;
+    afd_moves = 0;
+    afd_aborted = 0;
+    afd_lowcontrast = 0;
+    afd_t0 = get_ms_clock();
+    int mon = afdiag_afdrive_mon;
+    int e = 0;
+    if (mon)
+    {
+        e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
+        if (e)
+        {
+            NotifyBox(4000, "AF drive MPU: MonOpen failed %d", e);
+            goto out;
+        }
+    }
+    static const uint8_t stop = 0;
+    static const uint8_t zeros[16] = { 0 };
+    static const uint8_t open_s[16] = { 0x02 };
+    int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
+    afd_log("# AFDRIVE t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s\n"
+            "# speed=%d coarse=%d fine=%d probe_pct=%d coarse_drop=%d%%x%d flat=%d%%x%d "
+            "max_travel=%d max_coarse=%d fine_drop=%d%% max_fine=%d done_timeout=%d "
+            "min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n"
+            "# ms phase cmd pos s g luma done_val done_ms ret dist\n",
+            get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
+            (int) lens_info.focus_dist, mon ? "ON" : "OFF",
+            AFD_SPEED, AFD_COARSE, AFD_FINE, AFD_PROBE_PCT, AFD_COARSE_DROP_PCT, AFD_COARSE_DROP_N,
+            AFD_FLAT_PCT, AFD_FLAT_N, AFD_MAX_TRAVEL, AFD_MAX_COARSE, AFD_FINE_DROP_PCT, AFD_MAX_FINE,
+            AFD_DONE_TIMEOUT_MS, AFD_MIN_BASE_MS, AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS,
+            AFD_FRAME_MS, AFD_SETTLE_MS);
+    afd_luma_probe("pre_monopen_or_session");
+
+    int r_open = send(9, 0x25, 16, open_s);
+    afd_luma_probe("post_session_open");
+    msleep(300);
+    afd_luma_probe("post_session_open_300ms");
+    afd_log("# session_open ret=%d\n", r_open);
+
+    uint32_t best = 0;
+    uint32_t final_s = afd_run(&best);
+    int total_ms = get_ms_clock() - afd_t0;
+    if (!best) best = afd_best_s;
+    int pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
+
+    /* always: stop, close the session, close the monitor */
+    send(9, 3, 1, &stop);
+    msleep(500);
+    send(9, 0x25, 16, zeros);
+    msleep(1000);
+    if (mon) ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
+
+    afd_log("# RESULT aborted=%s best_pos=%d best_s=%d final_s=%d final_best_pct=%d moves=%d total_ms=%d end_pos=%d\n\n",
+            afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0", afd_best_pos, (int) best, (int) final_s, pct, afd_moves, total_ms, afd_pos);
+
+    if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+    {
+        if (!is_dir(AFDIAG_LOG_DIR))
+            FIO_CreateDirectory(AFDIAG_LOG_DIR);
+        FILE *f = FIO_CreateFileOrAppend(AFD_LOG_FILE);
+        if (f)
+        {
+            FIO_WriteFile(f, afd_buf, afd_len);
+            FIO_CloseFile(f);
+        }
+    }
+    else
+    {
+        NotifyBox(3000, "AF drive: log NOT saved (recording)");
+        msleep(3000);
+    }
+
+    NotifyBox(6000, "AF drive %s: final/best %d%% moves=%d %dms",
+              afd_aborted ? "ABORTED" : "done", pct, afd_moves, total_ms);
+
+out:
+    afdiag_afdrive_busy = 0;
+}
+
+static MENU_SELECT_FUNC(afdiag_afdrive_select)
+{
+    (void) priv;
+    (void) delta;
+    task_create("afdiag_afdrive", 0x1e, 0x3000, afdiag_afdrive_task, (void*)0);
+}
+
 static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF diag log",
@@ -7381,6 +7729,25 @@ static struct menu_entry afdiag_menu[] = {
         .help2     = "Sends the confirmed (8,2,32) index-16 message and samples sharpness in the centre;\n"
                      "stops with (9,3,1) when sharpness passes its peak on the far leg (max 3 s). Needs AF mode,\n"
                      "LV, not recording; refuses at infinity. Always traced to ML/LOGS/AFSEARCH.LOG.",
+    },
+    {
+        .name      = "AF drive (MPU)",
+        .select    = afdiag_afdrive_select,
+        .icon_type = IT_DICE,
+        .help      = "EXPERIMENTAL: one-shot contrast-detect AF with MPU relative lens moves.",
+        .help2     = "Probes the direction, climbs in coarse steps while the centre sharpness rises, returns to the\n"
+                     "best spot, then refines in fine steps. Needs AF mode, LV, not recording; close the menu.\n"
+                     "Aborts if recording starts or the menu opens. Traced to ML/LOGS/AFDRIVE.LOG.",
+    },
+    {
+        .name      = "AF drive monitor",
+        .priv      = &afdiag_afdrive_mon,
+        .max       = 1,
+        .choices   = CHOICES("OFF", "ON"),
+        .icon_type = IT_BOOL,
+        .help      = "AF drive (MPU): open the MPU monitor (MpuMonOpen/Close) around the run.",
+        .help2     = "OFF (default): send session/moves/stop directly; the monitor blacks out LiveView ~1.5 s.\n"
+                     "ON: same framing as mpu_lab Drive test. Logged in the AFDRIVE.LOG header.",
     },
 };
 
