@@ -67,7 +67,13 @@ Settings → **Auto refocus**: OFF / ON / ON + REC.
   - **AF "OK" but still blurry counts as a failure** (an "OK" at the end stop is common). If two OK AFs in a row land at the same sharpness (±25–33%), it is treated as a new, less detailed scene and the old peak is forgotten, instead of hunting.
   - **The failure pause ends after 20 s** with one more attempt.
   - **Absolute fallback** when no usable peak exists: q = 100 × Laplacian / gradient sum, one attempt per blur episode. Its thresholds are guesses until calibrated from logs.
-  - **Refocus sensitivity** (Low / Medium / High):
+  - **Field run 27 fixes:**
+    - The peak stored the edge strength of a different sample than its value, so real peaks were rejected as "no texture" (gate 4 was the most common blocker). It now keeps the strongest edge seen.
+    - The peak minimums were lowered: blur sits at 16–25k, noise at 10–14k.
+    - The absolute test was inverted. **q goes up with blur**: blurry 100–132 with max edge 16–45, sharp 44–81 with max edge 240–380. Blur = q ≥ 105 (Medium) / 95 (High) and max edge ≤ 45 / 55.
+    - It stops deciding after a scene-change reset.
+    - A post-AF judgement older than 2 s is skipped.
+  - **Refocus sensitivity** (Low / Medium / High; peak minimums now 30000 / 20000 / 16000):
 
     | | Low | Medium | High |
     |---|---|---|---|
@@ -188,6 +194,12 @@ Manual half-presses during recording (x5) mostly locked only on far subjects (85
 The likely cause is that Canon's x5 AF area is computed in Canon's own x5 geometry, while the preset shows a different sensor window. It is unproven. ML's AF-frame helper (`move_lv_afframe`) refuses this mode. `PROP_LV_AFFRAME` is now logged (`@REFOCUS` w0 = 8) to check frame position against failures.
 
 ### 3.5 Canon half-press AF during RAW recording
+
+In-place AF at x5 while recording failed three times out of three in field run 27, with Canon reporting failure each time. The trigger can't fix that; x10 AF is only possible when not recording.
+
+Short 1x1 recordings at 2880×1206 are not an AF issue. At about 6 MB per frame and 24 fps, the data rate far exceeds what the EOS M can write. mlv_lite fills its buffer (about 17 frames) and stops after a few seconds. Lower the resolution or bit depth for continuous recording.
+
+
 
 It works only with Small Hacks OFF. With "More" small hacks, Canon's AeWb task is suspended, which also blocks exposure changes.
 

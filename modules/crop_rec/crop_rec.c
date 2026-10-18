@@ -9225,13 +9225,19 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
 static const uint8_t  aref_drop_pct[3]  = { 45, 60, 70 };
 static const uint16_t aref_dwell_ms[3]  = { 1000, 700, 500 };
 static const uint16_t aref_dwell_rec[3] = { 600, 350, 250 };
-static const uint32_t aref_peak_min[3]  = { 45000, 30000, 24000 };
+static const uint32_t aref_peak_min[3]  = { 30000, 20000, 16000 }; /* field: blur 16-25k, noise 10-14k */
 /* Absolute "blurry" path (scene-normalised): Laplacian energy / gradient energy, in %.
  * Used only when there is no usable remembered peak, once per blur episode.  Not
  * calibrated against real frames yet (the logs hold no gradient): the thresholds are
  * conservative and the value is logged (REFOCUS kind 10) so they can be tuned. 0 = off. */
-static const uint8_t  aref_abs_q[3]     = { 0, 15, 25 };
-#define AREF_ABS_Q_GOOD     40    /* q at/above this re-arms the absolute path */
+/* Absolute blur test, calibrated on field run 27 (x5 presets): blurry
+ * pictures had q = 100-132 with max edge 16-45; sharp ones q = 44-81 with
+ * max edge 240-380 (low-detail sharp scenes: q ~52, edge 46-73).  Noise
+ * dominates a blurry Laplacian, so q goes UP with blur. */
+static const uint8_t  aref_abs_q[3]     = { 0, 105, 95 };   /* q at/above this ... */
+static const uint8_t  aref_abs_em[3]    = { 0, 45, 55 };    /* ... and max edge at/below this = blurry */
+#define AREF_ABS_Q_GOOD     85    /* q below this with a strong edge (see below) re-arms the absolute path */
+#define AREF_ABS_EM_GOOD    100
 
 enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN };
 
@@ -9247,7 +9253,8 @@ static int aref_pk_em[2];
 static int aref_pk_t = 0;            /* ms: start of the current bucket, 0 = empty */
 static int aref_forget = 0;          /* clear the memory at the next (re)acquire */
 static int aref_post_check = 0;      /* judge the picture after our AF finished OK */
-static uint32_t aref_post_prev = 0;  /* sharpness after the previous OK-but-blurry AF, 0 = none */
+static uint32_t aref_post_prev = 0;
+static int aref_post_t = 0;          /* ms when our AF finished OK (for aref_post_check) */  /* sharpness after the previous OK-but-blurry AF, 0 = none */
 static int aref_take_at = 0;         /* ms: settle end, no judging before */
 static int aref_next_at = 0;         /* ms: cooldown end */
 static int aref_last_t = 0;          /* ms: last sample */
@@ -9323,7 +9330,11 @@ static void aref_peak_update(int now, uint32_t v, int em)
         aref_pk_em[0] = 0;
         aref_pk_t = now;
     }
-    if (v >= aref_pk_v[0]) { aref_pk_v[0] = v; aref_pk_em[0] = em; }
+    /* Field run: the peak value is a 3-sample median but em came from the
+     * current sample, so a real 59k peak (em 324) was stored with a blurry
+     * frame's em and rejected as "no texture".  Keep the strongest edge seen. */
+    if (v >= aref_pk_v[0]) aref_pk_v[0] = v;
+    if (em > aref_pk_em[0]) aref_pk_em[0] = em;
     int b = aref_pk_v[1] > aref_pk_v[0];
     aref_ref = aref_pk_v[b];
     aref_ref_em = aref_pk_em[b];
@@ -9382,6 +9393,7 @@ static void aref_step(void)
             aref_next_at = now + AREF_COOLDOWN_MS;
             aref_drop_ref(now, AREF_SETTLE_MS, 0);
             aref_post_check = 1;
+            aref_post_t = now;
             aref_log(2, 0);
         }
         else
@@ -9504,8 +9516,10 @@ static void aref_step(void)
     int gate = 0;
 
     /* Re-arm the absolute path once a sharp picture has been seen again. */
-    if (q >= AREF_ABS_Q_GOOD && cur >= pmin) aref_abs_used = 0;
+    if (q < AREF_ABS_Q_GOOD && emax >= AREF_ABS_EM_GOOD) aref_abs_used = 0;
 
+    if (aref_post_check && now - aref_post_t > 2000)
+        aref_post_check = 0;  /* a menu or half-press intervened: different picture, don't judge it */
     if (aref_post_check)
     {
         aref_post_check = 0;
@@ -9519,6 +9533,7 @@ static void aref_step(void)
             aref_fails = 0;
             aref_peak_clear();
             aref_log(12, cur);
+            return; /* decide again on the next sample, from the cleared state */
         }
         else if (peak && peak >= pmin && cur * 100 < peak * pct)
         {
@@ -9576,7 +9591,7 @@ static void aref_step(void)
             gate = 4;
         /* no usable memory (lost it, or only ever saw blur): absolute check */
         if (!path && gate == 4 && aref_abs_q[sens] && !aref_abs_used &&
-            q <= aref_abs_q[sens] && gn >= AREF_ABS_G_MIN)
+            q >= aref_abs_q[sens] && emax <= aref_abs_em[sens] && gn >= AREF_ABS_G_MIN)
         {
             path = 2;
             gate = 0;
