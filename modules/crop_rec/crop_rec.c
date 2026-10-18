@@ -124,6 +124,7 @@ static int crop_preset_fps = 0;
 CONFIG_INT("crop.button_SET",       SET_button, 1);
 static CONFIG_INT("crop.button_H-Shutter", Half_Shutter, 2);
 CONFIG_INT("crop.button_INFO",      INFO_button, 0);
+CONFIG_INT("crop.auto_refocus", Auto_refocus, 0); /* EOS M slim: 0=OFF, 1=ON, 2=ON + REC */
 CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10, 3=AF assist */
 CONFIG_INT("crop.arrows_U_D",       Arrows_U_D, 3); /* ISO */
 CONFIG_INT("crop.more_hacks",       more_hacks, 1);
@@ -443,7 +444,11 @@ static volatile int slim_af_request = 0;
  * (0 = focused, 1 = failed); field logs showed it ~0.3-1 s after the AF
  * request.  PROP_LV_FOCUS_STATUS never reports "focusing" on this camera. */
 static volatile int slim_af_result_count = 0;
+static volatile int slim_af_last_result = 0; /* payload of the last PROP_LV_AF_RESULT: 0 = OK, 1 = failed */
 static int slim_af_result_seen = 0;
+/* Auto refocus while recording: run AF in place (no x10 zoom, which would
+ * wreck the recording); request value 2 instead of 1. */
+static int slim_af_inplace = 0;
 static int slim_af_state = SLIM_AF_IDLE;
 static int slim_af_since = 0;
 static int slim_af_sw1_held = 0;
@@ -464,11 +469,19 @@ static int slim_af_can_start(void)
            !crop_rec_lv_transition_busy();
 }
 
+static int slim_af_can_start_inplace(void)
+{
+    return is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU &&
+           !gui_menu_shown() && lv_disp_mode == 0 && !is_manual_focus() &&
+           !crop_rec_lv_transition_busy();
+}
+
 static void slim_af_finish(void)
 {
     slim_af_sw1(0);
     slim_af_state = SLIM_AF_IDLE;
     slim_af_request = 0;
+    slim_af_inplace = 0;
     /* No-op unless we are still idle in x10; leaving x10 restarts the guard. */
     slim_zoom_from_x10();
 }
@@ -481,7 +494,17 @@ static int slim_af_step(void)
     if (slim_af_state == SLIM_AF_IDLE)
     {
         if (!slim_af_request) return 0;
+        int inplace = (slim_af_request == 2);
         slim_af_request = 0;
+        if (inplace)
+        {
+            if (!slim_af_can_start_inplace()) return 0;
+            slim_af_inplace = 1;
+            slim_af_result_seen = slim_af_result_count;
+            slim_af_state = SLIM_AF_SETTLE;
+            slim_af_since = now;
+            return 1;
+        }
         if (!slim_af_can_start()) return 0;
 
         slim_zoom_to_x10();
@@ -494,7 +517,8 @@ static int slim_af_step(void)
     }
 
     /* Recording, a menu, SET or a lens switch took x10 away: stop cleanly. */
-    if (!lv || RECORDING || gui_menu_shown() || lv_dispsize != 10 || is_manual_focus())
+    if (!lv || gui_menu_shown() || is_manual_focus() ||
+        (!slim_af_inplace && (RECORDING || lv_dispsize != 10)))
     {
         slim_af_finish();
         return 0;
@@ -5893,6 +5917,17 @@ static struct menu_entry slim_info_button_menu[] = {
         .help2     = "AF: zoom to x10, autofocus once, return (AF lens; acts like ON with manual lens).\n"
                      "Only in movie LV with ML overlays. Not active while recording.",
     },
+    {
+        .name      = "Auto refocus",
+        .priv      = &Auto_refocus,
+        .max       = 2,
+        .choices   = CHOICES("OFF", "ON", "ON + REC"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_DICE,
+        .help      = "Refocus with Canon AF when the picture gets blurry and the scene has settled.",
+        .help2     = "AF lens only; off with Movie Servo AF. ON + REC: also while recording - during RAW\n"
+                     "recording Canon AF needs Small Hacks OFF and may hunt.",
+    },
 };
 
 /* Mode UI: 0=1x1, 1=1x3, 2=3x3, 3=LV (Full-Res LiveView). */
@@ -5949,6 +5984,9 @@ enum
                           * The 2.0.2 firmware itself reads 0x24, 0x27 ("Po") and 0x2C (focal length). */
     AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
                           * w2 = bytes 4/5, w3 = byte 6 */
+    AFD_EV_REFOCUS,      /* auto refocus: w0 = what (1 trigger, 2 AF ok, 3 AF failed, 4 request not started,
+                          * 5 paused, 6 resumed, 7 reference taken), w1 = current sharpness,
+                          * w2 = S_ref, w3 = lv_dispsize | RECORDING << 8 | consecutive fails << 16 */
 };
 
 /* Found in the EOS M 2.0.2 ROM (handler 0xFF27AC18): the MPU reports the
@@ -6120,7 +6158,12 @@ PROP_HANDLER(PROP_LV_FOCUS_PULSE_COUNT)
         len >= 6 ? (uint32_t)((b[4] << 8) | b[5]) : 0,
         len >= 7 ? b[6] : 0);
 }
-PROP_HANDLER(PROP_LV_AF_RESULT)        { slim_af_result_count++; afdiag_prop(property, buf, len); }
+PROP_HANDLER(PROP_LV_AF_RESULT)
+{
+    slim_af_last_result = (buf && len >= 1 && (((uint8_t *)buf)[0] & 0xFF)) ? 1 : 0;
+    slim_af_result_count++;
+    afdiag_prop(property, buf, len);
+}
 PROP_HANDLER(PROP_LV_FOCUS_STATE)      { afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_STATUS)     { afdiag_prop(property, buf, len); }
 PROP_HANDLER(PROP_LV_FOCUS_DATA)       { afdiag_prop(property, buf, len); }
@@ -6158,6 +6201,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_FPC:                return "@FPC";
         case AFD_EV_LVLENS:             return "@LVLENS";
         case AFD_EV_SWEEP:              return "@SWEEP";
+        case AFD_EV_REFOCUS:            return "@REFOCUS";
     }
     return "?";
 }
@@ -8582,6 +8626,212 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
 }
 #endif
 
+
+/* EOS M slim: Auto refocus (Settings → Auto refocus).
+ *
+ * ML cannot drive the lens itself on this camera, but Canon's half-press AF
+ * can, and the one-shot AF assist above already runs it.  This monitor
+ * watches the live sharpness (afdiag_sharpness) and, when focus has clearly
+ * been lost and the picture has settled, raises that same AF request.
+ *
+ * It runs inside crop_rec_polling_cbr, right after slim_af_step(), on the
+ * same task: no locks, it can never overlap the AF state machine (it only
+ * raises a request while slim_af_state is IDLE and no request is pending),
+ * and one sample every AREF_PERIOD_MS costs a few thousand pixel reads.
+ * Sharpness depends on scene and zoom, so S_ref is only compared at the
+ * zoom it was taken at.  While recording, AF runs in place (request 2). */
+#define AREF_PERIOD_MS      200   /* sharpness sampling interval */
+#define AREF_SETTLE_MS      500   /* wait after AF / regained eligibility before taking S_ref */
+#define AREF_DROP_PCT       60    /* "blurry": current below this % of S_ref ... */
+#define AREF_DROP_MS        600   /* ... continuously for this long */
+#define AREF_STEADY_PCT     15    /* last 3 samples within this % of each other */
+#define AREF_MIN_SHARP      40000 /* S_ref floor: ignore flat, textureless scenes */
+#define AREF_COOLDOWN_MS    2000  /* after any AF */
+#define AREF_FAIL_BACKOFF_MS 4000 /* after a failed AF */
+#define AREF_MAX_FAILS      3     /* consecutive failures before pausing */
+
+enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN };
+
+static int aref_phase = AREF_MON;
+static int aref_prev_mode = 0;
+static int aref_eligible = 0;
+static uint32_t aref_ref = 0;        /* S_ref, 0 = not taken yet */
+static int aref_ref_zoom = 0;        /* lv_dispsize S_ref belongs to */
+static int aref_take_at = 0;         /* ms: earliest time to take S_ref */
+static int aref_next_at = 0;         /* ms: cooldown end */
+static int aref_last_t = 0;          /* ms: last sample */
+static uint32_t aref_hist[3];
+static int aref_hist_n = 0;
+static int aref_low_since = 0;       /* ms: sharpness has been low since, 0 = not low */
+static int aref_fails = 0;
+static int aref_paused = 0;
+static uint32_t aref_pause_ref = 0;  /* S_ref at the failure that paused us */
+static uint32_t aref_trig_ref = 0;
+static int aref_count0 = 0;          /* slim_af_result_count at the request */
+
+static void aref_log(int what, uint32_t cur)
+{
+    afdiag_record(AFD_EV_REFOCUS, 16, what, cur, aref_ref,
+                  lv_dispsize | (RECORDING ? 0x100 : 0) | (aref_fails << 16));
+}
+
+static void aref_drop_ref(int now, int wait_ms)
+{
+    aref_ref = 0;
+    aref_take_at = now + wait_ms;
+    aref_low_since = 0;
+    aref_hist_n = 0;
+}
+
+static void aref_step(void)
+{
+    int now = get_ms_clock();
+    int busy = slim_af_state != SLIM_AF_IDLE;
+
+    /* Setting toggled: forget everything, including a pause. */
+    if (Auto_refocus != aref_prev_mode)
+    {
+        aref_prev_mode = Auto_refocus;
+        aref_fails = 0;
+        aref_paused = 0;
+        aref_eligible = 0;
+    }
+
+    /* Follow an AF run, ours or the user's (Shutter zoom AF). */
+    if (aref_phase == AREF_MON && busy)
+        aref_phase = AREF_FOREIGN;
+    else if (aref_phase == AREF_REQUESTED)
+    {
+        if (busy)
+            aref_phase = AREF_OURS;
+        else if (!slim_af_request)
+        {
+            /* the state machine refused (menu, zoom, MF ...) */
+            aref_phase = AREF_MON;
+            aref_next_at = now + AREF_COOLDOWN_MS;
+            aref_log(4, 0);
+        }
+    }
+    else if ((aref_phase == AREF_OURS || aref_phase == AREF_FOREIGN) && !busy)
+    {
+        /* No PROP_LV_AF_RESULT before the blind timeout counts as failure. */
+        int failed = slim_af_result_count == aref_count0 || slim_af_last_result;
+        if (aref_phase == AREF_FOREIGN)
+        {
+            aref_next_at = now + AREF_COOLDOWN_MS;
+            aref_drop_ref(now, AREF_SETTLE_MS);
+        }
+        else if (!failed)
+        {
+            aref_fails = 0;
+            aref_next_at = now + AREF_COOLDOWN_MS;
+            aref_drop_ref(now, AREF_SETTLE_MS);
+            aref_log(2, 0);
+        }
+        else
+        {
+            /* S_ref = current: re-taken once the back-off is over. */
+            aref_fails++;
+            if (aref_fails >= AREF_MAX_FAILS && !aref_paused)
+            {
+                aref_paused = 1;
+                aref_pause_ref = aref_trig_ref;
+                aref_log(5, 0);
+            }
+            aref_next_at = now + AREF_FAIL_BACKOFF_MS;
+            aref_drop_ref(now, AREF_FAIL_BACKOFF_MS);
+            aref_log(3, 0);
+        }
+        aref_phase = AREF_MON;
+        return;
+    }
+    if (aref_phase != AREF_MON) return;
+
+    int elig = Auto_refocus && is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU &&
+               !busy && !slim_af_request && !afdiag_lens_test &&
+               !is_manual_focus() && !is_continuous_af() &&
+               !gui_menu_shown() && lv_disp_mode == 0 &&
+               !crop_rec_lv_transition_busy() && !mlv_raw_rec_busy() &&
+               !get_halfshutter_pressed() &&
+               (RECORDING ? Auto_refocus == 2 : lv_dispsize == 5);
+    if (!elig)
+    {
+        aref_eligible = 0;
+        return;
+    }
+    if (!aref_eligible || lv_dispsize != aref_ref_zoom)
+    {
+        /* newly eligible or zoom changed: re-acquire from the live picture */
+        aref_eligible = 1;
+        aref_ref_zoom = lv_dispsize;
+        aref_drop_ref(now, AREF_SETTLE_MS);
+        aref_last_t = 0;
+        return;
+    }
+
+    if (now - aref_last_t < AREF_PERIOD_MS) return;
+    aref_last_t = now;
+
+    int mean, n, emax;
+    uint32_t cur = afdiag_sharpness(&mean, &n, &emax);
+    if (!n) return;
+
+    if (aref_hist_n < 3) aref_hist_n++;
+    aref_hist[2] = aref_hist[1];
+    aref_hist[1] = aref_hist[0];
+    aref_hist[0] = cur;
+
+    if (aref_paused)
+    {
+        /* resume once sharpness is back (manual focus, scene change ...) */
+        if (cur * 100 >= aref_pause_ref * AREF_DROP_PCT)
+        {
+            aref_paused = 0;
+            aref_fails = 0;
+            aref_drop_ref(now, 0);
+            aref_log(6, cur);
+        }
+        return;
+    }
+
+    if (!aref_ref)
+    {
+        if (now >= aref_take_at)
+        {
+            aref_ref = cur;
+            aref_log(7, cur);
+        }
+        return;
+    }
+    if (cur > aref_ref) aref_ref = cur;
+
+    if (cur * 100 < aref_ref * AREF_DROP_PCT)
+    {
+        if (!aref_low_since) aref_low_since = now;
+    }
+    else
+        aref_low_since = 0;
+
+    if (!aref_low_since || now - aref_low_since < AREF_DROP_MS) return;
+    if (now < aref_next_at || aref_ref < AREF_MIN_SHARP) return;
+    if (aref_hist_n < 3) return;
+
+    uint32_t hi = aref_hist[0], lo = aref_hist[0];
+    for (int i = 1; i < 3; i++)
+    {
+        if (aref_hist[i] > hi) hi = aref_hist[i];
+        if (aref_hist[i] < lo) lo = aref_hist[i];
+    }
+    if (hi * 100 > lo * (100 + AREF_STEADY_PCT)) return; /* scene still moving */
+
+    aref_trig_ref = aref_ref;
+    aref_count0 = slim_af_result_count;
+    aref_low_since = 0;
+    aref_phase = AREF_REQUESTED;
+    slim_af_request = RECORDING ? 2 : 1;
+    aref_log(1, cur);
+}
+
 /* when closing ML menu, check whether we need to refresh the LiveView */
 static unsigned int crop_rec_polling_cbr(unsigned int unused)
 {
@@ -8652,7 +8902,10 @@ static unsigned int crop_rec_polling_cbr(unsigned int unused)
      * half-shutter press. */
     int slim_af_busy = slim_af_step();
     if (is_EOSM)
+    {
         afdiag_sample(); /* catch a transition made by this step */
+        aref_step();     /* also while recording: ON + REC */
+    }
     if (slim_af_busy)
         return CBR_RET_CONTINUE;
 
@@ -9963,6 +10216,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(SET_button)
     MODULE_CONFIG(INFO_button)
     MODULE_CONFIG(Shutter_zoom)
+    MODULE_CONFIG(Auto_refocus)
     MODULE_CONFIG(tapdisp)
     MODULE_CONFIG(Arrows_L_R)
     MODULE_CONFIG(Arrows_U_D)
