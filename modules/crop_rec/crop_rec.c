@@ -8747,6 +8747,7 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
 #define AREF_COOLDOWN_MS    2000  /* after any AF */
 #define AREF_FAIL_BACKOFF_MS 4000 /* after a failed AF */
 #define AREF_MAX_FAILS      3     /* consecutive failures before pausing */
+#define AREF_REC_START_MS   2000  /* ON + REC: wait this long after RAW recording starts */
 
 enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN };
 
@@ -8845,11 +8846,21 @@ static void aref_step(void)
     }
     if (aref_phase != AREF_MON) return;
 
+    /* mlv_raw_rec_busy() is true for the whole RAW recording, not only while
+     * it starts and stops (field run: ON + REC never fired).  Block only the
+     * transitions: busy without RECORDING_RAW, and the first seconds after
+     * recording starts. */
+    static int aref_rec_since = 0;
+    if (RECORDING_RAW) { if (!aref_rec_since) aref_rec_since = now ? now : 1; }
+    else aref_rec_since = 0;
+    int raw_transition = (mlv_raw_rec_busy() && !RECORDING_RAW) ||
+                         (RECORDING_RAW && now - aref_rec_since < AREF_REC_START_MS);
+
     int elig = Auto_refocus && is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU &&
                !busy && !slim_af_request && !afdiag_lens_test &&
                !is_manual_focus() && !is_continuous_af() &&
                !gui_menu_shown() && lv_disp_mode == 0 &&
-               !crop_rec_lv_transition_busy() && !mlv_raw_rec_busy() &&
+               !crop_rec_lv_transition_busy() && !raw_transition &&
                !get_halfshutter_pressed() &&
                (RECORDING ? Auto_refocus == 2 : lv_dispsize == 5);
     if (!elig)
