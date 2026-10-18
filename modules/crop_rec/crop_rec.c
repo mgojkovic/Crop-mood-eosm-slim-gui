@@ -6212,7 +6212,7 @@ static void afdiag_flush(void)
     {
         unsigned lost = head - afdiag_tail - AFDIAG_RING;
         afdiag_tail += lost;
-        n += snprintf(buf + n, sizeof(buf) - n, "# dropped %u entries (ring full)\n", lost);
+        n += snprintf(buf + n, sizeof(buf) - n, "# dropped %d entries (ring full)\n", (int)lost); /* ML snprintf has no %u */
     }
 
     while (afdiag_tail != head)
@@ -6252,7 +6252,17 @@ static int afdiag_direct_focus(int steps)
     f[2] = steps & 0xFF;
     f[3] = 0xFF;
     f[4] = 0xFF;
-    prop_request_change(PROP_LV_FOCUS, f, 5);
+    /* ML's prop_request_change() refuses this: Canon's property table
+     * reports length 0 for PROP_LV_FOCUS (it is a request to the MPU that
+     * the main CPU never stores), so the call ended in an ML ASSERT and was
+     * never sent.  Call Canon's _prop_request_change exactly the way the
+     * 2.0.2 firmware itself does at 0xFF1844C4 (same 5 bytes, same length).
+     * The stub is not exported to modules, so call it by address and only
+     * on this exact firmware. */
+    if (!is_camera("EOSM", "2.0.2")) return 0;
+    void (*canon_prop_request_change)(unsigned, const void *, size_t) =
+        (void (*)(unsigned, const void *, size_t)) 0xFF11FB04;
+    canon_prop_request_change(PROP_LV_FOCUS, f, 5);
     for (int i = 0; i < 300; i++)   /* up to 3 s */
     {
         if (afdiag_focus_done_count != done0) return 1;
