@@ -60,7 +60,24 @@ Settings → **Auto refocus**: OFF / ON / ON + REC.
 - Known limits:
   - Recording AF is Canon's x5 AF, which favours far subjects.
   - A failed AF while recording usually parks the lens at the near end stop (about 25 cm). Canon does this.
-  - The trigger was reported as not sensitive enough: clearly blurry scenes produced no attempts. This is being reworked (see section 9).
+  - The first version was not sensitive enough: clearly blurry scenes produced no attempts. Replaying the logs showed why. The reference was re-taken from an already-blurry picture (after a menu, zoom change, failed AF or recording start), and a 40000 absolute floor disabled triggering for blurry references. A drop below 60% was fine: real blur is 10–35% of the recent best.
+- Reworked trigger (commit 480e704 plus a follow-up):
+  - **Peak memory:** compares against the best sharpness of the last 12–24 s (two 12 s buckets), fed with the median of 3 samples so single-frame spikes can't poison it. It survives failed AF, menus, half-press and recording start. It is cleared on a zoom change, a setting toggle, a Shutter zoom AF, or a detected scene change.
+  - **No absolute floor:** a texture check on the peak (`emax` ≥ 70) replaces it.
+  - **AF "OK" but still blurry counts as a failure** (an "OK" at the end stop is common). If two OK AFs in a row land at the same sharpness (±25–33%), it is treated as a new, less detailed scene and the old peak is forgotten, instead of hunting.
+  - **The failure pause ends after 20 s** with one more attempt.
+  - **Absolute fallback** when no usable peak exists: q = 100 × Laplacian / gradient sum, one attempt per blur episode. Its thresholds are guesses until calibrated from logs.
+  - **Refocus sensitivity** (Low / Medium / High):
+
+    | | Low | Medium | High |
+    |---|---|---|---|
+    | Fires below % of peak | 45 | 60 | 70 |
+    | Dwell, not recording (ms) | 1000 | 700 | 500 |
+    | Dwell, recording (ms) | 600 | 350 | 250 |
+    | Peak minimum | 45000 | 30000 | 24000 |
+    | Absolute q ≤ | off | 15 | 25 |
+
+  - Decision logging (AF diag log on): `@REFOCUS` kind 10, once per second and at each trigger, records the gate that blocked it (0 fired, 1 not low, 2 dwell, 3 cooldown, 4 no usable peak, 5 unsteady, 6 paused, 8 history). Kind 11 records why it is ineligible, as a bitmask (1 mode, 2 AF busy, 4 MF/servo, 8 menu/display, 16 transition/raw, 32 half-press, 64 zoom/REC rule).
 - Code: block "EOS M slim: Auto refocus", `aref_step()`, `#define AREF_*`.
 - Diagnostics: `@REFOCUS` events in the AF diag log. w0 kinds:
 
@@ -74,6 +91,10 @@ Settings → **Auto refocus**: OFF / ON / ON + REC.
   | 6 | resumed |
   | 7 | reference taken |
   | 8 | AF frame record |
+  | 9 | AF OK but still blurry |
+  | 10 | periodic decision record |
+  | 11 | ineligible gates |
+  | 12 | new scene, peak forgotten |
 
 ### 2.3 ISO/shutter/aperture shortcuts while recording
 
@@ -323,7 +344,7 @@ The logs were copied from `ML/LOGS` to the session scratchpad.
 
 ## 9. Open items
 
-1. **Auto refocus sensitivity:** clearly blurry scenes sometimes get no attempt. Likely causes: the reference is re-taken from an already-blurry picture, the absolute sharpness floor, and a strict drop ratio. Being reworked with a longer-term "best recent sharpness", a scene-normalised focus measure and a sensitivity setting.
+1. **Auto refocus:** field-test the reworked trigger (section 2.2). Check for hunting at Medium and High on pans and scene changes. Calibrate the absolute q thresholds from kind 10 records.
 2. **x5 AF area vs preset framing:** use the new `PROP_LV_AFFRAME` logs to see whether failures correlate with an off-centre frame.
 3. **Direct drive, if ever revisited:** send the AF-session (0x8005003C), FOCUS_STOP and LensSearchDriveStart requests with the correct Canon-table lengths, then confirm in the `@MPU` log that they reach the MPU, and only then test relative moves inside a session. Expect a low chance of success.
 4. **Release build:** hide or remove the diagnostic menu entries (AF diag log, AF lens test) and the MPU hook.

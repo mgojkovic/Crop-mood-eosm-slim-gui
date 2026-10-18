@@ -6030,7 +6030,9 @@ enum
                           * end of run: w0 = 0xFF01, w1 = stop reason (0 none, 1 LV lost, 2 recording,
                           * 3 menu, 4 switched off), w2 = steps done, w3 = steps planned */
     AFD_EV_REFOCUS,      /* auto refocus: w0 = what (1 trigger, 2 AF ok, 3 AF failed, 4 request not started,
-                          * 5 paused, 6 resumed, 7 reference taken), w1 = current sharpness,
+                          * 5 paused, 6 resumed, 7 reference taken, 8 AF frame, 9 AF ok but still blurry,
+                          * 10 periodic decision record, 11 ineligible gates, 12 new scene - peak forgotten),
+                          * w1 = current sharpness,
                           * w2 = S_ref, w3 = lv_dispsize | RECORDING << 8 | consecutive fails << 16 */
 };
 
@@ -9245,6 +9247,7 @@ static int aref_pk_em[2];
 static int aref_pk_t = 0;            /* ms: start of the current bucket, 0 = empty */
 static int aref_forget = 0;          /* clear the memory at the next (re)acquire */
 static int aref_post_check = 0;      /* judge the picture after our AF finished OK */
+static uint32_t aref_post_prev = 0;  /* sharpness after the previous OK-but-blurry AF, 0 = none */
 static int aref_take_at = 0;         /* ms: settle end, no judging before */
 static int aref_next_at = 0;         /* ms: cooldown end */
 static int aref_last_t = 0;          /* ms: last sample */
@@ -9302,6 +9305,7 @@ static void aref_peak_clear(void)
     aref_pk_t = 0;
     aref_ref = 0;
     aref_ref_em = 0;
+    aref_post_prev = 0;
 }
 
 /* Two-bucket decaying peak: the best sharpness seen in the last 12..24 s. */
@@ -9505,9 +9509,21 @@ static void aref_step(void)
     if (aref_post_check)
     {
         aref_post_check = 0;
-        if (peak && peak >= pmin && cur * 100 < peak * pct)
+        if (peak && peak >= pmin && cur * 100 < peak * pct &&
+            aref_post_prev && cur * 100 >= aref_post_prev * 75 && cur * 100 <= aref_post_prev * 133)
+        {
+            /* Two OK AFs in a row landed at the same sharpness, still far below
+             * the remembered peak: that is a new, less detailed scene, not
+             * blur.  Forget the old peak instead of hunting. */
+            aref_post_prev = 0;
+            aref_fails = 0;
+            aref_peak_clear();
+            aref_log(12, cur);
+        }
+        else if (peak && peak >= pmin && cur * 100 < peak * pct)
         {
             /* AF said OK but the picture is still blurry: counts as a failure */
+            aref_post_prev = cur;
             aref_fails++;
             if (aref_fails >= AREF_MAX_FAILS && !aref_paused)
             {
@@ -9519,7 +9535,10 @@ static void aref_step(void)
             aref_log(9, cur);
         }
         else
+        {
             aref_fails = 0;
+            aref_post_prev = 0;
+        }
     }
 
     if (aref_paused)
