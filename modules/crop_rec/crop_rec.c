@@ -5938,11 +5938,11 @@ enum
     AFD_EV_AFSTATE = 1,  /* w0 = old slim_af_state, w1 = new */
     AFD_EV_FOCUS,        /* w0/w1 = focus_pos old/new, w2/w3 = focus_dist old/new */
     AFD_EV_REC,          /* w0 = RECORDING, w1 = RECORDING_RAW */
-    AFD_EV_LENS_STEP,    /* w0 = signed step size (+-1..3), w1 = lens_focus ret, w2 = pos before, w3 = elapsed ms */
+    AFD_EV_LENS_STEP,    /* w0 = signed burst count (size-3 commands), w1 = lens_focus ret, w2 = pos before, w3 = elapsed ms */
     AFD_EV_LENS_SKIP,    /* w0 = reason: 1 manual focus, 2 continuous AF, 3 slim AF busy, 4 not LV movie */
     AFD_EV_SHARP,        /* w0 = edge sum, w1 = mean luma, w2 = samples, w3 = max edge
                           * (centre 1/4 x 1/4 of the displayed LV buffer; Laplacian on luma) */
-    AFD_EV_STEP_SHARP,   /* w0 = signed step size, w1 = edge sum before the step, w2 = edge sum 300 ms after,
+    AFD_EV_STEP_SHARP,   /* w0 = signed burst count, w1 = edge sum before the step, w2 = edge sum 300 ms after,
                           * w3 = mean luma after */
 };
 
@@ -6256,20 +6256,21 @@ static void afdiag_lens_task(void *unused)
         int before = lens_info.focus_pos;
         int m0, n0, x0;
         uint32_t sharp_before = afdiag_sharpness(&m0, &n0, &x0);
-        /* Step size 1 was too small to see or measure in the field, so
-         * cycle sizes 1, 2, 3 (+size then -size, so focus returns). The
-         * logged w0 is the signed size: +-1, +-2, +-3. */
-        static const int sizes[] = { 1, 2, 3 };
-        static int size_idx = 0;
-        int size = sizes[size_idx];
-        int ret = lens_focus(dir, size, 1, 0);
+        /* Field tests: single commands of size 1-3 were all accepted but
+         * moved an STM lens too little to see or measure.  Send bursts of
+         * size-3 commands instead: 5, 10, then 20 (+N then -N, so focus
+         * returns).  The logged w0 is the signed command count. */
+        static const int bursts[] = { 5, 10, 20 };
+        static int burst_idx = 0;
+        int count = bursts[burst_idx];
+        int ret = lens_focus(dir * count, 3, 1, 0);
         int elapsed = get_ms_clock() - now;
-        afdiag_record(AFD_EV_LENS_STEP, 16, dir * size, ret, before, elapsed);
+        afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, ret, before, elapsed);
         msleep(AFDIAG_STEP_SETTLE);
         int m1, n1, x1;
         uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
-        afdiag_record(AFD_EV_STEP_SHARP, 16, dir * size, sharp_before, sharp_after, m1);
-        if (dir < 0) size_idx = (size_idx + 1) % COUNT(sizes);
+        afdiag_record(AFD_EV_STEP_SHARP, 16, dir * count, sharp_before, sharp_after, m1);
+        if (dir < 0) burst_idx = (burst_idx + 1) % COUNT(bursts);
         dir = -dir;
         last_step = get_ms_clock();
     }
