@@ -6402,30 +6402,39 @@ static void afdiag_sweep_phase(int phase, int signed_size, int end_dist, int cap
  * w1 = movie << 12 | lv_dispsize << 4 | size, so one session can compare
  * photo/movie and x1/x5.  A @STEP_SHARP follows each move (w1 = before,
  * w2 = 300 ms after). */
-static void afdiag_ab_move(int dir, int variant)
+/* Field run 16: ML's built-in Focus End Point (lens_focus size 2, wait,
+ * 10 ms extra delay) visibly moved the lens with Left, while every
+ * test of ours used size 3 or 15 and never moved it.  Now compare sizes
+ * 1 / 2 / 3, each +40 then -40 commands, with the built-in's timing. */
+static void afdiag_ab_move(int dir, int size)
 {
-    (void)variant;
     int m, n, x;
     uint32_t s0 = afdiag_sharpness(&m, &n, &x);
     int t0 = get_ms_clock();
     int d0 = lens_info.focus_dist;
-    lens_focus(dir * 100, 3, 1, 0);
+    lens_focus(dir * 40, size, 1, 10);
     int elapsed = get_ms_clock() - t0;
     int d1 = lens_info.focus_dist;
     msleep(300);
     uint32_t s1 = afdiag_sharpness(&m, &n, &x);
-    afdiag_record(AFD_EV_SWEEP, 16, dir * 300,
-                  (is_movie_mode() << 12) | ((lv_dispsize & 0xFF) << 4) | 3,
+    afdiag_record(AFD_EV_SWEEP, 16, dir * 40 * size,
+                  (is_movie_mode() << 12) | ((lv_dispsize & 0xFF) << 4) | size,
                   elapsed, ((d0 & 0xFFFF) << 16) | (d1 & 0xFFFF));
-    afdiag_record(AFD_EV_STEP_SHARP, 16, dir * 100, s0, s1, m);
+    afdiag_record(AFD_EV_STEP_SHARP, 16, dir * 40, s0, s1, m);
     msleep(1500);
 }
 
-static void afdiag_sweep(int size)
+static void afdiag_sweep(int unused)
 {
-    (void)size;
-    afdiag_ab_move(+1, 0);
-    afdiag_ab_move(-1, 0);
+    (void)unused;
+    for (int size = 1; size <= 3 && afdiag_lens_test == 2; size++)
+    {
+        /* tell the viewer what is moving now */
+        NotifyBox(1500, "AF lens test: size %d", size);
+        afdiag_ab_move(+1, size);
+        if (afdiag_lens_test != 2) break;
+        afdiag_ab_move(-1, size);
+    }
 }
 
 /* Lens test (choice 1 "Remote": bursts of remote commands, size 3 vs 15;
@@ -6548,7 +6557,7 @@ static struct menu_entry afdiag_menu[] = {
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY: move the focus motor back and forth in LV.",
-        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms (movie only). A/B: lens_focus 100 x size 3 each way, photo or movie.\n"
+        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms (movie only). A/B: lens_focus 40 x size 1, 2, 3, each way, photo or movie.\n"
                      "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
