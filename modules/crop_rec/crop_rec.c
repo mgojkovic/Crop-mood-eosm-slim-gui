@@ -428,6 +428,7 @@ static void slim_zoom_from_x10(void)
 #define SLIM_AF_BLIND_MS   1500   /* AF time when Canon reports no status */
 #define SLIM_AF_MAX_MS     4000   /* hard limit for one reported AF run */
 #define SLIM_AF_RELEASE_MS  150   /* pause around releasing the remote line */
+#define SLIM_AF_INPLACE_SETTLE_MS 30 /* in-place AF has no zoom switch to wait for */
 
 enum slim_af_state
 {
@@ -535,7 +536,7 @@ static int slim_af_step(void)
                 slim_af_since = now;
                 return 1;
             }
-            if (now - slim_af_since < SLIM_AF_SETTLE_MS)
+            if (now - slim_af_since < (slim_af_inplace ? SLIM_AF_INPLACE_SETTLE_MS : SLIM_AF_SETTLE_MS))
                 return 1;
             slim_af_sw1(1);
             slim_af_state = SLIM_AF_WAIT_START;
@@ -8752,12 +8753,15 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
 #define AREF_SETTLE_MS      500   /* wait after AF / regained eligibility before taking S_ref */
 #define AREF_DROP_PCT       60    /* "blurry": current below this % of S_ref ... */
 #define AREF_DROP_MS        600   /* ... continuously for this long */
-#define AREF_STEADY_PCT     15    /* last 3 samples within this % of each other */
+#define AREF_DROP_REC_MS    350   /* ON + REC: blur is in the footage, react sooner */
+#define AREF_STEADY_PCT     15    /* last 3 samples within this % of each other ... */
+#define AREF_STEADY_ABS_PCT 8     /* ... or within this % of S_ref (noise floor while blurry) */
 #define AREF_MIN_SHARP      40000 /* S_ref floor: ignore flat, textureless scenes */
 #define AREF_COOLDOWN_MS    2000  /* after any AF */
 #define AREF_FAIL_BACKOFF_MS 4000 /* after a failed AF */
 #define AREF_MAX_FAILS      3     /* consecutive failures before pausing */
 #define AREF_REC_START_MS   2000  /* ON + REC: wait this long after RAW recording starts */
+#define AREF_REC_RETRY_MS   1500  /* ON + REC: retry delay after the first failed AF (lens parks at an end stop) */
 
 enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN };
 
@@ -8782,6 +8786,22 @@ static void aref_log(int what, uint32_t cur)
 {
     afdiag_record(AFD_EV_REFOCUS, 16, what, cur, aref_ref,
                   lv_dispsize | (RECORDING ? 0x100 : 0) | (aref_fails << 16));
+}
+
+/* Read-only: remember and log Canon's AF frame (PROP_LV_AFFRAME: W, H, X, Y, w, h in
+ * sensor units) so field logs show where AF looks at x5.  Nothing is ever written. */
+static uint32_t aref_affr[6];
+static void aref_log_affr(void)
+{
+    afdiag_record(AFD_EV_REFOCUS, 16, 8, (aref_affr[2] << 16) | (aref_affr[3] & 0xFFFF),
+                  (aref_affr[4] << 16) | (aref_affr[5] & 0xFFFF),
+                  (aref_affr[0] << 16) | (aref_affr[1] & 0xFFFF));
+}
+PROP_HANDLER(PROP_LV_AFFRAME)
+{
+    if (!buf || len < sizeof(aref_affr)) return;
+    memcpy(aref_affr, buf, sizeof(aref_affr));
+    aref_log_affr();
 }
 
 static void aref_drop_ref(int now, int wait_ms)
@@ -8847,8 +8867,20 @@ static void aref_step(void)
                 aref_pause_ref = aref_trig_ref;
                 aref_log(5, 0);
             }
-            aref_next_at = now + AREF_FAIL_BACKOFF_MS;
-            aref_drop_ref(now, AREF_FAIL_BACKOFF_MS);
+            if (RECORDING && aref_fails == 1 && !aref_paused)
+            {
+                /* Field logs: a failed AF parks the lens at an end stop, and
+                 * re-taking S_ref from that blur disarmed the trigger for
+                 * seconds.  Keep the good S_ref and retry once, quickly. */
+                aref_next_at = now + AREF_REC_RETRY_MS;
+                aref_low_since = 0;
+                aref_hist_n = 0;
+            }
+            else
+            {
+                aref_next_at = now + AREF_FAIL_BACKOFF_MS;
+                aref_drop_ref(now, AREF_FAIL_BACKOFF_MS);
+            }
             aref_log(3, 0);
         }
         aref_phase = AREF_MON;
@@ -8931,7 +8963,8 @@ static void aref_step(void)
     else
         aref_low_since = 0;
 
-    if (!aref_low_since || now - aref_low_since < AREF_DROP_MS) return;
+    if (!aref_low_since ||
+        now - aref_low_since < (RECORDING ? AREF_DROP_REC_MS : AREF_DROP_MS)) return;
     if (now < aref_next_at || aref_ref < AREF_MIN_SHARP) return;
     if (aref_hist_n < 3) return;
 
@@ -8941,7 +8974,11 @@ static void aref_step(void)
         if (aref_hist[i] > hi) hi = aref_hist[i];
         if (aref_hist[i] < lo) lo = aref_hist[i];
     }
-    if (hi * 100 > lo * (100 + AREF_STEADY_PCT)) return; /* scene still moving */
+    /* scene still moving?  Blurry samples are small, so their relative noise
+     * is large: also accept a spread below a fraction of S_ref. */
+    uint32_t tol = lo * AREF_STEADY_PCT;
+    if (aref_ref * AREF_STEADY_ABS_PCT > tol) tol = aref_ref * AREF_STEADY_ABS_PCT;
+    if ((hi - lo) * 100 > tol) return;
 
     aref_trig_ref = aref_ref;
     aref_count0 = slim_af_result_count;
@@ -8949,6 +8986,7 @@ static void aref_step(void)
     aref_phase = AREF_REQUESTED;
     slim_af_request = RECORDING ? 2 : 1;
     aref_log(1, cur);
+    aref_log_affr();
 }
 
 /* when closing ML menu, check whether we need to refresh the LiveView */
