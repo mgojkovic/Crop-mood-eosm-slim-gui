@@ -6356,18 +6356,26 @@ static void afdiag_lens_task(void *unused)
              * be what lets the lens processor accept a move.  So prime with one
              * size-1 remote command, then send the direct move.
              * +N then -N, so focus returns to where it started. */
-            static const int moves[] = { 50, 200 };
-            static int move_idx = 0;
-            int steps = dir * moves[move_idx];
-            afdiag_remote_cmd(dir);
+            /* Second field run: primed 200-step moves sometimes changed
+             * sharpness ~0.4 s after the ~30 ms acknowledgement, sometimes not,
+             * while the camera was being handled.  So: always 200 steps,
+             * alternate unprimed / primed per +/- pair, and read sharpness at
+             * 300 ms and again at 1500 ms to catch a late move.
+             * Logged w1 = 2 if acknowledged, + 16 if primed. */
+            static int primed = 0;
+            int steps = dir * 200;
+            if (primed) afdiag_remote_cmd(dir);
             int ok = afdiag_direct_focus(steps);
             int elapsed = get_ms_clock() - now;
-            afdiag_record(AFD_EV_LENS_STEP, 16, steps, ok ? 2 : 0, before, elapsed);
+            afdiag_record(AFD_EV_LENS_STEP, 16, steps, (ok ? 2 : 0) + (primed ? 16 : 0), before, elapsed);
             msleep(AFDIAG_STEP_SETTLE);
             int m1, n1, x1;
             uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
             afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_after, m1);
-            if (dir < 0) move_idx = (move_idx + 1) % COUNT(moves);
+            msleep(1200);
+            uint32_t sharp_late = afdiag_sharpness(&m1, &n1, &x1);
+            afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_late, 1500);
+            if (dir < 0) primed = !primed;
             dir = -dir;
             last_step = get_ms_clock();
             continue;
@@ -6378,21 +6386,33 @@ static void afdiag_lens_task(void *unused)
          * nominal travel: 50 x size 3 vs 10 x size 15, then 100 x 3 vs
          * 20 x 15.  +N then -N, so focus returns.  Logged: w0 = signed
          * command count, w1 = size * 16 + (1 if every command was done). */
-        static const int burst_count[] = { 50, 10, 100, 20 };
-        static const int burst_size[]  = {  3, 15,   3, 15 };
+        /* Second run: when commands were sent back to back (~16 ms each),
+         * 100 x size 3 moved focus less than one distance-scale step, while
+         * the older lens_focus() path (~42 ms per command) had swept 200 x 3
+         * from 28 cm to infinity; and 20 x size 15 moved no more than 20 x 3.
+         * Hypothesis: a new command cuts the previous move short, so
+         * movement depends on the gap, not the size.  Test 30 commands with
+         * gaps of 0 / 40 / 100 ms, at size 3 and 15.
+         * Logged: w0 = signed count, w1 = size * 16 + all-done, w2 = gap ms. */
+        static const int burst_size[] = {  3,  3,   3, 15, 15,  15 };
+        static const int burst_gap[]  = {  0, 40, 100,  0, 40, 100 };
         static int burst_idx = 0;
-        int count = burst_count[burst_idx];
+        int count = 30;
         int size  = burst_size[burst_idx];
+        int gap   = burst_gap[burst_idx];
         int all_done = 1;
         for (int i = 0; i < count && afdiag_lens_test == 1; i++)
+        {
             if (!afdiag_remote_cmd(dir * size)) { all_done = 0; break; }
+            if (gap) msleep(gap);
+        }
         int elapsed = get_ms_clock() - now;
-        afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, size * 16 + all_done, before, elapsed);
-        msleep(AFDIAG_STEP_SETTLE);
+        afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, size * 16 + all_done, gap, elapsed);
+        msleep(AFDIAG_STEP_SETTLE + 200);
         int m1, n1, x1;
         uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
         afdiag_record(AFD_EV_STEP_SHARP, 16, dir * count, sharp_before, sharp_after, m1);
-        if (dir < 0) burst_idx = (burst_idx + 1) % COUNT(burst_count);
+        if (dir < 0) burst_idx = (burst_idx + 1) % COUNT(burst_size);
         dir = -dir;
         last_step = get_ms_clock();
     }
@@ -6417,7 +6437,7 @@ static struct menu_entry afdiag_menu[] = {
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY: move the focus motor back and forth in movie LV.",
-        .help2     = "Remote: bursts, size 3 vs 15. Direct: primed Canon focus drive, 50/200 steps.\n"
+        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms. Direct: 200-step Canon drive, primed or not.\n"
                      "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
