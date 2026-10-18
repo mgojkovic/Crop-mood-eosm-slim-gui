@@ -18,7 +18,7 @@ to be tried again.
 | Reliable one-shot AF with a crop preset | **Works.** Shutter zoom "AF": zoom to x10, Canon AF, back to x5. |
 | Continuous AF | **Works as "Auto refocus"**: ML watches sharpness and triggers Canon's AF when the picture goes soft. Not smooth tracking. |
 | Canon Movie Servo AF under crop presets | **Not possible without patching firmware.** Canon disables servo in every magnified view by design, and presets need x5. |
-| ML-driven lens movement (native contrast AF) | **Not achieved.** ML's lens command reaches the MPU but the MPU ignores it on this camera. |
+| ML-driven lens movement (native contrast AF) | **Not achieved yet.** ML's lens command reaches the MPU but the MPU ignores it on this camera. The MPU protocol investigation (see [EOSM-MPU.md](EOSM-MPU.md)) is the active route. |
 | ISO/shutter shortcuts while recording | **Fixed.** They were always blocked by a forced flag. |
 | EOS M "LV guard" stability code | **Shelved.** It had never run before; on the camera it froze buttons and broke zoom/recording. |
 
@@ -170,7 +170,9 @@ The main processor (ICU, which runs ML) does not move the lens. A separate contr
   - (9,0x17,32): AF frame geometry
   - (9,0x0A,14), (9,0x04,4), (9,0x1A,5), (9,0x00,1)
 - ML's command becomes (9,1,5) with payload `[hi lo FF FF 00]`, a signed 16-bit relative pulse count, followed by (9,0x12,1). Canon itself never sends (9,1) during AF. The MPU acknowledges it and does nothing.
-- Requests through Canon's `_prop_request_change` for 0x80050003 (FOCUS_STOP), 0x8005003C (AF session), 0x80050027 (FOCUS_CMD) and 0x8005001D (LensSearchDriveStart) produced **no MPU message at all**. The most likely cause is a length mismatch with Canon's property table: the lengths were guessed. So the hypothesis "the MPU accepts relative moves only inside an AF session" was **never actually tested**.
+- Requests through Canon's `_prop_request_change` for 0x80050003 (FOCUS_STOP), 0x8005003C (AF session), 0x80050027 (FOCUS_CMD) and 0x8005001D (LensSearchDriveStart) produced **no MPU message at all** in the earlier field test. Later ROM analysis (see [EOSM-MPU.md](EOSM-MPU.md)) showed why: **0x80050027 is not an outgoing property at all** (it is MPU→ICU only, `(9,0x18)`), while 0x8005003C and 0x8005001D have known handlers and lengths (15 and 4 bytes). The earlier failures are therefore not evidence that the MPU rejects relative moves inside a session; that hypothesis is still **untested**.
+
+The MPU turned out to have more layers than the group 9 property channel. The full ICU→MPU / MPU→ICU maps, the monitor channel (`MonRead`/`MonWrite`), the `(9,0x13)` LensSearchDriveStart command, the missing focus-position feedback `(9,0x14)`, and the `Msg 08 02` factory command table are documented in [EOSM-MPU.md](EOSM-MPU.md). A temporary `mpu_lab` module was built to dump the MPU and send raw messages; see section 9 of that document.
 
 ### 3.3 Why Movie Servo AF never runs under crop presets
 
@@ -268,25 +270,29 @@ Property → MPU message map (emulated):
 | 0x80050015 DISPSIZE | (9,0x11,2) |
 | 0x8005001D LensSearchDriveStart | (9,0x13,4); sent only if data[0] ≠ 0, payload [d1 d2 d3 00]; nothing in the firmware sends it |
 | 0x80050020 | (9,0x15,14) (AEWB exposure parameters) |
-| 0x80050026 | (9,0x17,32) |
+| 0x80050026 | (9,0x17,33) (32 data bytes + 00) |
 | 0x8005002A | (9,0x1A,5) |
 | 0x80050034 | (9,0x1F,3) |
 | 0x80050038 | (9,0x24,5) |
-| 0x80050039 | (9,0x21,61) |
+| 0x80050039 | (9,0x21,61) (60-byte AF configuration block + 00) |
 | 0x8005003C | (9,0x25,16) (15 data bytes + 00) |
 | 0x80050043 | (9,0x2C,2) |
 | 0x80050047 | (9,0x2F,2) |
 | 0x80020015 REMOTE_SW1 | (4,0x16,3) |
 
-MPU → ICU:
+Note: `0x80050027` and `0x80050028` are **not** in this outgoing table; they are MPU→ICU properties only (`(9,0x18)` and `(9,0x19)`). The full, corrected tables and payloads are in [EOSM-MPU.md](EOSM-MPU.md).
+
+MPU → ICU (corrected; full table in [EOSM-MPU.md](EOSM-MPU.md)):
 
 | Message | Property |
 |---|---|
-| (9,0x18) | PULSE_COUNT |
-| (9,0x19) | LV_AF_RESULT |
-| (9,0x0B) | LV_FOCUS_CMD |
-| (9,2) | PROP_LV_LENS |
-| (14,2) | PROP_LV_FOCAL_DISTANCE |
+| (9,0x0B) | 0x80050029 LV_AF_RESULT (also used as FOCUS_STATE in the other direction) |
+| (9,0x18) | 0x80050027 FOCUS_CMD |
+| (9,0x19) | 0x80050028 |
+| (9,0x14) | 0x8005001E focus pulse count / lens focus position |
+| (9,0x00) | 0x80050000 LV_LENS |
+| (9,0x02) | 0x80050002 LV_FOCUS_DONE |
+| (14,2) | 0x80050045 LV_FOCAL_DISTANCE |
 
 The ROM dump, string lists and RE scripts are in the session scratchpad. They are not in the repo; the ROM is the user's camera firmware and stays local.
 
@@ -358,5 +364,5 @@ The logs were copied from `ML/LOGS` to the session scratchpad.
 
 1. **Auto refocus:** field-test the reworked trigger (section 2.2). Check for hunting at Medium and High on pans and scene changes. Calibrate the absolute q thresholds from kind 10 records.
 2. **x5 AF area vs preset framing:** use the new `PROP_LV_AFFRAME` logs to see whether failures correlate with an off-centre frame.
-3. **Direct drive, if ever revisited:** send the AF-session (0x8005003C), FOCUS_STOP and LensSearchDriveStart requests with the correct Canon-table lengths, then confirm in the `@MPU` log that they reach the MPU, and only then test relative moves inside a session. Expect a low chance of success.
-4. **Release build:** hide or remove the diagnostic menu entries (AF diag log, AF lens test) and the MPU hook.
+3. **MPU route (active):** [EOSM-MPU.md](EOSM-MPU.md) documents the MPU protocol, the corrected property maps, the `(9,0x13)` LensSearchDriveStart command, the monitor channel, and the `Msg 08 02` debug table. Next: dump the MPU ROM with `mpu_lab`, disassemble it as SH2A, then recover the exact search-drive / focus-drive / AF-session payloads. Only after that try `(8,2)` LensCMD/FocusScan or EEPROM writes.
+4. **Release build:** hide or remove the diagnostic menu entries (AF diag log, AF lens test, MPU lab) and the MPU hook.
