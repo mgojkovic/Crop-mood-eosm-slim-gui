@@ -5944,6 +5944,8 @@ enum
                           * (centre 1/4 x 1/4 of the displayed LV buffer; Laplacian on luma) */
     AFD_EV_STEP_SHARP,   /* w0 = signed burst count, w1 = edge sum before the step, w2 = edge sum 300 ms after,
                           * w3 = mean luma after */
+    AFD_EV_LVLENS,       /* PROP_LV_LENS bytes 0x20..0x2F as four big-endian words (logged on change).
+                          * The 2.0.2 firmware itself reads 0x24, 0x27 ("Po") and 0x2C (focal length). */
     AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
                           * w2 = bytes 4/5, w3 = byte 6 */
 };
@@ -6070,6 +6072,37 @@ static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
 }
 
 PROP_HANDLER(PROP_LV_FOCUS_DONE)       { afdiag_focus_done_count++; afdiag_prop(property, buf, len); }
+/* Raw lens status, to find a finer position field than focus_dist (which
+ * only changes in coarse distance-scale steps and never reported the
+ * small moves made by the lens test). */
+static uint8_t afdiag_lvlens_raw[128];
+static volatile int afdiag_lvlens_len = 0;
+PROP_HANDLER(PROP_LV_LENS)
+{
+    static uint32_t last[4];
+    const uint8_t *b = (const uint8_t *)buf;
+    if (len > sizeof(afdiag_lvlens_raw)) return;
+    memcpy(afdiag_lvlens_raw, b, len);
+    afdiag_lvlens_len = len;
+    if (len < 0x30) return;
+    uint32_t w[4];
+    for (int i = 0; i < 4; i++)
+        w[i] = (b[0x20 + 4*i] << 24) | (b[0x21 + 4*i] << 16) | (b[0x22 + 4*i] << 8) | b[0x23 + 4*i];
+    if (w[0] == last[0] && w[1] == last[1] && w[2] == last[2] && w[3] == last[3]) return;
+    for (int i = 0; i < 4; i++) last[i] = w[i];
+    afdiag_record(AFD_EV_LVLENS, len, w[0], w[1], w[2], w[3]);
+}
+
+/* Ask the MPU for a fresh PROP_LV_LENS report, the way ML core's
+ * _prop_lv_lens_request_update() does (not exported to modules): resend the
+ * last received payload with its own length; the MPU replies with the
+ * current lens status. */
+static void afdiag_request_lens_update(void)
+{
+    if (afdiag_lvlens_len > 0)
+        prop_request_change(PROP_LV_LENS, afdiag_lvlens_raw, afdiag_lvlens_len);
+}
+
 PROP_HANDLER(PROP_LV_FOCUS_PULSE_COUNT)
 {
     const uint8_t *b = (const uint8_t *)buf;
@@ -6116,6 +6149,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_SHARP:              return "@SHARP";
         case AFD_EV_STEP_SHARP:         return "@STEP_SHARP";
         case AFD_EV_FPC:                return "@FPC";
+        case AFD_EV_LVLENS:             return "@LVLENS";
     }
     return "?";
 }
@@ -6372,6 +6406,7 @@ static void afdiag_lens_task(void *unused)
             int m1, n1, x1;
             uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
             afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_after, m1);
+            afdiag_request_lens_update();
             msleep(1200);
             uint32_t sharp_late = afdiag_sharpness(&m1, &n1, &x1);
             afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_late, 1500);
@@ -6408,6 +6443,7 @@ static void afdiag_lens_task(void *unused)
         }
         int elapsed = get_ms_clock() - now;
         afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, size * 16 + all_done, gap, elapsed);
+        afdiag_request_lens_update();
         msleep(AFDIAG_STEP_SETTLE + 200);
         int m1, n1, x1;
         uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
@@ -9862,6 +9898,7 @@ MODULE_PROPHANDLERS_START()
     MODULE_PROPHANDLER(PROP_LV_DISPSIZE)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_DONE)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_PULSE_COUNT)
+    MODULE_PROPHANDLER(PROP_LV_LENS)
     MODULE_PROPHANDLER(PROP_LV_AF_RESULT)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_STATE)
     MODULE_PROPHANDLER(PROP_LV_FOCUS_STATUS)
