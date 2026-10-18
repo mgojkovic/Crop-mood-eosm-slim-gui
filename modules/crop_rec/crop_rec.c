@@ -6272,9 +6272,28 @@ static int afdiag_direct_focus(int steps)
     return 0;
 }
 
-/* Lens test (choice 1 "Remote": bursts of lens_focus commands; choice 2
- * "Direct": single PROP_LV_FOCUS moves of 10/50/200 steps).  Never touches
- * the card. */
+/* One PROP_LV_LENS_DRIVE_REMOTE command, as lens_focus() sends it but
+ * without its clamp to size 3: forward = size, backward = 0x8000 | size.
+ * The firmware turns the low nibble (1..15) into a signed step count.
+ * Waits for PROP_LV_FOCUS_DONE (up to 1 s).  Returns 1 when done. */
+static int afdiag_remote_cmd(int signed_size)
+{
+    int size = COERCE(ABS(signed_size), 1, 15);
+    int cmd = signed_size < 0 ? 0x8000 | size : size;
+    int done0 = afdiag_focus_done_count;
+    prop_request_change(PROP_LV_LENS_DRIVE_REMOTE, &cmd, 4);
+    for (int i = 0; i < 100; i++)
+    {
+        if (afdiag_focus_done_count != done0) return 1;
+        if (!lv || is_manual_focus()) return 0;
+        msleep(10);
+    }
+    return 0;
+}
+
+/* Lens test (choice 1 "Remote": bursts of remote commands, size 3 vs 15;
+ * choice 2 "Direct": a size-1 remote command, then one PROP_LV_FOCUS move
+ * of 50/200 steps).  Never touches the card. */
 static void afdiag_lens_task(void *unused)
 {
     int dir = 1;
@@ -6317,10 +6336,17 @@ static void afdiag_lens_task(void *unused)
 
         if (afdiag_lens_test == 2)
         {
-            /* +N then -N, so focus returns to where it started */
-            static const int moves[] = { 10, 50, 200 };
+            /* Field test: unprimed PROP_LV_FOCUS moves of up to 200 steps were
+             * acknowledged within ~20 ms and moved nothing.  In the firmware a
+             * remote-drive command also wakes Canon's AF controller (it posts a
+             * "lens drive remote" event and sends PROP_LVCAF_STATE), which may
+             * be what lets the lens processor accept a move.  So prime with one
+             * size-1 remote command, then send the direct move.
+             * +N then -N, so focus returns to where it started. */
+            static const int moves[] = { 50, 200 };
             static int move_idx = 0;
             int steps = dir * moves[move_idx];
+            afdiag_remote_cmd(dir);
             int ok = afdiag_direct_focus(steps);
             int elapsed = get_ms_clock() - now;
             afdiag_record(AFD_EV_LENS_STEP, 16, steps, ok ? 2 : 0, before, elapsed);
@@ -6333,21 +6359,27 @@ static void afdiag_lens_task(void *unused)
             last_step = get_ms_clock();
             continue;
         }
-        /* Field tests: single commands of size 1-3 were all accepted but
-         * moved an STM lens too little to see or measure.  Send bursts of
-         * size-3 commands instead: 50, 100, then 200 (+N then -N, so focus
-         * returns).  The logged w0 is the signed command count. */
-        static const int bursts[] = { 50, 100, 200 }; /* 5-20 showed no measurable change */
+        /* Remote bursts.  Field tests: 200 size-3 commands swept the 18-55
+         * from 28 cm to infinity.  The firmware decoder accepts sizes up to
+         * 15 (low nibble; ML's lens_focus clamps to 3), so compare equal
+         * nominal travel: 50 x size 3 vs 10 x size 15, then 100 x 3 vs
+         * 20 x 15.  +N then -N, so focus returns.  Logged: w0 = signed
+         * command count, w1 = size * 16 + (1 if every command was done). */
+        static const int burst_count[] = { 50, 10, 100, 20 };
+        static const int burst_size[]  = {  3, 15,   3, 15 };
         static int burst_idx = 0;
-        int count = bursts[burst_idx];
-        int ret = lens_focus(dir * count, 3, 1, 0);
+        int count = burst_count[burst_idx];
+        int size  = burst_size[burst_idx];
+        int all_done = 1;
+        for (int i = 0; i < count && afdiag_lens_test == 1; i++)
+            if (!afdiag_remote_cmd(dir * size)) { all_done = 0; break; }
         int elapsed = get_ms_clock() - now;
-        afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, ret, before, elapsed);
+        afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, size * 16 + all_done, before, elapsed);
         msleep(AFDIAG_STEP_SETTLE);
         int m1, n1, x1;
         uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
         afdiag_record(AFD_EV_STEP_SHARP, 16, dir * count, sharp_before, sharp_after, m1);
-        if (dir < 0) burst_idx = (burst_idx + 1) % COUNT(bursts);
+        if (dir < 0) burst_idx = (burst_idx + 1) % COUNT(burst_count);
         dir = -dir;
         last_step = get_ms_clock();
     }
@@ -6372,7 +6404,7 @@ static struct menu_entry afdiag_menu[] = {
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY: move the focus motor back and forth in movie LV.",
-        .help2     = "Remote: bursts of 50/100/200 ML focus commands. Direct: Canon focus drive 10/50/200 steps.\n"
+        .help2     = "Remote: bursts, size 3 vs 15. Direct: primed Canon focus drive, 50/200 steps.\n"
                      "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
