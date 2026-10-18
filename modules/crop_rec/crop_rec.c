@@ -6104,7 +6104,7 @@ PROP_HANDLER(PROP_LV_LENS)
  * _prop_lv_lens_request_update() does (not exported to modules): resend the
  * last received payload with its own length; the MPU replies with the
  * current lens status. */
-static void afdiag_request_lens_update(void)
+static void __attribute__((unused)) afdiag_request_lens_update(void)
 {
     if (afdiag_lvlens_len > 0)
         prop_request_change(PROP_LV_LENS, afdiag_lvlens_raw, afdiag_lvlens_len);
@@ -6378,7 +6378,6 @@ static void afdiag_sweep_phase(int phase, int signed_size, int end_dist, int cap
         int r = afdiag_remote_cmd_wait(signed_size);
         if (r == 0) { reason = 0; break; }
         if (r == 2) { reason = 2; n++; break; }
-        if ((n % 10) == 9) afdiag_request_lens_update();
         if (end_dist == 65535 ? (lens_info.focus_dist == 65535)
                               : (lens_info.focus_dist && (int)lens_info.focus_dist <= end_dist))
         { reason = 3; n++; break; }
@@ -6387,12 +6386,35 @@ static void afdiag_sweep_phase(int phase, int signed_size, int end_dist, int cap
                   get_ms_clock() - t0, reason);
 }
 
+/* A/B against the one path that has moved this lens in the field:
+ * lens_focus(N, 3, wait) with nothing else going on.  The last sweep run
+ * (which also requested a lens-status refresh every 10 commands) moved
+ * nothing at all in either direction, so change one thing at a time:
+ * control = lens_focus(+-60, 3), variant = 12 x size-15 commands sent the
+ * same waiting way (same nominal travel).  @SWEEP: w0 = signed nominal
+ * steps, w1 = 3 (control) or 15 (variant), w2 = elapsed ms,
+ * w3 = focus_dist before << 16 | after. */
+static void afdiag_ab_move(int dir, int variant)
+{
+    int t0 = get_ms_clock();
+    int d0 = lens_info.focus_dist;
+    if (!variant)
+        lens_focus(dir * 60, 3, 1, 0);
+    else
+        for (int i = 0; i < 12 && afdiag_lens_test == 2; i++)
+            if (!afdiag_remote_cmd_wait(dir * 15)) break;
+    afdiag_record(AFD_EV_SWEEP, 16, dir * 180, variant ? 15 : 3,
+                  get_ms_clock() - t0, ((d0 & 0xFFFF) << 16) | (lens_info.focus_dist & 0xFFFF));
+    msleep(1500);
+}
+
 static void afdiag_sweep(int size)
 {
-    afdiag_sweep_phase(0, +3, 25, 400);       /* to the near end, baseline size */
-    msleep(500);
-    afdiag_sweep_phase(1, -size, 65535, 400); /* to infinity, variant size */
-    msleep(500);
+    (void)size;
+    afdiag_ab_move(+1, 0);
+    afdiag_ab_move(-1, 0);
+    afdiag_ab_move(+1, 1);
+    afdiag_ab_move(-1, 1);
 }
 
 /* Lens test (choice 1 "Remote": bursts of remote commands, size 3 vs 15;
@@ -6483,7 +6505,6 @@ static void afdiag_lens_task(void *unused)
         }
         int elapsed = get_ms_clock() - now;
         afdiag_record(AFD_EV_LENS_STEP, 16, dir * count, size * 16 + all_done, gap, elapsed);
-        afdiag_request_lens_update();
         msleep(AFDIAG_STEP_SETTLE + 200);
         int m1, n1, x1;
         uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
@@ -6509,11 +6530,11 @@ static struct menu_entry afdiag_menu[] = {
         .name      = "AF lens test",
         .priv      = &afdiag_lens_test,
         .max       = 2,
-        .choices   = CHOICES("OFF", "Remote", "Sweep"),
+        .choices   = CHOICES("OFF", "Remote", "A/B"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY: move the focus motor back and forth in movie LV.",
-        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms. Sweep: near end, then to infinity at size 3/8/15.\n"
+        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms. A/B: lens_focus 60 x size 3 vs 12 x size 15, each way.\n"
                      "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
