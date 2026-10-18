@@ -6258,9 +6258,9 @@ static void afdiag_lens_task(void *unused)
         uint32_t sharp_before = afdiag_sharpness(&m0, &n0, &x0);
         /* Field tests: single commands of size 1-3 were all accepted but
          * moved an STM lens too little to see or measure.  Send bursts of
-         * size-3 commands instead: 5, 10, then 20 (+N then -N, so focus
+         * size-3 commands instead: 50, 100, then 200 (+N then -N, so focus
          * returns).  The logged w0 is the signed command count. */
-        static const int bursts[] = { 5, 10, 20 };
+        static const int bursts[] = { 50, 100, 200 }; /* 5-20 showed no measurable change */
         static int burst_idx = 0;
         int count = bursts[burst_idx];
         int ret = lens_focus(dir * count, 3, 1, 0);
