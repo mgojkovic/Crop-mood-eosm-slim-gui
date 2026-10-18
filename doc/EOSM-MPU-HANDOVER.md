@@ -33,8 +33,16 @@ Two new actions exist:
 2. `modules/crop_rec` (Settings → AF search (MPU)) — first sharpness-peak-stop
    autofocus attempt; **new and not yet camera-tested**.
 
-The immediate next task is to run the `crop_rec` action, inspect AFDIAG and
-tune the peak-stop thresholds.
+The immediate next task is to run the `crop_rec` action, inspect
+`ML/LOGS/AFSEARCH.LOG` and tune the peak-stop thresholds.
+
+**Update 2026-10-19 00:45:** the action was run once on the camera (LASTSEL.CFG
+= `Settings / AF search (MPU)`), but its result was lost: `afdiag_record()` is a
+no-op while *AF diag log* is OFF (its default after restart), and that was the
+only record. The action now always writes a per-sample trace to
+`ML/LOGS/AFSEARCH.LOG` and arms the peak-stop only on the far leg (see §3).
+`crop_rec.mo` = `d8ede812db9b4bf9213fe3a8e2e2d03c` flashed; previous card
+modules backed up to `/tmp/mpu_lab_backup_20261019_004539/`.
 
 ---
 
@@ -135,9 +143,21 @@ Behavior:
   `focus_dist >= 60000`;
 - waits for the menu to close (2 s);
 - `MpuMonOpen`, sends `(8,2,32)` index 16;
-- samples `afdiag_sharpness()` every 50 ms for max **3 s**;
-- stops with `(9,3,1)` when sharpness has been **<80% of peak for >120 ms**;
+- samples centre sharpness every 50 ms for max **3 s**;
+- **far-leg arming:** the sweep often goes near first, so sharpness falling on
+  that leg is not "past the peak". The tracker arms (and resets the peak) only
+  once `focus_dist` rises at least `max(3, dist_min/20)` above its minimum;
+  fallback arm at 1500 ms if the distance never changes;
+- stops with `(9,3,1)` when sharpness has been **<80% of peak for >120 ms**
+  after arming;
+- samples another 500 ms after the stop (overshoot: settled vs peak);
 - `MpuMonClose`;
+- **always** appends a trace to `ML/LOGS/AFSEARCH.LOG`: a header (lens, zoom,
+  dist0, ret, thresholds), a `# result=` line (stop/timeout, armed_ms, peak,
+  peak_ms, stop_ms) and one line per sample `ms s g luma dist phase`
+  (`n` = near leg / not armed, `a` = armed, `p` = post-stop). `g` is the
+  gradient sum (contrast normaliser); `luma` answers the dark-viewfinder
+  question;
 - logs `AFD_EV_MPUSRCH` (AFDIAG code **14**):
   `w0 = stopped`, `w1 = peak`, `w2 = elapsed ms`, `w3 = focus_dist`;
 - NotifyBox: `AF search MPU: stop/timeout peak=... ms=... ret=...`.
@@ -199,8 +219,10 @@ Backups:
 2. **Settings → AF search (MPU)**.
 3. Close the menu when prompted; let it run (max 3 s).
 4. Observe: did it stop near the subject instead of infinity?
-5. Return the card; inspect `ML/LOGS/AFDIAG.LOG` for code **14**:
-   `w0=stopped, w1=peak, w2=ms, w3=dist`.
+5. Return the card; inspect `ML/LOGS/AFSEARCH.LOG` (always written).
+   The NotifyBox shows `peak`, `end%` (settled/peak sharpness), `arm`, `stop`
+   ms and `d=dist0->dist`. AFDIAG code **14** is only logged if AF diag log
+   is ON.
 6. Compare with `ML/LOGS/MPULAB.LOG` / lens position.
 
 If peak stop is too early or too late, tune in `afdiag_afsearch_task`:
@@ -275,7 +297,8 @@ If peak stop is too early or too late, tune in `afdiag_afsearch_task`:
 - [x] `(9,3,1)` stop and `FOCUS_DONE` verified.
 - [x] 2 s bounded action works; no dark viewfinder.
 - [x] `crop_rec` sharpness-stop action implemented and flashed.
-- [ ] `crop_rec` action tested on camera.
+- [x] Always-on AFSEARCH.LOG trace + far-leg arming (first run's data was lost).
+- [ ] `crop_rec` action tested on camera with a trace.
 - [ ] Peak thresholds tuned.
 - [ ] Direction control (TVAFLOG / normal message).
 - [ ] Auto refocus integration.

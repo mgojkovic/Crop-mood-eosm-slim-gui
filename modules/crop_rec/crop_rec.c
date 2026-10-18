@@ -7143,8 +7143,92 @@ static void afdiag_lens_task(void *unused)
 /* One-shot MPU AF search with a sharpness-peak stop.  This is the bridge
  * between the confirmed (8,2,32) actuator and a real autofocus: the MPU only
  * scans; the ICU samples sharpness and sends FOCUS_STOP when the peak is
- * passed.  Experimental, temporary diagnostics menu only. */
+ * passed.  Experimental, temporary diagnostics menu only.
+ *
+ * The MPU sweep is not monotonic: from 2.9 m it went near (~50 cm) first and
+ * only then to infinity.  Sharpness falling on that near leg is not "past the
+ * peak", so the peak tracker is only armed once focus_dist starts rising
+ * (lens heading to infinity); the peak is reset at that moment.  Lenses that
+ * never report a distance change are armed after AFS_ARM_FALLBACK_MS.
+ *
+ * Every run is traced to ML/LOGS/AFSEARCH.LOG regardless of "AF diag log"
+ * (the first field run was lost because afdiag_record() is a no-op while the
+ * diag log is OFF, its default after restart).  The trace continues for
+ * AFS_POST_MS after the stop so the overshoot can be measured. */
+#define AFS_LOG_FILE         "ML/LOGS/AFSEARCH.LOG"
+#define AFS_MAX_MS           3000
+#define AFS_SAMPLE_MS        50
+#define AFS_DROP_PCT         80     /* stop when sharpness < 80% of peak ...    */
+#define AFS_DWELL_MS         120    /* ... for longer than this after the peak  */
+#define AFS_ARM_FALLBACK_MS  1500
+#define AFS_POST_MS          500
+#define AFS_MAX_SAMPLES      128
+
+struct afs_sample
+{
+    int      t;       /* ms since the search command */
+    uint32_t s;       /* centre Laplacian sum (stop metric) */
+    uint32_t g;       /* centre gradient sum (contrast normaliser) */
+    int      luma;
+    int      dist;    /* lens_info.focus_dist, cm */
+    char     phase;   /* 'n' near leg / not armed, 'a' armed, 'p' post-stop */
+};
+
 static volatile int afdiag_afsearch_busy = 0;
+static struct afs_sample afs_samples[AFS_MAX_SAMPLES];
+static char afs_buf[1024];
+
+static int afs_take(int n, int t0, char phase)
+{
+    if (n >= AFS_MAX_SAMPLES) return n;
+    int m = 0, cnt = 0, x = 0;
+    uint32_t g = 0;
+    struct afs_sample *e = &afs_samples[n];
+    e->s = afdiag_sharpness_ex(&m, &cnt, &x, &g);
+    e->g = g;
+    e->luma = m;
+    e->dist = lens_info.focus_dist;
+    e->t = get_ms_clock() - t0;
+    e->phase = phase;
+    return n + 1;
+}
+
+static void afs_write_log(int n, int dist0, int ret, int stopped, int armed_ms,
+                          uint32_t peak, int peak_ms, int stop_ms)
+{
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) return;
+    if (!is_dir(AFDIAG_LOG_DIR))
+        FIO_CreateDirectory(AFDIAG_LOG_DIR);
+    FILE *f = FIO_CreateFileOrAppend(AFS_LOG_FILE);
+    if (!f) return;
+
+    int k = snprintf(afs_buf, sizeof(afs_buf),
+        "# AFSEARCH t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d ret=%d "
+        "max=%d sample=%d drop=%d dwell=%d arm_fallback=%d\n"
+        "# result=%s armed_ms=%d peak=%d peak_ms=%d stop_ms=%d n=%d\n"
+        "# ms s g luma dist phase\n",
+        get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index, dist0, ret,
+        AFS_MAX_MS, AFS_SAMPLE_MS, AFS_DROP_PCT, AFS_DWELL_MS, AFS_ARM_FALLBACK_MS,
+        stopped ? "stop" : "timeout", armed_ms, (int) peak, peak_ms, stop_ms, n);
+    FIO_WriteFile(f, afs_buf, k);
+
+    k = 0;
+    for (int i = 0; i < n; i++)
+    {
+        struct afs_sample *e = &afs_samples[i];
+        k += snprintf(afs_buf + k, sizeof(afs_buf) - k, "%d %d %d %d %d %s\n",
+                      e->t, (int) e->s, (int) e->g, e->luma, e->dist,
+                      e->phase == 'a' ? "a" : e->phase == 'p' ? "p" : "n");
+        if (k > (int) sizeof(afs_buf) - 80)
+        {
+            FIO_WriteFile(f, afs_buf, k);
+            k = 0;
+        }
+    }
+    k += snprintf(afs_buf + k, sizeof(afs_buf) - k, "\n");
+    FIO_WriteFile(f, afs_buf, k);
+    FIO_CloseFile(f);
+}
 
 static void afdiag_afsearch_task(void *unused)
 {
@@ -7169,6 +7253,12 @@ static void afdiag_afsearch_task(void *unused)
     for (int i = 0; i < 50 && gui_menu_shown(); i++) msleep(100);
     if (!lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
         goto out;
+    /* re-check: the lens may have been moved while the menu was open */
+    if (lens_info.focus_dist >= 60000)
+    {
+        NotifyBox(5000, "AF search MPU: lens at infinity - focus nearer first");
+        goto out;
+    }
 
     int e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
     if (e)
@@ -7177,41 +7267,76 @@ static void afdiag_afsearch_task(void *unused)
         goto out;
     }
 
+    int dist0 = lens_info.focus_dist;
     uint8_t payload[32] = {0};
     payload[7] = 0x10;   /* (8,2,32), index 16 = 0x33794 AF_LENS_SEARCH */
     int ret = ((int (*)(int,int,int,const void *)) 0x38C4)(8, 2, 32, payload);
 
     int t0 = get_ms_clock();
+    int n = 0;
+    int armed = 0, armed_ms = -1;
+    int dist_min = dist0;
     int peak_t = 0;
     uint32_t peak = 0;
     int stopped = 0;
 
-    /* The scan moves near first, then to infinity.  Watch the centre
-     * sharpness; stop shortly after it has passed its peak. */
-    while (get_ms_clock() - t0 < 3000)
+    while (get_ms_clock() - t0 < AFS_MAX_MS)
     {
-        int m = 0, n = 0, x = 0;
-        uint32_t s = afdiag_sharpness(&m, &n, &x);
-        int now = get_ms_clock();
-        if (s > peak) { peak = s; peak_t = now; }
-        if (peak > 0 && now - peak_t > 120 && s * 100 < peak * 80)
+        n = afs_take(n, t0, armed ? 'a' : 'n');
+        struct afs_sample *c = &afs_samples[n - 1];
+        int now = c->t;
+
+        if (!armed)
         {
-            stopped = 1;
-            break;
+            /* ignore 0 (no reading) and 1 cm jitter: need a real rise */
+            if (c->dist > 0 && c->dist < dist_min) dist_min = c->dist;
+            int rise = dist_min / 20 > 3 ? dist_min / 20 : 3;
+            if (c->dist >= dist_min + rise ||
+                (now >= AFS_ARM_FALLBACK_MS && dist_min == dist0 && c->dist == dist0))
+            {
+                armed = 1;
+                armed_ms = now;
+                peak = 0;           /* only peaks on the far leg count */
+                c->phase = 'a';
+            }
         }
-        msleep(50);
+
+        if (armed)
+        {
+            if (c->s > peak) { peak = c->s; peak_t = now; }
+            if (peak > 0 && now - peak_t > AFS_DWELL_MS &&
+                c->s * 100 < peak * AFS_DROP_PCT)
+            {
+                stopped = 1;
+                break;
+            }
+        }
+        msleep(AFS_SAMPLE_MS);
     }
 
     uint8_t stop = 0;
     ((int (*)(int,int,int,const void *)) 0x38C4)(9, 3, 1, &stop);
-    int ms = get_ms_clock() - t0;
+    int stop_ms = get_ms_clock() - t0;
+
+    /* keep sampling while the lens settles: overshoot = peak vs settled s */
+    int post_end = stop_ms + AFS_POST_MS;
+    while (get_ms_clock() - t0 < post_end && n < AFS_MAX_SAMPLES)
+    {
+        msleep(AFS_SAMPLE_MS);
+        n = afs_take(n, t0, 'p');
+    }
+
     int dist = lens_info.focus_dist;
     ((int (*)(void)) 0xFF1DD118)();            /* MpuMonClose */
 
     afdiag_record(AFD_EV_MPUSRCH, 16, (uint32_t) stopped, peak,
-                  (uint32_t) ms, (uint32_t) dist);
-    NotifyBox(5000, "AF search MPU: %s peak=%d %dms ret=%d",
-              stopped ? "stop" : "timeout", peak, ms, ret);
+                  (uint32_t) stop_ms, (uint32_t) dist);
+    afs_write_log(n, dist0, ret, stopped, armed_ms, peak, peak_t, stop_ms);
+
+    uint32_t settled = n ? afs_samples[n - 1].s : 0;
+    NotifyBox(6000, "AF MPU %s: peak=%d end=%d%% arm=%d stop=%dms d=%d->%d",
+              stopped ? "stop" : "timeout", (int) peak,
+              peak ? (int)(settled * 100 / peak) : 0, armed_ms, stop_ms, dist0, dist);
 
 out:
     afdiag_afsearch_busy = 0;
@@ -7254,8 +7379,8 @@ static struct menu_entry afdiag_menu[] = {
         .icon_type = IT_DICE,
         .help      = "EXPERIMENTAL: run the MPU AF search once, stop at sharpness peak.",
         .help2     = "Sends the confirmed (8,2,32) index-16 message and samples sharpness in the centre;\n"
-                     "stops with (9,3,1) when sharpness passes its peak (max 3 s). Needs AF mode, LV,\n"
-                     "not recording; refuses if the lens is at infinity.",
+                     "stops with (9,3,1) when sharpness passes its peak on the far leg (max 3 s). Needs AF mode,\n"
+                     "LV, not recording; refuses at infinity. Always traced to ML/LOGS/AFSEARCH.LOG.",
     },
 };
 
