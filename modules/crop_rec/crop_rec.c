@@ -5944,6 +5944,7 @@ enum
                           * (centre 1/4 x 1/4 of the displayed LV buffer; Laplacian on luma) */
     AFD_EV_STEP_SHARP,   /* w0 = signed burst count, w1 = edge sum before the step, w2 = edge sum 300 ms after,
                           * w3 = mean luma after */
+    AFD_EV_SWEEP,        /* w0 = phase*100 + size, w1 = commands, w2 = elapsed ms, w3 = end reason */
     AFD_EV_LVLENS,       /* PROP_LV_LENS bytes 0x20..0x2F as four big-endian words (logged on change).
                           * The 2.0.2 firmware itself reads 0x24, 0x27 ("Po") and 0x2C (focal length). */
     AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
@@ -6071,7 +6072,13 @@ static void afdiag_prop(unsigned property, uint32_t *buf, unsigned len)
     afdiag_record(property, len, w[0], w[1], w[2], w[3]);
 }
 
-PROP_HANDLER(PROP_LV_FOCUS_DONE)       { afdiag_focus_done_count++; afdiag_prop(property, buf, len); }
+static volatile int afdiag_focus_done_err = 0;
+PROP_HANDLER(PROP_LV_FOCUS_DONE)
+{
+    afdiag_focus_done_err = (buf && len >= 4 && (buf[0] & 0x1000)) ? 1 : 0;
+    afdiag_focus_done_count++;
+    afdiag_prop(property, buf, len);
+}
 /* Raw lens status, to find a finer position field than focus_dist (which
  * only changes in coarse distance-scale steps and never reported the
  * small moves made by the lens test). */
@@ -6150,6 +6157,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_STEP_SHARP:         return "@STEP_SHARP";
         case AFD_EV_FPC:                return "@FPC";
         case AFD_EV_LVLENS:             return "@LVLENS";
+        case AFD_EV_SWEEP:              return "@SWEEP";
     }
     return "?";
 }
@@ -6289,7 +6297,7 @@ static void afdiag_flush(void)
  * is decoded by the firmware into this same message with |steps| <= 15.
  * Nothing on the main CPU consumes it, so prop_request_change_wait would
  * never return: wait for PROP_LV_FOCUS_DONE instead.  Returns 1 when done. */
-static int afdiag_direct_focus(int steps)
+static int __attribute__((unused)) afdiag_direct_focus(int steps) /* kept for reference: never moved the lens */
 {
     uint8_t f[5];
     int done0 = afdiag_focus_done_count;
@@ -6338,6 +6346,55 @@ static int afdiag_remote_cmd(int signed_size)
     return 0;
 }
 
+/* lens_focus()-style remote command: wait for Canon to apply the property,
+ * then for PROP_LV_FOCUS_DONE.  Returns 1 done, 2 done with the error bit
+ * (0x1000, what lens.c treats as a soft limit), 0 timeout / not possible. */
+static int afdiag_remote_cmd_wait(int signed_size)
+{
+    int size = COERCE(ABS(signed_size), 1, 15);
+    int cmd = signed_size < 0 ? 0x8000 | size : size;
+    int done0 = afdiag_focus_done_count;
+    prop_request_change_wait(PROP_LV_LENS_DRIVE_REMOTE, &cmd, 4, 1000);
+    for (int i = 0; i < 100; i++)
+    {
+        if (afdiag_focus_done_count != done0) return afdiag_focus_done_err ? 2 : 1;
+        if (!lv || is_manual_focus()) return 0;
+        msleep(10);
+    }
+    return 0;
+}
+
+/* Drive until an end: soft-limit error, the given focus_dist reached, or the
+ * command cap.  Logs @SWEEP: w0 = phase * 100 + size, w1 = commands sent,
+ * w2 = elapsed ms, w3 = end reason (0 timeout, 1 cap, 2 soft limit,
+ * 3 end distance reached, 4 test switched off). */
+static void afdiag_sweep_phase(int phase, int signed_size, int end_dist, int cap)
+{
+    int t0 = get_ms_clock();
+    int n, reason = 1;
+    for (n = 0; n < cap; n++)
+    {
+        if (afdiag_lens_test != 2) { reason = 4; break; }
+        int r = afdiag_remote_cmd_wait(signed_size);
+        if (r == 0) { reason = 0; break; }
+        if (r == 2) { reason = 2; n++; break; }
+        if ((n % 10) == 9) afdiag_request_lens_update();
+        if (end_dist == 65535 ? (lens_info.focus_dist == 65535)
+                              : (lens_info.focus_dist && (int)lens_info.focus_dist <= end_dist))
+        { reason = 3; n++; break; }
+    }
+    afdiag_record(AFD_EV_SWEEP, 16, phase * 100 + ABS(signed_size), n,
+                  get_ms_clock() - t0, reason);
+}
+
+static void afdiag_sweep(int size)
+{
+    afdiag_sweep_phase(0, +3, 25, 400);       /* to the near end, baseline size */
+    msleep(500);
+    afdiag_sweep_phase(1, -size, 65535, 400); /* to infinity, variant size */
+    msleep(500);
+}
+
 /* Lens test (choice 1 "Remote": bursts of remote commands, size 3 vs 15;
  * choice 2 "Direct": a size-1 remote command, then one PROP_LV_FOCUS move
  * of 50/200 steps).  Never touches the card. */
@@ -6377,41 +6434,24 @@ static void afdiag_lens_task(void *unused)
         }
         last_skip = 0;
 
-        int before = afdiag_fpc;
         int m0, n0, x0;
         uint32_t sharp_before = afdiag_sharpness(&m0, &n0, &x0);
 
         if (afdiag_lens_test == 2)
         {
-            /* Field test: unprimed PROP_LV_FOCUS moves of up to 200 steps were
-             * acknowledged within ~20 ms and moved nothing.  In the firmware a
-             * remote-drive command also wakes Canon's AF controller (it posts a
-             * "lens drive remote" event and sends PROP_LVCAF_STATE), which may
-             * be what lets the lens processor accept a move.  So prime with one
-             * size-1 remote command, then send the direct move.
-             * +N then -N, so focus returns to where it started. */
-            /* Second field run: primed 200-step moves sometimes changed
-             * sharpness ~0.4 s after the ~30 ms acknowledgement, sometimes not,
-             * while the camera was being handled.  So: always 200 steps,
-             * alternate unprimed / primed per +/- pair, and read sharpness at
-             * 300 ms and again at 1500 ms to catch a late move.
-             * Logged w1 = 2 if acknowledged, + 16 if primed. */
-            static int primed = 0;
-            int steps = dir * 200;
-            if (primed) afdiag_remote_cmd(dir);
-            int ok = afdiag_direct_focus(steps);
-            int elapsed = get_ms_clock() - now;
-            afdiag_record(AFD_EV_LENS_STEP, 16, steps, (ok ? 2 : 0) + (primed ? 16 : 0), before, elapsed);
-            msleep(AFDIAG_STEP_SETTLE);
-            int m1, n1, x1;
-            uint32_t sharp_after = afdiag_sharpness(&m1, &n1, &x1);
-            afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_after, m1);
-            afdiag_request_lens_update();
-            msleep(1200);
-            uint32_t sharp_late = afdiag_sharpness(&m1, &n1, &x1);
-            afdiag_record(AFD_EV_STEP_SHARP, 16, steps, sharp_before, sharp_late, 1500);
-            if (dir < 0) primed = !primed;
-            dir = -dir;
+            /* Sweep test.  Field runs: direct PROP_LV_FOCUS moves never moved
+             * the lens (~40 tries, primed or not), and back-to-back remote
+             * commands barely did; only lens_focus() (prop_request_change_wait
+             * + PROP_LV_FOCUS_DONE, ~42 ms per command) moved it reliably.
+             * Sharpness is a poor ruler once focus is lost, so time full-range
+             * sweeps instead: go to the near end with size 3, then sweep to
+             * infinity with size 3, 8 or 15 (one variant per cycle), all with
+             * lens_focus()-style waiting.  Field log: negative = toward
+             * infinity on this lens. */
+            static const int sweep_size[] = { 3, 8, 15 };
+            static int sweep_idx = 0;
+            afdiag_sweep(sweep_size[sweep_idx]);
+            sweep_idx = (sweep_idx + 1) % COUNT(sweep_size);
             last_step = get_ms_clock();
             continue;
         }
@@ -6469,11 +6509,11 @@ static struct menu_entry afdiag_menu[] = {
         .name      = "AF lens test",
         .priv      = &afdiag_lens_test,
         .max       = 2,
-        .choices   = CHOICES("OFF", "Remote", "Direct"),
+        .choices   = CHOICES("OFF", "Remote", "Sweep"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY: move the focus motor back and forth in movie LV.",
-        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms. Direct: 200-step Canon drive, primed or not.\n"
+        .help2     = "Remote: 30 commands, size 3/15, gaps 0/40/100 ms. Sweep: near end, then to infinity at size 3/8/15.\n"
                      "Works while recording too; pair with AF diag log. OFF after restart.",
     },
 };
