@@ -574,6 +574,11 @@ static struct menu_entry mpu_lab_menu[] =
     {
         .name = "MPU lab",
         .select = menu_open_submenu,
+        /* Explicit action icon: an IT_SUBMENU entry counts as "enabled" only if
+         * a child value is non-zero (guess_submenu_enabled), and the slim GUI
+         * greys out and skips disabled non-bool rows.  All our choices start at
+         * index 0, so the entry was greyed out and unreachable. */
+        .icon_type = IT_ACTION,
         .help = "TEMPORARY: dump MPU memory and send raw ICU->MPU messages.",
         .help2 = "Dumps go to ML/LOGS/MPU-*.BIN, every command logs replies to ML/LOGS/MPULAB.LOG.\n"
                  "Raw commands are one-shot and refused while recording. OFF after restart.",
