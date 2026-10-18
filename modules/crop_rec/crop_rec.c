@@ -6181,7 +6181,9 @@ static void afdiag_flush(void)
         struct afdiag_entry e = afdiag_ring[afdiag_tail % AFDIAG_RING];
         afdiag_tail++;
         n += snprintf(buf + n, sizeof(buf) - n,
-            "%08d %-20s n=%d w=%08x,%08x,%08x,%08x z=%d rr=%d hs=%d af=%d pos=%d dist=%d\n",
+            /* ML's snprintf does not support field widths on %s ("%-20s"
+             * came out literally on the camera), so keep this plain. */
+            "%08d %s n=%d w=%08x,%08x,%08x,%08x z=%d rr=%d hs=%d af=%d pos=%d dist=%d\n",
             e.ms, afdiag_prop_name(e.code), e.len, e.w[0], e.w[1], e.w[2], e.w[3],
             e.zoom, e.rraw, e.hs, e.af, e.pos, e.dist);
         if (n > (int)sizeof(buf) - 200)
@@ -6220,7 +6222,12 @@ static void afdiag_lens_task(void *unused)
         {
             /* log a refusal once per reason, not every 2 s */
             if (skip != last_skip)
+            {
                 afdiag_record(AFD_EV_LENS_SKIP, 4, skip, 0, 0, 0);
+                /* say it on screen too: the first field test silently did nothing */
+                if (skip == 1) NotifyBox(3000, "AF lens test: lens is in MF");
+                if (skip == 2) NotifyBox(3000, "AF lens test: turn off Movie Servo AF");
+            }
             last_skip = skip;
             last_step = now;
             continue;
