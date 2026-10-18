@@ -5984,6 +5984,8 @@ enum
                           * The 2.0.2 firmware itself reads 0x24, 0x27 ("Po") and 0x2C (focal length). */
     AFD_EV_FPC,          /* w0 = focus pulse count (signed BE16 from PROP 0x8005001E), w1 = next BE16,
                           * w2 = bytes 4/5, w3 = byte 6 */
+    AFD_EV_MPU,          /* ICU -> MPU message (hook on Canon's packet builder): w0 = grp << 16 | op << 8 | len,
+                          * w1..w3 = payload bytes 0-11 (byte 0 in the low byte), dropped repeats in len's top */
     AFD_EV_LVOBJ,        /* Canon LV AF state (RAM *(0x4069C+12)), logged on change: w0 = obj,
                           * w1 = +0x184 LV mode, w2 = +0x710 AF method/zoom tag, w3 = +0xC7C servo << 8 | +0xC88 */
     AFD_EV_REFOCUS,      /* auto refocus: w0 = what (1 trigger, 2 AF ok, 3 AF failed, 4 request not started,
@@ -6205,6 +6207,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_SWEEP:              return "@SWEEP";
         case AFD_EV_REFOCUS:            return "@REFOCUS";
         case AFD_EV_LVOBJ:              return "@LVOBJ";
+        case AFD_EV_MPU:                return "@MPU";
     }
     return "?";
 }
@@ -6221,9 +6224,77 @@ static void afdiag_make_header(void)
 }
 
 /* Poll samples (called from the top of crop_rec_polling_cbr). */
+/* AF diag "ON + MPU": log every message the ICU sends to the MPU, which runs
+ * the lens and AF on this camera.  EOS M 2.0.2 ROM 0xFFA6CE54, copied to RAM
+ * at 0x38C4 (stubs RAM_OFFSET): (grp, op, len, data) -> [len+3, grp, op,
+ * payload].  PROP_LV_FOCUS ends up here as (9, 1, 5).  Read-only: the hook
+ * only copies the arguments.  Each (grp, op) pair is logged at most every
+ * AFDIAG_MPU_MIN_MS, so the per-frame AF feed (9, 0x2C) can't flood the ring. */
+#define AFDIAG_MPU_ADDR     0x38C4
+#define AFDIAG_MPU_INSTR    0xE92D4030  /* push {r4, r5, lr} */
+#define AFDIAG_MPU_MIN_MS   250
+static int afdiag_mpu_hooked = 0;
+static int afdiag_mpu_last[32 * 64];
+static uint8_t afdiag_mpu_drop[32 * 64];
+
+static void afdiag_mpu_cbr(uint32_t *regs, uint32_t *stack, uint32_t pc)
+{
+    (void)stack; (void)pc;
+    if (afdiag_log != 2) return;
+    uint32_t grp = regs[0], op = regs[1], len = regs[2];
+    const uint8_t *data = (const uint8_t *) regs[3];
+    int slot = (grp & 31) * 64 + (op & 63);
+    uint32_t old = cli();
+    int now = get_ms_clock();
+    if (afdiag_mpu_last[slot] && now - afdiag_mpu_last[slot] < AFDIAG_MPU_MIN_MS)
+    {
+        if (afdiag_mpu_drop[slot] < 255) afdiag_mpu_drop[slot]++;
+        sei(old);
+        return;
+    }
+    afdiag_mpu_last[slot] = now ? now : 1;
+    uint32_t w[3] = { 0, 0, 0 };
+    if (data && len <= 100 && (uint32_t) data >= 0x1000)
+        for (uint32_t i = 0; i < len && i < 12; i++)
+            w[i / 4] |= (uint32_t) data[i] << (8 * (i % 4));
+    afdiag_record(AFD_EV_MPU, 16,
+                  ((grp & 0xFF) << 16) | ((op & 0xFF) << 8) | (len & 0xFF) | ((uint32_t) afdiag_mpu_drop[slot] << 24),
+                  w[0], w[1], w[2]);
+    afdiag_mpu_drop[slot] = 0;
+    sei(old);
+}
+
+/* Install the hook from the shoot task (once), never from the hook itself. */
+static void afdiag_mpu_update(void)
+{
+    int want = (afdiag_log == 2) && is_camera("EOSM", "2.0.2");
+    if (want && !afdiag_mpu_hooked)
+    {
+        if (*(volatile uint32_t *) AFDIAG_MPU_ADDR != AFDIAG_MPU_INSTR)
+        {
+            NotifyBox(3000, "MPU log: unexpected code at %x", AFDIAG_MPU_ADDR);
+            afdiag_log = 1;
+            return;
+        }
+        memset(afdiag_mpu_last, 0, sizeof(afdiag_mpu_last));
+        memset(afdiag_mpu_drop, 0, sizeof(afdiag_mpu_drop));
+        if (patch_hook_function(AFDIAG_MPU_ADDR, AFDIAG_MPU_INSTR, afdiag_mpu_cbr, "AF diag: MPU log") == 0)
+            afdiag_mpu_hooked = 1;
+        else
+        {
+            NotifyBox(3000, "MPU log: hook failed");
+            afdiag_log = 1;
+        }
+    }
+    /* Never unpatch while the camera runs: unpatch_memory() wipes the hook
+     * stub at once, and a task preempted inside it would then crash.  Once
+     * installed the hook stays; afdiag_log != 2 makes it return at once. */
+}
+
 static void afdiag_sample(void)
 {
     static int last_log = 0;
+    afdiag_mpu_update();
     static int last_af = SLIM_AF_IDLE;
     static int last_pos = INT_MIN, last_dist = INT_MIN;
     static int last_rec = 0, last_rraw = 0;
@@ -6612,12 +6683,13 @@ static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF diag log",
         .priv      = &afdiag_log,
-        .max       = 1,
-        .choices   = CHOICES("OFF", "ON"),
+        .max       = 2,
+        .choices   = CHOICES("OFF", "ON", "ON + MPU"),
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "TEMPORARY diagnostics: log AF properties to ML/LOGS/AFDIAG.LOG.",
-        .help2     = "Always OFF after restart. Written to the card only when not recording.",
+        .help2     = "ON + MPU also logs messages Canon sends to the MPU (lens/AF controller).\n"
+                     "Always OFF after restart. Written to the card only when not recording.",
     },
     {
         .name      = "AF lens test",
