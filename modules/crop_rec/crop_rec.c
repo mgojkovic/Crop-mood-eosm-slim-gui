@@ -781,11 +781,21 @@ static int slim_handle_info_button(unsigned int key)
 
 /* Arrow assignment: 0=OFF, 1=Shutter, 2=Aperture, 3=ISO.
  * dir: +1 = UP/RIGHT, -1 = DOWN/LEFT. Returns 1 if consumed. */
+/* Exposure shortcuts (ISO / shutter / aperture) are ignored only while
+ * mlv_lite's "More" small hacks has actually suspended Canon's AeWb task;
+ * then a change would not apply cleanly.  This used to test crop_rec's own
+ * "More Hacks" flag, which is forced on at startup on the EOS M, so ISO
+ * could never be changed while recording, even with Small hacks OFF. */
+static int slim_expo_frozen(void)
+{
+    return RECORDING && is_more_hacks_selected() && AeWbTask_Disabled();
+}
+
 static int slim_handle_arrow_adjust(int mode, int dir)
 {
     if (!mode)
         return 0;
-    if (more_hacks && RECORDING)
+    if (slim_expo_frozen())
         return 1;
 
     if (mode == 1) /* Shutter */
@@ -9474,7 +9484,7 @@ static unsigned int crop_rec_keypress_cbr(unsigned int key)
                         return 1;
                     }
                     
-                    if (more_hacks && RECORDING) return 0;
+                    if (slim_expo_frozen()) return 0;
                     crop_rec_adjust_iso(2);
                     return 0;
                 }
@@ -9485,13 +9495,13 @@ static unsigned int crop_rec_keypress_cbr(unsigned int key)
                         // Use INFO key to cycle LV as normal when not in the LV with ML overlays
                         return 1;
                     }
-                    if (more_hacks && RECORDING) return 0;
+                    if (slim_expo_frozen()) return 0;
                     aperture_toggle(0, -1);
                     return 0;
                 }
                 if (key == MODULE_KEY_PRESS_SET && SET_button == 3)
                 {
-                    if (more_hacks && RECORDING) return 0;
+                    if (slim_expo_frozen()) return 0;
                     aperture_toggle(0, 1);
                     return 0;
                 }
