@@ -7417,6 +7417,8 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
  * (latest) / 0xFFF8132C (start of the last move), next to the poll gates at
  * 0xFFF812B8.. and the reference 0xFFF812DC: snapshot that region first so
  * it survives the slow-read fallback. */
+#define AFD_F_QUIET          1
+#define AFD_F_REC            2
 #define AFP_POS_BASE         0xFFF812B8
 #define AFP_POS_WORDS        36           /* 0xFFF812B8..0xFFF81347 */
 #define AFP_WORDS_SLOW       64           /* when a 128-word snapshot takes longer than AFP_SLOW_MS */
@@ -8045,28 +8047,17 @@ static void afd_probe_run(void)
 }
 
 /* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe. */
-static void afd_task_common(int mode)
+/* The AF drive engine: everything after the preconditions and the menu
+ * wait.  The caller owns afdiag_afdrive_busy and has checked LV / AF mode.
+ * mode: 0 AF drive, 1 calib, 2 probe.  flags: AFD_F_QUIET suppresses the
+ * NotifyBoxes (for Auto refocus); AFD_F_REC is reserved for running while
+ * recording (not handled yet: callers must not set it).  Returns the landing
+ * sharpness as % of the best (AF drive), 0 for calib/probe, -1 if aborted. */
+static int afd_engine(int mode, int flags)
 {
     int calib = (mode == 1), probe = (mode == 2);
     const char *name = probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
-    if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
-    afdiag_afdrive_busy = 1;
-
-    if (!is_EOSM || !lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
-    {
-        NotifyBox(4000, "%s: needs AF mode, LV, idle, not recording", name);
-        goto out;
-    }
-
-    NotifyBox(3000, "%s: close menu, starts in 2 s", name);
-    msleep(1500);
-    for (int i = 0; i < 50 && gui_menu_shown(); i++) msleep(100);
-    if (!lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE || gui_menu_shown())
-    {
-        NotifyBox(3000, "%s: aborted", name);
-        goto out;
-    }
-
+    int ret_pct = 0;
     afd_len = 0;
     afd_pos = 0;
     afd_moves = 0;
@@ -8097,8 +8088,8 @@ static void afd_task_common(int mode)
         e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
         if (e)
         {
-            NotifyBox(4000, "%s: MonOpen failed %d", name, e);
-            goto out;
+            if (!(flags & AFD_F_QUIET)) NotifyBox(4000, "%s: MonOpen failed %d", name, e);
+            return -1;
         }
         opened_now = 1;
         if (mon == 2) afd_mon_is_open = 1;
@@ -8151,6 +8142,7 @@ static void afd_task_common(int mode)
         final_s = afd_run(&best);
         if (!best) best = afd_best_s;
         pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
+        ret_pct = pct;
     }
     int total_ms = get_ms_clock() - afd_t0;
 
@@ -8194,19 +8186,49 @@ static void afd_task_common(int mode)
     }
     else
     {
-        NotifyBox(3000, "%s: log NOT saved (recording)", name);
+        if (!(flags & AFD_F_QUIET)) NotifyBox(3000, "%s: log NOT saved (recording)", name);
         msleep(3000);
     }
 
-    if (probe)
-        NotifyBox(6000, "AF probe %s: %d moves %dms, log AFPROBE.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
-    else if (calib)
-        NotifyBox(6000, "AF calib %s: peak up1=%d down=%d up2=%d backlash_est=%d",
-                  afd_aborted ? "ABORTED" : "done", afd_cal_peak_pos[0], afd_cal_peak_pos[1],
-                  afd_cal_peak_pos[2], afd_cal_peak_pos[0] - afd_cal_peak_pos[1]);
-    else
-        NotifyBox(6000, "AF drive %s: final/best pct=%d moves=%d %dms",
-                  afd_aborted ? "ABORTED" : "done", pct, afd_moves, total_ms);
+    if (!(flags & AFD_F_QUIET))
+    {
+        if (probe)
+            NotifyBox(6000, "AF probe %s: %d moves %dms, log AFPROBE.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
+        else if (calib)
+            NotifyBox(6000, "AF calib %s: peak up1=%d down=%d up2=%d backlash_est=%d",
+                      afd_aborted ? "ABORTED" : "done", afd_cal_peak_pos[0], afd_cal_peak_pos[1],
+                      afd_cal_peak_pos[2], afd_cal_peak_pos[0] - afd_cal_peak_pos[1]);
+        else
+            NotifyBox(6000, "AF drive %s: final/best pct=%d moves=%d %dms",
+                      afd_aborted ? "ABORTED" : "done", pct, afd_moves, total_ms);
+    }
+
+    return afd_aborted ? -1 : ret_pct;
+}
+
+static void afd_task_common(int mode)
+{
+    int calib = (mode == 1), probe = (mode == 2);
+    const char *name = probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
+    if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
+    afdiag_afdrive_busy = 1;
+
+    if (!is_EOSM || !lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
+    {
+        NotifyBox(4000, "%s: needs AF mode, LV, idle, not recording", name);
+        goto out;
+    }
+
+    NotifyBox(3000, "%s: close menu, starts in 2 s", name);
+    msleep(1500);
+    for (int i = 0; i < 50 && gui_menu_shown(); i++) msleep(100);
+    if (!lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE || gui_menu_shown())
+    {
+        NotifyBox(3000, "%s: aborted", name);
+        goto out;
+    }
+
+    afd_engine(mode, 0);
 
 out:
     afdiag_afdrive_busy = 0;
