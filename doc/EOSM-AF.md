@@ -296,6 +296,26 @@ Auto refocus integration, and behaviour with the monitor open while recording.
   - Predicted ranking, cold start: B 85% / 5.0 s, C 88% / 5.6 s, F 76% / 9.5 s, A 72% / 10.8 s.
   - The reversal offset is the main sensitivity.
 
+**Field results 2026-10-19 (day).**
+
+- **FOCUS_DONE is not the motion end for long moves.** It arrives at a fixed ~510 ms
+  (bit 0x0400), or early (bit 0x1000), while sharpness keeps changing. At speed 07 the lens
+  moves ~0.35 pulses/ms, so moves over ~150 pulses were cut short by the next command. That was
+  most of the "unpredictable reversal".
+  - Out-and-back ±40/±80 returns to 95-103% of focus.
+  - Moves are now chunked: 100 pulses at 07, 300 at 0x1F.
+- **Speed 0x1F moves ~3× faster than 07.** A sweep at 1F with a landing at 07 is unreliable
+  (wrong time→position); 07/07 works.
+- **(9,3,1) does not halt a (9,1) move.** Stop-on-threshold (algorithm C) cannot work.
+- **Bench, algorithm B with an 07 sweep + feedback landing:** 4/4 in focus, mean 100%, median
+  3.1 s. Algorithm A: 4/4, ~7 s.
+- **AF during RAW recording (REC test):** landed 100% in 6.2 s; recording kept running; LV
+  cadence steady (max vsync gap 43 ms).
+- **afd_measure at stride 4:** ~4 ms per call. At 24-49 ms it coincided with a Canon
+  `LvWbAlgorWrap.c:522` semaphore assert (probably starvation); none since.
+- **Task creation during RAW recording can fail** (memory), so recording-time work needs
+  pre-created tasks.
+
 **Other.** The LV blackout seen in the "AF search (MPU)" runs came from MpuMonOpen, not from
 the (8,2,32) index-16 call. That call still always ends at infinity and is not used.
 
