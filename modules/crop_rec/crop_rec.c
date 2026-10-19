@@ -7386,17 +7386,26 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_BACKLASH         40     /* pulses lost on a direction reversal: overshoot by this, come back */
 #define AFD_RECOVER_PCT      90     /* final < this % of best: one recovery scan */
 #define AFD_MAX_TOTAL        4000   /* whole run, total |pulses| */
-#define AFD_CAL_STEP         20     /* AF drive calib: pulses per move */
-#define AFD_CAL_MOVES        10     /* ... moves per pass: -100..+100 */
-#define AFD_CAL_START        (-100) /* sweep start, centred on the current position */
+#define AFD_CAL_STEP         40     /* AF drive calib: pulses per move */
+#define AFD_CAL_MOVES        8      /* ... moves per pass: -160..+160 */
+#define AFD_CAL_START        (-160) /* sweep start, centred on the current position */
+#define AFD_LV_PCT           70     /* LV valid again: luma >= this % of luma_pre ... */
+#define AFD_LV_MIN           3      /* ... and at least this ... */
+#define AFD_LV_N             3      /* ... for this many samples in a row */
+#define AFD_LV_POLL_MS       50
+#define AFD_LV_TIMEOUT_MS    5000
+#define AFD_LOW_PCT          50     /* before a sample: luma < this % of luma_pre = LV not valid */
+#define AFD_LOW_WAIT_MS      1000
+#define AFD_FAST_MS          40     /* FOCUS_DONE sooner than this = the immediate reject signature */
 #define AFC_LOG_FILE         "ML/LOGS/AFCALIB.LOG"
 
 static volatile int afdiag_afdrive_busy = 0;
-static int afdiag_afdrive_mon = 0;   /* 0: no MpuMonOpen/Close (default), 1: as mpu_lab */
+static int afdiag_afdrive_mon = 1;   /* 1: MpuMonOpen/Close around the run (default; OFF does not drive the lens), 0: no monitor */
 static char afd_buf[AFD_LOG_SIZE];
 static int afd_log_reserve = AFD_LOG_RESERVE;
 static int afd_len, afd_pos, afd_moves, afd_t0, afd_aborted, afd_lowcontrast;
 static int afd_travel, afd_recovered;
+static int afd_luma_pre, afd_nolv, afd_n_nodone, afd_n_err, afd_n_fast;
 static int afd_last_dir;     /* direction of the last non-zero move */
 static uint32_t afd_best_s;
 static int afd_best_pos;
@@ -7431,6 +7440,50 @@ static uint32_t afd_sample(uint32_t *g_out, int *luma_out)
     *g_out = (g1 + g2) / 2;
     *luma_out = (m1 + m2) / 2;
     return (s1 + s2) / 2;
+}
+
+static int afd_luma_now(void)
+{
+    int m = 0, c = 0, x = 0;
+    uint32_t g = 0;
+    afdiag_sharpness_ex(&m, &c, &x, &g);
+    return m;
+}
+
+static int afd_luma_ok(int luma, int pct)
+{
+    return luma * 100 >= afd_luma_pre * pct;
+}
+
+/* After MonOpen + session open: wait until LV has its normal brightness again
+ * (AFD_LV_N samples in a row >= AFD_LV_PCT of luma_pre and >= AFD_LV_MIN).
+ * Returns 1 when recovered, 0 on timeout or abort (afd_aborted set on abort). */
+static int afd_wait_lv(void)
+{
+    int t = get_ms_clock();
+    int ok = 0, n = 0, luma = 0, timeout = 0, dark_ms = -1;
+    /* The blackout starts with a delay (luma still normal ~20 ms after the
+     * session open, black by ~300 ms): first watch up to 800 ms for the dip,
+     * otherwise the recovery check below could pass before it begins. */
+    while (get_ms_clock() - t < 800)
+    {
+        luma = afd_luma_now();
+        if (!afd_luma_ok(luma, 50)) { dark_ms = get_ms_clock() - t; break; }
+        if (afd_must_abort()) { afd_aborted = 1; return 0; }
+        msleep(AFD_LV_POLL_MS);
+    }
+    afd_log("# lv_dark ms=%d luma=%d\n", dark_ms, luma);
+    while (1)
+    {
+        luma = afd_luma_now();
+        n = (luma >= AFD_LV_MIN && afd_luma_ok(luma, AFD_LV_PCT)) ? n + 1 : 0;
+        if (n >= AFD_LV_N) { ok = 1; break; }
+        if (afd_must_abort()) { afd_aborted = 1; break; }
+        if (get_ms_clock() - t >= AFD_LV_TIMEOUT_MS) { timeout = 1; break; }
+        msleep(AFD_LV_POLL_MS);
+    }
+    afd_log("# lv_recover ms=%d luma_pre=%d luma=%d timeout=%d\n", get_ms_clock() - t, afd_luma_pre, luma, timeout);
+    return ok;
 }
 
 static void afd_luma_probe(const char *tag)
@@ -7479,10 +7532,32 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
         msleep(AFD_SETTLE_MS);
     }
     uint32_t s = 0;
+    int lowluma = 0;
+    if (sample && afd_luma_pre > 0 && !afd_luma_ok(afd_luma_now(), AFD_LOW_PCT))
+    {
+        int t = get_ms_clock();
+        lowluma = 1;
+        while (get_ms_clock() - t < AFD_LOW_WAIT_MS)
+        {
+            msleep(AFD_LV_POLL_MS);
+            if (afd_luma_ok(afd_luma_now(), AFD_LOW_PCT)) { lowluma = 0; break; }
+        }
+    }
     if (sample) s = afd_sample(&g, &luma);
     afd_moves += n ? 1 : 0;
-    afd_log("%d %s %d %d %d %d %d %x %d ret%d dist=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
-            (int) s, (int) g, luma, done_val, done_ms, ret, (int) lens_info.focus_dist);
+    int f_nodone = n && done_ms < 0;
+    int f_err = n && done_ms >= 0 && (done_val & 0x1000);
+    int f_fast = n && done_ms >= 0 && done_ms < AFD_FAST_MS;
+    afd_n_nodone += f_nodone;
+    afd_n_err += f_err;
+    afd_n_fast += f_fast;
+    afd_log("%d %s %d %d %d %d %d %x %s%s%s%s%s %d ret%d dist=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
+            (int) s, (int) g, luma, done_val,
+            (f_nodone || f_err || f_fast || lowluma) ? "" : "-",
+            f_nodone ? "nodone" : "", f_err ? (f_nodone ? "+err" : "err") : "",
+            f_fast ? ((f_nodone || f_err) ? "+fast" : "fast") : "",
+            lowluma ? ((f_nodone || f_err || f_fast) ? "+lowluma" : "lowluma") : "",
+            done_ms, ret, (int) lens_info.focus_dist);
     if (sample && track && s > afd_best_s)
     {
         afd_best_s = s;
@@ -7657,8 +7732,8 @@ static uint32_t afd_run(uint32_t *best_out)
     return s;
 }
 
-/* AF drive calib: hysteresis measurement. Go to -100 (approach +), then
- * 10 x +20 (up1: -100..+100), 10 x -20 (down: +100..-100), 10 x +20 (up2),
+/* AF drive calib: hysteresis measurement. Go to -160 (approach +), then
+ * 8 x +40 (up1: -160..+160), 8 x -40 (down: +160..-160), 8 x +40 (up2),
  * s after each move (a pass also starts with the sample the previous pass ended on).
  * Model: with backlash B, after a reversal the lens first loses B pulses, so
  * going down the true peak is reached at a LOWER commanded pos than going up
@@ -7747,8 +7822,11 @@ static void afd_task_common(int calib)
     afd_recovered = 0;
     afd_last_dir = 0;
     afd_best_dir = 0;
+    afd_nolv = 0;
+    afd_n_nodone = afd_n_err = afd_n_fast = 0;
     afd_t0 = get_ms_clock();
     afd_log_reserve = AFD_LOG_RESERVE;
+    afd_luma_pre = afd_luma_now();   /* before MonOpen */
     int mon = afdiag_afdrive_mon;
     int e = 0;
     if (mon)
@@ -7780,7 +7858,7 @@ static void afd_task_common(int calib)
                 AFD_COARSE_DROP_N, AFD_FLAT_PCT, AFD_FLAT_N, AFD_MAX_TRAVEL, AFD_MAX_TOTAL, AFD_MAX_COARSE,
                 AFD_FINE_DROP_PCT, AFD_MAX_FINE, AFD_RECOVER_PCT, AFD_DONE_TIMEOUT_MS, AFD_MIN_BASE_MS,
                 AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS, AFD_FRAME_MS, AFD_SETTLE_MS);
-    afd_log("# ms phase cmd pos s g luma done_val done_ms ret dist\n");
+    afd_log("# ms phase cmd pos s g luma done_val flags done_ms ret dist\n");
     afd_luma_probe("pre_monopen_or_session");
 
     int r_open = send(9, 0x25, 16, open_s);
@@ -7791,7 +7869,11 @@ static void afd_task_common(int calib)
 
     uint32_t best = 0, final_s = 0;
     int pct = 0;
-    if (calib) afd_calib_run();
+    if (!afd_wait_lv())
+    {
+        if (!afd_aborted) afd_nolv = 1;
+    }
+    else if (calib) afd_calib_run();
     else
     {
         final_s = afd_run(&best);
@@ -7808,17 +7890,18 @@ static void afd_task_common(int calib)
     if (mon) ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
 
     afd_log_reserve = 0;
-    const char *ab = afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0";
+    const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0";
     if (calib)
         afd_log("# RESULT aborted=%s peak_up1=%d peak_up1_s=%d peak_down=%d peak_down_s=%d peak_up2=%d peak_up2_s=%d "
-                "edge_up1=%d edge_down=%d edge_up2=%d backlash_est=%d repeat_up=%d moves=%d total_ms=%d end_pos=%d\n\n",
+                "edge_up1=%d edge_down=%d edge_up2=%d backlash_est=%d repeat_up=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
                 ab, afd_cal_peak_pos[0], (int) afd_cal_peak_s[0], afd_cal_peak_pos[1], (int) afd_cal_peak_s[1],
                 afd_cal_peak_pos[2], (int) afd_cal_peak_s[2], afd_cal_edge(0), afd_cal_edge(1), afd_cal_edge(2),
                 afd_cal_peak_pos[0] - afd_cal_peak_pos[1],
-                afd_cal_peak_pos[2] - afd_cal_peak_pos[0], afd_moves, total_ms, afd_pos);
+                afd_cal_peak_pos[2] - afd_cal_peak_pos[0], afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
     else
-        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d final_s=%d final_best_pct=%d recovery=%d moves=%d total_ms=%d end_pos=%d\n\n",
-                ab, afd_best_pos, (int) best, (int) final_s, pct, afd_recovered, afd_moves, total_ms, afd_pos);
+        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d final_s=%d final_best_pct=%d recovery=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
+                ab, afd_best_pos, (int) best, (int) final_s, pct, afd_recovered, afd_moves,
+                afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
 
     if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
     {
@@ -7924,15 +8007,15 @@ static struct menu_entry afdiag_menu[] = {
         .choices   = CHOICES("OFF", "ON"),
         .icon_type = IT_BOOL,
         .help      = "AF drive (MPU): open the MPU monitor (MpuMonOpen/Close) around the run.",
-        .help2     = "OFF (default): send session/moves/stop directly, no blackout; use this for real runs.\n"
-                     "ON is for diagnostics only: it blacks out LiveView ~300 ms after the session opens,\n"
-                     "so the sharpness readings are garbage. Logged in the log header.",
+        .help2     = "ON (default): required, the lens only moves with the monitor open. LiveView goes dark for\n"
+                     "~2 s after open; the run waits for it to recover. OFF does NOT drive the lens (the MPU rejects\n"
+                     "every move at once with 0x4A); keep it for experiments. Logged in the log header.",
     },
     {
         .name      = "AF drive calib",
         .select    = afdiag_afcalib_select,
         .icon_type = IT_DICE,
-        .help      = "EXPERIMENTAL: measure the focus motor backlash (-100..+100 pulses up, down, up).",
+        .help      = "EXPERIMENTAL: measure the focus motor backlash (-160..+160 pulses up, down, up).",
         .help2     = "Run it AFTER AF drive (lens near focus). Same conditions as AF drive (MPU). Sharpness after every move goes to ML/LOGS/AFCALIB.LOG;\n"
                      "the backlash is the peak offset (up minus down).",
     },
