@@ -7489,9 +7489,23 @@ static void afd_log(const char *fmt, ...)
     if (k > 0) afd_len += MIN(k, room - afd_len - 1);
 }
 
+/* Running while RAW recording (AFD_F_REC): recording is no abort reason, but any
+ * change of the recording state (stopping) is. */
+static int afd_rec_run = 0, afd_rec_state0 = 0;
+static int afd_rec_state(void)
+{
+    return (RECORDING ? 1 : 0) | (RECORDING_RAW ? 2 : 0) | (mlv_raw_rec_busy() ? 4 : 0);
+}
+
 static int afd_must_abort(void)
 {
-    return RECORDING || RECORDING_RAW || !lv || gui_menu_shown() || is_manual_focus();
+    if (afd_rec_run)
+    {
+        if (afd_rec_state() != afd_rec_state0) return 1;
+    }
+    else if (RECORDING || RECORDING_RAW)
+        return 1;
+    return !lv || gui_menu_shown() || is_manual_focus();
 }
 
 /* mean of 2 samples one LV frame apart */
@@ -8114,18 +8128,60 @@ static void afd_speed_run(void)
     afd_speed = AFD_SPEED;
 }
 
+/* Log write: never while recording.  afd_engine keeps the log in afd_buf and sets
+ * afd_log_pending; afd_log_flush() (polling callback) writes it after recording
+ * ends.  afd_log_hold keeps it back while the REC test still adds its REC line. */
+static volatile int afd_log_pending = 0, afd_log_hold = 0;
+static const char *afd_pend_file;
+static int afd_pend_len;
+static char afd_rec_line[640];
+static int afd_rec_line_len;
+
+static void afd_log_write(void)
+{
+    if (!is_dir(AFDIAG_LOG_DIR))
+        FIO_CreateDirectory(AFDIAG_LOG_DIR);
+    FILE *f = FIO_CreateFileOrAppend(afd_pend_file);
+    if (f)
+    {
+        FIO_WriteFile(f, afd_buf, afd_pend_len);
+        if (afd_rec_line_len) FIO_WriteFile(f, afd_rec_line, afd_rec_line_len);
+        FIO_CloseFile(f);
+    }
+    afd_rec_line_len = 0;
+    afd_log_pending = 0;
+}
+
+static void afd_log_flush(void)
+{
+    if (!afd_log_pending || afd_log_hold || afdiag_afdrive_busy) return;
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) return;
+    afd_log_write();
+}
+
 /* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe, 3 speed test. */
 /* The AF drive engine: everything after the preconditions and the menu
  * wait.  The caller owns afdiag_afdrive_busy and has checked LV / AF mode.
  * mode: 0 AF drive, 1 calib, 2 probe, 3 speed test.  flags: AFD_F_QUIET suppresses the
- * NotifyBoxes (for Auto refocus); AFD_F_REC is reserved for running while
- * recording (not handled yet: callers must not set it).  Returns the landing
+ * NotifyBoxes (for Auto refocus); AFD_F_REC runs while RAW recording: the
+ * monitor must already be open (Keep open), recording is not an abort reason
+ * but a change of the recording state is, and the log is held in RAM until
+ * recording ends (afd_log_flush).  Returns the landing
  * sharpness as % of the best (AF drive), 0 for calib/probe, -1 if aborted. */
 static int afd_engine(int mode, int flags)
 {
     int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
     const char *name = speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     int ret_pct = 0;
+    if (afd_log_pending) return -1;   /* the previous log is still waiting for the card */
+    afd_rec_run = 0;
+    if (flags & AFD_F_REC)
+    {
+        /* never open/close the monitor while recording (LV blackout ~2 s) */
+        if (!RECORDING_RAW || afdiag_afdrive_mon != 2 || !afd_mon_is_open) return -1;
+        afd_rec_state0 = afd_rec_state();
+        afd_rec_run = 1;
+    }
     afd_fast = !calib && !probe;
     afd_speed = AFD_SPEED;
     afd_done_timeout = speedt ? AFD_SPEED_DONE_MS : AFD_DONE_TIMEOUT_MS;
@@ -8257,22 +8313,13 @@ static int afd_engine(int mode, int flags)
                 ab, afd_best_pos, (int) best, afd_peak_g_pos, afd_fine_peak_pos, (int) final_s, pct, afd_retraces, (int) afd_land_s, pct, afd_moves,
                 afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
 
+    afd_rec_run = 0;
+    afd_pend_file = speedt ? AFV_LOG_FILE : probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE;
+    afd_pend_len = afd_len;
     if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
-    {
-        if (!is_dir(AFDIAG_LOG_DIR))
-            FIO_CreateDirectory(AFDIAG_LOG_DIR);
-        FILE *f = FIO_CreateFileOrAppend(speedt ? AFV_LOG_FILE : probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE);
-        if (f)
-        {
-            FIO_WriteFile(f, afd_buf, afd_len);
-            FIO_CloseFile(f);
-        }
-    }
+        afd_log_write();
     else
-    {
-        if (!(flags & AFD_F_QUIET)) NotifyBox(3000, "%s: log NOT saved (recording)", name);
-        msleep(3000);
-    }
+        afd_log_pending = 1;   /* written by afd_log_flush() once recording has ended */
 
     if (!(flags & AFD_F_QUIET))
     {
@@ -8297,6 +8344,11 @@ static void afd_task_common(int mode)
     int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
     const char *name = speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
+    if (afd_log_pending)
+    {
+        NotifyBox(3000, "%s: previous log not saved yet", name);
+        return;
+    }
     afdiag_afdrive_busy = 1;
 
     if (!is_EOSM || !lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
@@ -8318,6 +8370,124 @@ static void afd_task_common(int mode)
 
 out:
     afdiag_afdrive_busy = 0;
+}
+
+/* AF drive REC test: arm it, start RAW recording, 3 s later one AF drive runs
+ * while recording.  Evidence goes into a REC line of AFDRIVE.LOG, written after
+ * recording stops.  mlv_lite keeps frame_count / skipped_frames static and does
+ * not export them, so counters=none and the LV vsync cadence is the proxy. */
+#define AFD_REC_DELAY_MS     3000
+#define AFD_REC_WATCH_MS     5000
+static volatile int afd_rect_state = 0;   /* 0 off, 1 armed, 2 running */
+static volatile int afd_rect_track = 0;
+static volatile int afd_vs_frames = 0, afd_vs_last = 0, afd_vs_maxgap = 0;
+
+static unsigned int afd_rec_vsync_cbr(unsigned int unused)
+{
+    if (afd_rect_track)
+    {
+        int now = get_ms_clock();
+        if (afd_vs_last && now - afd_vs_last > afd_vs_maxgap) afd_vs_maxgap = now - afd_vs_last;
+        afd_vs_last = now;
+        afd_vs_frames++;
+    }
+    return 0;
+}
+
+static void afd_rect_task(void *unused)
+{
+    (void) unused;
+    msleep(1000);
+    if (!afd_mon_is_open || afdiag_afdrive_mon != 2 || !lv || !RECORDING_RAW)
+        goto not_run;
+    /* baseline: LV cadence over the 2 s before the run */
+    afd_rect_track = 1;
+    afd_vs_frames = 0; afd_vs_last = 0; afd_vs_maxgap = 0;
+    msleep(AFD_REC_DELAY_MS - 1000);
+    int base_frames = afd_vs_frames, base_gap = afd_vs_maxgap;
+    if (!RECORDING_RAW || !lv || afdiag_afdrive_busy || afdiag_afsearch_busy || afd_log_pending ||
+        slim_af_state != SLIM_AF_IDLE || gui_menu_shown() || is_manual_focus() || !afd_mon_is_open)
+    {
+        afd_rect_track = 0;
+        goto not_run;
+    }
+    afdiag_afdrive_busy = 1;
+    afd_log_hold = 1;
+    NotifyBox(3000, "AF REC test running");
+    int rec0 = RECORDING ? 1 : 0, raw0 = RECORDING_RAW ? 1 : 0, mlv0 = mlv_raw_rec_busy() ? 1 : 0;
+    int st0 = afd_rec_state();
+    afd_vs_frames = 0; afd_vs_last = 0; afd_vs_maxgap = 0;
+    int t0 = get_ms_clock();
+    int ret = afd_engine(0, AFD_F_REC | AFD_F_QUIET);
+    int run_ms = get_ms_clock() - t0;
+    int run_frames = afd_vs_frames, run_gap = afd_vs_maxgap;
+    int stopped_run = (afd_rec_state() != st0);
+    int moves = afd_moves, aborted = afd_aborted;
+    afdiag_afdrive_busy = 0;
+    /* watch 5 s after the run */
+    afd_vs_frames = 0; afd_vs_last = 0; afd_vs_maxgap = 0;
+    int stopped_5s = 0, w0 = get_ms_clock();
+    while (get_ms_clock() - w0 < AFD_REC_WATCH_MS)
+    {
+        if (afd_rec_state() != st0) { stopped_5s = 1; break; }
+        msleep(100);
+    }
+    int post_frames = afd_vs_frames, post_gap = afd_vs_maxgap, post_ms = get_ms_clock() - w0;
+    afd_rect_track = 0;
+    int rec1 = RECORDING ? 1 : 0, raw1 = RECORDING_RAW ? 1 : 0, mlv1 = mlv_raw_rec_busy() ? 1 : 0;
+    afd_rec_line_len = snprintf(afd_rec_line, sizeof(afd_rec_line),
+        "REC rec0=%d raw0=%d mlv0=%d rec1=%d raw1=%d mlv1=%d stopped_in_run=%d stopped_in_5s=%d "
+        "ret=%d land_pct=%d moves=%d ms=%d aborted=%d "
+        "counters=none vs_base_frames=%d vs_base_ms=2000 vs_base_maxgap=%d vs_run_frames=%d vs_run_ms=%d vs_run_maxgap=%d "
+        "vs_post_frames=%d vs_post_ms=%d vs_post_maxgap=%d\n\n",
+        rec0, raw0, mlv0, rec1, raw1, mlv1, stopped_run, stopped_5s,
+        ret, ret < 0 ? 0 : ret, moves, run_ms, aborted,
+        base_frames, base_gap, run_frames, run_ms, run_gap, post_frames, post_ms, post_gap);
+    if (afd_rec_line_len < 0) afd_rec_line_len = 0;
+    if (afd_rec_line_len >= (int) sizeof(afd_rec_line)) afd_rec_line_len = sizeof(afd_rec_line) - 1;
+    if (!afd_log_pending)
+    {
+        /* the engine refused to run (no log): keep only the REC line */
+        afd_pend_file = AFD_LOG_FILE;
+        afd_pend_len = 0;
+        afd_log_pending = 1;
+    }
+    afd_rect_state = 0;      /* one run only */
+    afd_log_hold = 0;        /* afd_log_flush() writes it after recording stops */
+    return;
+not_run:
+    afd_rect_track = 0;
+    afd_rect_state = 1;      /* recording stopped before the 3 s: stay armed */
+    NotifyBox(3000, "AF REC test: not run, still armed");
+}
+
+static MENU_SELECT_FUNC(afdiag_afrect_select)
+{
+    (void) priv;
+    (void) delta;
+    if (afd_rect_state == 1) { afd_rect_state = 0; NotifyBox(2000, "AF REC test disarmed"); return; }
+    if (afd_rect_state) return;
+    if (!is_EOSM || !lv || RECORDING || !afd_mon_is_open || afdiag_afdrive_mon != 2 || afd_log_pending)
+    {
+        NotifyBox(5000, "AF REC test: needs LV, not recording, monitor Keep open and already open (run AF drive first), no unsaved log");
+        return;
+    }
+    afd_rect_state = 1;
+    NotifyBox(4000, "AF REC test armed: start RAW rec, AF runs after 3 s");
+}
+
+static MENU_UPDATE_FUNC(afdiag_afrect_update)
+{
+    MENU_SET_VALUE(afd_rect_state == 2 ? "RUNNING" : afd_rect_state == 1 ? "ARMED" : "off");
+}
+
+static void afd_rect_poll(void)
+{
+    if (afd_rect_state == 1 && RECORDING_RAW && mlv_raw_rec_busy() && lv)
+    {
+        afd_rect_state = 2;
+        task_create("afd_rect", 0x1e, 0x3000, afd_rect_task, (void*)0);
+    }
 }
 
 static void afdiag_afdrive_task(void *unused)
@@ -8477,6 +8647,15 @@ static struct menu_entry afdiag_menu[] = {
         .help      = "DIAGNOSTIC: does a speed byte faster than 0x07 move the lens?",
         .help2     = "For speed 03,05,07,09,0B,0F,14,1F moves +120 then -120 and logs FOCUS_DONE time/value and the\n"
                      "sharpness before/after. Same conditions as AF drive. Log: ML/LOGS/AFSPEED.LOG.",
+    },
+    {
+        .name      = "AF drive REC test",
+        .select    = afdiag_afrect_select,
+        .update    = afdiag_afrect_update,
+        .icon_type = IT_ACTION,
+        .help      = "FIELD TEST: run AF drive (MPU) 3 s into a RAW recording, log if recording is disturbed.",
+        .help2     = "Needs monitor Keep open and already open (run AF drive first). Arm, then start RAW recording.\n"
+                     "Evidence (REC line) goes to ML/LOGS/AFDRIVE.LOG after recording stops. One run, then disarms.",
     },
 };
 
@@ -11045,6 +11224,8 @@ static void aref_step(void)
 /* when closing ML menu, check whether we need to refresh the LiveView */
 static unsigned int crop_rec_polling_cbr(unsigned int unused)
 {
+    afd_log_flush();
+    afd_rect_poll();
     if (afd_mon_is_open && !lv && !afd_mon_closing && !afdiag_afdrive_busy)
     {
         afd_mon_closing = 1;
@@ -12443,6 +12624,7 @@ MODULE_CONFIGS_END()
 
 MODULE_CBRS_START()
     MODULE_CBR(CBR_SHOOT_TASK, crop_rec_polling_cbr, 0)
+    MODULE_CBR(CBR_VSYNC, afd_rec_vsync_cbr, 0)
     MODULE_CBR(CBR_RAW_INFO_UPDATE, raw_info_update_cbr, 0)
     MODULE_CBR(CBR_KEYPRESS, crop_rec_keypress_cbr, 0)
     MODULE_CBR(CBR_KEYPRESS, photo_keypress_cbr, 0)
