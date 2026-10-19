@@ -7380,13 +7380,15 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_MAX_TRAVEL       1500   /* coarse phase, total |pulses| */
 #define AFD_MAX_COARSE       25     /* coarse phase moves (probes included) */
 #define AFD_DONE_TIMEOUT_MS  800
-#define AFD_MIN_BASE_MS      40
-#define AFD_MIN_PER_PULSE    0
+#define AFD_MIN_BASE_MS      100
+#define AFD_MIN_PER_PULSE    2
 #define AFD_MIN_CAP_MS       700
 #define AFD_MIN_S            2000   /* below this s0 the scene has no contrast: skip */
 #define AFD_FRAME_MS         45     /* one LV frame, between the two samples */
-#define AFD_SETTLE_MS        50     /* after FOCUS_DONE */
-#define AFD_LOG_SIZE         12288
+#define AFD_SETTLE_MS        90     /* after FOCUS_DONE */
+#define AFD_STABLE_PCT       5      /* two samples one frame apart differing by more than this %: lens still moving */
+#define AFD_STABLE_TRIES     3      /* ... re-sample after AFD_SETTLE_MS, at most this many tries */
+#define AFD_LOG_SIZE         24576
 #define AFD_LOG_RESERVE     256    /* kept free for the "# RESULT" line */
 #define AFD_APPROACH         120    /* approach leg, longer than the backlash (real value 30-60) */
 #define AFD_RECOVER_PCT      85     /* final s < this % of the fine max: one recovery sweep */
@@ -7403,6 +7405,14 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_LOW_WAIT_MS      1000
 #define AFD_FAST_MS          40     /* FOCUS_DONE sooner than this = the immediate reject signature */
 #define AFC_LOG_FILE         "ML/LOGS/AFCALIB.LOG"
+#define AFP_LOG_FILE         "ML/LOGS/AFPROBE.LOG"
+#define AFP_BASE             0xFFF81B78   /* MPU lens-state struct */
+#define AFP_WORDS            128
+#define AFP_WORDS_SLOW       64           /* when a 128-word snapshot takes longer than AFP_SLOW_MS */
+#define AFP_SLOW_MS          1500
+#define AFP_MAX_CHG          32           /* CHG lines per move */
+#define AFP_EXTRA_MS         300          /* extra settle after every probe move */
+#define AFP_POLL_MS          30
 
 static volatile int afdiag_afdrive_busy = 0;
 static int afdiag_afdrive_mon = 2;   /* 0 OFF, 1 ON (open/close per run), 2 keep open after the first run */
@@ -7448,7 +7458,7 @@ static int afd_must_abort(void)
 }
 
 /* mean of 2 samples one LV frame apart */
-static uint32_t afd_sample(uint32_t *g_out, int *luma_out)
+static uint32_t afd_sample_pair(uint32_t *g_out, int *luma_out, uint32_t *s1_out, uint32_t *s2_out)
 {
     int m1 = 0, m2 = 0, c = 0, x = 0;
     uint32_t g1 = 0, g2 = 0;
@@ -7457,7 +7467,73 @@ static uint32_t afd_sample(uint32_t *g_out, int *luma_out)
     uint32_t s2 = afdiag_sharpness_ex(&m2, &c, &x, &g2);
     *g_out = (g1 + g2) / 2;
     *luma_out = (m1 + m2) / 2;
+    *s1_out = s1;
+    *s2_out = s2;
     return (s1 + s2) / 2;
+}
+
+static uint32_t afd_sample(uint32_t *g_out, int *luma_out)
+{
+    uint32_t a, b;
+    return afd_sample_pair(g_out, luma_out, &a, &b);
+}
+
+/* Sample after a move: if the two samples differ by more than AFD_STABLE_PCT
+ * the lens is probably still moving: wait AFD_SETTLE_MS and sample again
+ * (max AFD_STABLE_TRIES). *tries = number of sample pairs taken. */
+static uint32_t afd_sample_stable(uint32_t *g_out, int *luma_out, int *tries)
+{
+    uint32_t s = 0, a = 0, b = 0;
+    int n = 0;
+    for (;;)
+    {
+        n++;
+        s = afd_sample_pair(g_out, luma_out, &a, &b);
+        uint32_t d = a > b ? a - b : b - a;
+        uint32_t m = a > b ? a : b;
+        if ((uint64_t) d * 100 <= (uint64_t) m * AFD_STABLE_PCT) break;
+        if (n >= AFD_STABLE_TRIES || afd_must_abort()) break;
+        msleep(AFD_SETTLE_MS);
+    }
+    *tries = n;
+    return s;
+}
+
+/* ---- AF drive probe helpers: MPU RAM word reads (monitor must be open) ----
+ * Same call as mpu_lab drv_read_gates: MpuMonRead(kind 0, addr, 4, buf), 0 = ok,
+ * the word is printed/assembled in the byte order of buf (b0 first = MSB). */
+static int afd_poll_on = 0;       /* poll the busy/state words while waiting in afd_move_ex */
+static int afd_poll_t0 = 0;       /* ms clock when the last move command was sent */
+static int afd_extra_ms = 0;      /* extra settle after FOCUS_DONE (probe) */
+
+static int afd_mon_word(uint32_t addr, uint32_t *v)
+{
+    uint8_t b[8] = { 0 };
+    int e = ((int (*)(int, uint32_t, int, void *)) 0xFF1DD2B8)(0, addr, 4, b);   /* MpuMonRead */
+    *v = e ? 0 : ((uint32_t) b[0] << 24) | ((uint32_t) b[1] << 16) | ((uint32_t) b[2] << 8) | b[3];
+    return e;
+}
+
+static void afd_poll_once(void)
+{
+    static const uint32_t a[5] = { 0xFFF81BB9, 0xFFF81C10, 0xFFF81C14, 0xFFF81C18, 0xFFF81C1C };
+    uint32_t v[5];
+    int err = 0;
+    for (int i = 0; i < 5; i++) err += afd_mon_word(a[i], &v[i]) ? 1 : 0;
+    afd_log("POLL t=%d val=%x c10=%x c14=%x c18=%x c1c=%x err=%d\n",
+            get_ms_clock() - afd_poll_t0, v[0], v[1], v[2], v[3], v[4], err);
+}
+
+/* msleep that keeps polling when afd_poll_on */
+static void afd_wait(int ms)
+{
+    if (!afd_poll_on) { msleep(ms); return; }
+    int t = get_ms_clock();
+    while (get_ms_clock() - t < ms)
+    {
+        afd_poll_once();
+        msleep(AFP_POLL_MS);
+    }
 }
 
 static int afd_luma_now(void)
@@ -7532,6 +7608,7 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
         uint8_t d[5] = { (uint8_t)((n >> 8) & 0xFF), (uint8_t)(n & 0xFF), AFD_SPEED, 0, 0 };
         int cnt0 = afdiag_focus_done_count;
         int t = get_ms_clock();
+        afd_poll_t0 = t;
         ret = ((int (*)(int,int,int,const void *)) 0x38C4)(9, 1, 5, d);
         afd_pos += n;
         afd_travel += ABS(n);
@@ -7545,9 +7622,10 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
                 done_val = (int) afdiag_focus_done_val;
             }
             if (done_ms >= 0 && get_ms_clock() - t >= min_ms) break;
-            msleep(10);
+            if (afd_poll_on) { afd_poll_once(); msleep(AFP_POLL_MS); }
+            else msleep(10);
         }
-        msleep(AFD_SETTLE_MS);
+        afd_wait(AFD_SETTLE_MS + afd_extra_ms);
     }
     uint32_t s = 0;
     int lowluma = 0;
@@ -7561,7 +7639,8 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             if (afd_luma_ok(afd_luma_now(), AFD_LOW_PCT)) { lowluma = 0; break; }
         }
     }
-    if (sample) s = afd_sample(&g, &luma);
+    int tries = 0;
+    if (sample) s = afd_sample_stable(&g, &luma, &tries);
     afd_last_g = g;
     afd_moves += n ? 1 : 0;
     int f_nodone = n && done_ms < 0;
@@ -7570,13 +7649,13 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
     afd_n_nodone += f_nodone;
     afd_n_err += f_err;
     afd_n_fast += f_fast;
-    afd_log("%d %s %d %d %d %d %d %x %s%s%s%s%s %d ret%d dist=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
+    afd_log("%d %s %d %d %d %d %d %x %s%s%s%s%s %d ret%d dist=%d t=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
             (int) s, (int) g, luma, done_val,
             (f_nodone || f_err || f_fast || lowluma) ? "" : "-",
             f_nodone ? "nodone" : "", f_err ? (f_nodone ? "+err" : "err") : "",
             f_fast ? ((f_nodone || f_err) ? "+fast" : "fast") : "",
             lowluma ? ((f_nodone || f_err || f_fast) ? "+lowluma" : "lowluma") : "",
-            done_ms, ret, (int) lens_info.focus_dist);
+            done_ms, ret, (int) lens_info.focus_dist, tries);
     if (sample && track && s > afd_best_s)
     {
         afd_best_s = s;
@@ -7851,10 +7930,74 @@ static void afd_calib_run(void)
     afd_log("# calib_return pos=%d s=%d\n", afd_pos, (int) last);
 }
 
-/* One session for both actions: calib=0 AF drive, calib=1 AF drive calib. */
-static void afd_task_common(int calib)
+/* AF drive probe: find the MPU RAM word that follows the real focus motor
+ * position. Snapshots AFP_WORDS words at AFP_BASE before and after each move
+ * and logs the words that changed. */
+static uint32_t afp_prev[AFP_WORDS], afp_cur[AFP_WORDS];
+static uint8_t afp_err[AFP_WORDS];
+static int afp_words = AFP_WORDS;
+
+static int afp_snapshot(uint32_t *out, int *errs)
 {
-    const char *name = calib ? "AF calib MPU" : "AF drive MPU";
+    int t = get_ms_clock();
+    *errs = 0;
+    for (int i = 0; i < afp_words; i++)
+    {
+        if ((i & 15) == 0 && afd_must_abort()) { afd_aborted = 1; return 0; }
+        int e = afd_mon_word(AFP_BASE + 4 * i, &out[i]);
+        afp_err[i] = e ? 1 : 0;
+        *errs += afp_err[i];
+    }
+    return get_ms_clock() - t;
+}
+
+static void afd_probe_run(void)
+{
+    static const int tbl[10] = { 20, 20, 20, 40, 40, 120, -120, -40, -20, -20 };
+    int errs = 0;
+    afd_move_ex("i", 0, 1, 0);
+    if (afd_aborted) return;
+    int ms = afp_snapshot(afp_prev, &errs);
+    if (afd_aborted) return;
+    afd_log("# snapshot A words=%d base=0x%x ms=%d errs=%d\n", afp_words, AFP_BASE, ms, errs);
+    if (ms > AFP_SLOW_MS)
+    {
+        afp_words = AFP_WORDS_SLOW;
+        afd_log("# snapshot too slow, dropping to words=%d\n", afp_words);
+    }
+    for (int k = 0; k < 10; k++)
+    {
+        int n = tbl[k];
+        afd_poll_on = (k == 5 || k == 6);   /* the first +120 and the -120 */
+        afd_extra_ms = AFP_EXTRA_MS;
+        afd_move_ex("p", n, 1, 0);
+        afd_poll_on = 0;
+        afd_extra_ms = 0;
+        if (afd_aborted) return;
+        ms = afp_snapshot(afp_cur, &errs);
+        if (afd_aborted) return;
+        int nchg = 0;
+        for (int i = 0; i < afp_words; i++)
+        {
+            if (afp_err[i] || afp_cur[i] == afp_prev[i]) continue;
+            nchg++;
+            if (nchg > AFP_MAX_CHG) continue;
+            uint32_t o = afp_prev[i], w = afp_cur[i];
+            afd_log("CHG move=%d cmd=%d addr=0x%x old=0x%x new=0x%x delta=%d dhi=%d dlo=%d\n",
+                    k + 1, n, AFP_BASE + 4 * i, o, w, (int) (w - o),
+                    (int) (int16_t) ((w >> 16) - (o >> 16)), (int) (int16_t) ((w & 0xFFFF) - (o & 0xFFFF)));
+        }
+        afd_log("# snapshot move=%d words=%d ms=%d errs=%d changed=%d%s\n", k + 1, afp_words, ms, errs, nchg,
+                nchg > AFP_MAX_CHG ? " (CHG lines capped)" : "");
+        memcpy(afp_prev, afp_cur, sizeof(afp_prev));
+    }
+}
+
+/* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe. */
+static void afd_task_common(int mode)
+{
+    int calib = (mode == 1), probe = (mode == 2);
+    const char *name = probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
     afdiag_afdrive_busy = 1;
 
@@ -7889,6 +8032,10 @@ static void afd_task_common(int calib)
     afd_log_reserve = AFD_LOG_RESERVE;
     afd_luma_pre = afd_luma_now();   /* before MonOpen */
     int mon = afdiag_afdrive_mon;
+    if (probe && !mon) mon = 1;   /* the probe reads MPU RAM: the monitor must be open */
+    afd_poll_on = 0;
+    afd_extra_ms = 0;
+    afp_words = AFP_WORDS;
     int e = 0;
     int opened_now = 0;
     if (afd_mon_is_open && mon != 2)
@@ -7909,9 +8056,14 @@ static void afd_task_common(int calib)
     static const uint8_t open_s[16] = { 0x02 };
     int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
     afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d\n",
-            calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
+            probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
             (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now);
-    if (calib)
+    if (probe)
+        afd_log("# speed=%d moves=20,20,20,40,40,120,-120,-40,-20,-20 extra_settle=%d poll_ms=%d "
+                "min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
+                AFD_SPEED, AFP_EXTRA_MS, AFP_POLL_MS, AFD_MIN_BASE_MS, AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS,
+                AFD_FRAME_MS, AFD_SETTLE_MS);
+    else if (calib)
         afd_log("# speed=%d step=%d moves_per_pass=%d max_total=%d done_timeout=%d "
                 "min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
                 AFD_SPEED, AFD_CAL_STEP, AFD_CAL_MOVES, AFD_MAX_TOTAL, AFD_DONE_TIMEOUT_MS,
@@ -7939,6 +8091,7 @@ static void afd_task_common(int calib)
     {
         if (!afd_aborted) afd_nolv = 1;
     }
+    else if (probe) afd_probe_run();
     else if (calib) afd_calib_run();
     else
     {
@@ -7958,7 +8111,12 @@ static void afd_task_common(int calib)
 
     afd_log_reserve = 0;
     const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0";
-    if (calib)
+    afd_poll_on = 0;
+    afd_extra_ms = 0;
+    if (probe)
+        afd_log("# RESULT aborted=%s moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
+                ab, afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
+    else if (calib)
         afd_log("# RESULT aborted=%s peak_up1=%d peak_up1_s=%d peak_down=%d peak_down_s=%d peak_up2=%d peak_up2_s=%d "
                 "edge_up1=%d edge_down=%d edge_up2=%d backlash_est=%d repeat_up=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
                 ab, afd_cal_peak_pos[0], (int) afd_cal_peak_s[0], afd_cal_peak_pos[1], (int) afd_cal_peak_s[1],
@@ -7974,7 +8132,7 @@ static void afd_task_common(int calib)
     {
         if (!is_dir(AFDIAG_LOG_DIR))
             FIO_CreateDirectory(AFDIAG_LOG_DIR);
-        FILE *f = FIO_CreateFileOrAppend(calib ? AFC_LOG_FILE : AFD_LOG_FILE);
+        FILE *f = FIO_CreateFileOrAppend(probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE);
         if (f)
         {
             FIO_WriteFile(f, afd_buf, afd_len);
@@ -7987,7 +8145,9 @@ static void afd_task_common(int calib)
         msleep(3000);
     }
 
-    if (calib)
+    if (probe)
+        NotifyBox(6000, "AF probe %s: %d moves %dms, log AFPROBE.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
+    else if (calib)
         NotifyBox(6000, "AF calib %s: peak up1=%d down=%d up2=%d backlash_est=%d",
                   afd_aborted ? "ABORTED" : "done", afd_cal_peak_pos[0], afd_cal_peak_pos[1],
                   afd_cal_peak_pos[2], afd_cal_peak_pos[0] - afd_cal_peak_pos[1]);
@@ -8011,6 +8171,12 @@ static void afdiag_afcalib_task(void *unused)
     afd_task_common(1);
 }
 
+static void afdiag_afprobe_task(void *unused)
+{
+    (void) unused;
+    afd_task_common(2);
+}
+
 static MENU_SELECT_FUNC(afdiag_afdrive_select)
 {
     (void) priv;
@@ -8023,6 +8189,13 @@ static MENU_SELECT_FUNC(afdiag_afcalib_select)
     (void) priv;
     (void) delta;
     task_create("afdiag_afcalib", 0x1e, 0x3000, afdiag_afcalib_task, (void*)0);
+}
+
+static MENU_SELECT_FUNC(afdiag_afprobe_select)
+{
+    (void) priv;
+    (void) delta;
+    task_create("afdiag_afprobe", 0x1e, 0x3000, afdiag_afprobe_task, (void*)0);
 }
 
 static void afd_mon_close_task(void *unused)
@@ -8114,6 +8287,14 @@ static struct menu_entry afdiag_menu[] = {
         .help      = "EXPERIMENTAL: measure the focus motor backlash (-160..+160 pulses up, down, up).",
         .help2     = "Run it AFTER AF drive (lens near focus). Same conditions as AF drive (MPU). Sharpness after every move goes to ML/LOGS/AFCALIB.LOG;\n"
                      "the backlash is the peak offset (up minus down).",
+    },
+    {
+        .name      = "AF drive probe",
+        .select    = afdiag_afprobe_select,
+        .icon_type = IT_DICE,
+        .help      = "DIAGNOSTIC: find the MPU RAM word that holds the real focus motor position.",
+        .help2     = "Moves +20 x3, +40 x2, +120, -120, -40, -20 x2 and logs the MPU words (0xFFF81B78..) that change.\n"
+                     "Needs the MPU monitor (opened if OFF). Same conditions as AF drive. Log: ML/LOGS/AFPROBE.LOG.",
     },
 };
 
