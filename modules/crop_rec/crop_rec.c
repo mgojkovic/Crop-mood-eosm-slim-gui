@@ -7537,8 +7537,23 @@ static int afd_rec_state(void)
     return (RECORDING ? 1 : 0) | (RECORDING_RAW ? 2 : 0) | (mlv_raw_rec_busy() ? 4 : 0);
 }
 
+/* Keep the camera awake while an AF run or test is moving the lens: ML's
+ * "Turn off LCD" pauses LiveView (lv=0), which aborts the run.  Reset ML's
+ * idle countdowns as a focus event (-10: powersave counters only) every
+ * 500 ms, and Canon's auto power-off timer every 5 s.  afd_must_abort() is
+ * called continuously by every AF run/test, so it drives this. */
+extern void idle_wakeup_reset_counters(int reason);
+static void afd_keep_awake(void)
+{
+    static int t_idle = 0, t_canon = 0;
+    int now = get_ms_clock();
+    if (now - t_idle >= 500) { t_idle = now; idle_wakeup_reset_counters(-10); }
+    if (now - t_canon >= 5000) { t_canon = now; powersave_prolong(); }
+}
+
 static int afd_must_abort(void)
 {
+    afd_keep_awake();
     if (afd_rec_run)
     {
         if (afd_rec_state() != afd_rec_state0) return 1;
