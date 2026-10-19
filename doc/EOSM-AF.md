@@ -140,6 +140,9 @@ All of these are in Settings.
 
 ### 3.1 ML's lens drive does not move the EF-M lens on this camera
 
+> **Superseded 2026-10-19, see §3.8.** The causes were the payload form (speed byte 0xFF) and the MPU
+> monitor state, not "the MPU ignores (9,1)".
+
 ML moves the focus through `lens_focus()` → `PROP_LV_LENS_DRIVE_REMOTE` (0x80050013).
 
 Tested without any movement:
@@ -169,7 +172,7 @@ The main processor (ICU, which runs ML) does not move the lens. A separate contr
 - Every frame the ICU only feeds the MPU image and AF data:
   - (9,0x17,32): AF frame geometry
   - (9,0x0A,14), (9,0x04,4), (9,0x1A,5), (9,0x00,1)
-- ML's command becomes (9,1,5) with payload `[hi lo FF FF 00]`, a signed 16-bit relative pulse count, followed by (9,0x12,1). Canon itself never sends (9,1) during AF. The MPU acknowledges it and does nothing.
+- ML's command becomes (9,1,5) with payload `[hi lo FF FF 00]`, a signed 16-bit relative pulse count, followed by (9,0x12,1). Canon itself never sends (9,1) during AF. The MPU acknowledges it and does nothing *in this form*: see §3.8.
 - Requests through Canon's `_prop_request_change` for 0x80050003 (FOCUS_STOP), 0x8005003C (AF session), 0x80050027 (FOCUS_CMD) and 0x8005001D (LensSearchDriveStart) produced **no MPU message at all** in the earlier field test. Later ROM analysis (see [EOSM-MPU.md](EOSM-MPU.md)) showed why: **0x80050027 is not an outgoing property at all** (it is MPU→ICU only, `(9,0x18)`), while 0x8005003C and 0x8005001D have known handlers and lengths (15 and 4 bytes). The earlier failures are therefore not evidence that the MPU rejects relative moves inside a session; that hypothesis is still **untested**.
 
 The MPU turned out to have more layers than the group 9 property channel. The full ICU→MPU / MPU→ICU maps, the monitor channel (`MonRead`/`MonWrite`), the `(9,0x13)` LensSearchDriveStart command, the missing focus-position feedback `(9,0x14)`, and the `Msg 08 02` factory command table are documented in [EOSM-MPU.md](EOSM-MPU.md). A temporary `mpu_lab` module was built to dump the MPU and send raw messages; see section 9 of that document.
@@ -223,6 +226,47 @@ Decision: do not merge. Fixing it would need a redesign. The branch is kept for 
 - `ASSERT00.LOG` of 7 Oct (mlv_lite `reset_buffer_slots`) predates this work. It was attributed to too-high quality settings.
 
 ---
+
+### 3.8 ML-driven lens moves via (9,1) (2026-10-19, field-confirmed)
+
+**Actuator.** ICU→MPU `(9,1,5) [hi lo SPD 00 00]` through the packet builder at 0x38C4:
+
+- SPD == 0xFF (ML's `lens_focus` form): the word is a selector; only ±1..±3 give
+  lens-dependent pulses, anything else becomes 0 pulses. This is why every ±50..±500 test
+  never moved.
+- SPD == 0x07: a raw signed relative pulse count. It moves the EF-M 18-55 both ways at
+  ±20..±300. SPD 0x01 and 0x00 did not move.
+- `lens_info.focus_dist` does not update for these moves. The MPU's cached lens position
+  (0xFFF8132E, lens opcode 0xC0) does not update in this mode either, so there is no
+  position feedback.
+
+**MPU monitor state is required.** `MpuMonOpen` (0xFF1DD098) = `send(8,3,1,{00})` plus a
+wait for
+the reply. On the MPU, OPEN (0xB5FF6, dispatcher 0xA2238) runs a lens-engine re-init
+(0xFFFD8280 handshake). Without it, every move is rejected in 3-46 ms with FOCUS_DONE
+`0x004a0000`. With it, moves complete in 75-550 ms (`0x004e0000`/`0x004e0400`). The open
+blacks out LV (luma→1) from ~300 ms to ~2.5 s. Keeping the monitor open
+(crop_rec "AF drive monitor: Keep open") pays that once; later runs need no re-open.
+
+**Motion behaviour.**
+
+- FOCUS_DONE marks completion: the lens busy bit (byte 0xFFF81BB9 bit2, copied from the
+  lens status poll) clears at the same time.
+- The MPU sends a 1-pulse opposite pre-step before every move >1 pulse and applies its own
+  reversal handling. The effective offset after a direction reversal is not a stable
+  backlash: it was seen with both signs.
+- Same-size moves in the same direction are repeatable (calib passes peak at the same
+  commanded position). Mixing sizes (e.g. -260 then +120 vs 20-pulse steps) breaks
+  position consistency. AF must land by sharpness feedback, not by computed positions.
+- At x5 the Laplacian sharpness peak is only ~40-60 pulses wide; the gradient sum rises over
+  ~±120 pulses (use it for the coarse search).
+
+**Other.** The LV blackout seen in the "AF search (MPU)" runs came from MpuMonOpen, not from
+the (8,2,32) index-16 call. That call still always ends at infinity and is not used.
+
+Tools: crop_rec Settings → AF drive (MPU) / AF drive monitor / AF drive calib / AF drive
+probe / AF drive: close monitor; mpu_lab → Drive test (9,1). Logs: ML/LOGS/AFDRIVE.LOG,
+AFCALIB.LOG, AFPROBE.LOG, MPUDRIVE.LOG.
 
 ## 4. The sharpness metric
 
