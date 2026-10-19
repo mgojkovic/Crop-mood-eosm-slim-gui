@@ -7436,6 +7436,8 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
  * (latest) / 0xFFF8132C (start of the last move), next to the poll gates at
  * 0xFFF812B8.. and the reference 0xFFF812DC: snapshot that region first so
  * it survives the slow-read fallback. */
+#define AFD_MON_LV_OFF_MS    2000   /* LV-exit closer: LV must stay off this long */
+#define AFD_MON_REC_GUARD_MS 5000   /* ... and no recording within this long */
 #define AFD_F_QUIET          1
 #define AFD_F_REC            2
 #define AFP_POS_BASE         0xFFF812B8
@@ -7493,6 +7495,12 @@ static void afd_log(const char *fmt, ...)
 /* Running while RAW recording (AFD_F_REC): recording is no abort reason, but any
  * change of the recording state (stopping) is. */
 static int afd_rec_run = 0, afd_rec_state0 = 0;
+/* AFD_RUN_CAP_MS: the AF search (afd_run) is cut off after this long (aborted=timeout);
+ * afd_deadline is 0 outside afd_run.  afd_nopeak: pass A saw no real peak. */
+#define AFD_RUN_CAP_MS       15000
+#define AFD_NOPEAK_PCT       115   /* pass A max below this % of its min = no real peak */
+static int afd_deadline = 0, afd_timeout = 0, afd_nopeak = 0, afd_run_dir = 1;
+static volatile int afd_nopeak_last = 0;   /* result of the last afd_engine AF drive, for Auto refocus */
 static int afd_rec_state(void)
 {
     return (RECORDING ? 1 : 0) | (RECORDING_RAW ? 2 : 0) | (mlv_raw_rec_busy() ? 4 : 0);
@@ -7506,6 +7514,11 @@ static int afd_must_abort(void)
     }
     else if (RECORDING || RECORDING_RAW)
         return 1;
+    if (afd_deadline && get_ms_clock() - afd_deadline > 0)
+    {
+        afd_timeout = 1;
+        return 1;
+    }
     return !lv || gui_menu_shown() || is_manual_focus();
 }
 
@@ -7813,6 +7826,7 @@ static uint32_t afd_run(uint32_t *best_out)
 {
     uint32_t g;
     int luma;
+    afd_deadline = get_ms_clock() + AFD_RUN_CAP_MS;
     afd_best_s = 0;
     afd_best_pos = 0;
     afd_best_dir = 0;
@@ -7895,6 +7909,7 @@ static uint32_t afd_run(uint32_t *best_out)
         stop = afd_below(gc, bg, AFD_COARSE_STOP_PCT) || drops >= AFD_COARSE_DROP_N || flats >= AFD_FLAT_N;
     }
     afd_peak_g_pos = bgpos;
+    afd_run_dir = d;
     afd_log("# coarse peak_g_pos=%d peak_g=%d g0=%d dir=%d moves=%d travel=%d\n",
             bgpos, (int) bg, (int) g0, d, cmoves, afd_travel);
 
@@ -7933,12 +7948,23 @@ static uint32_t afd_run(uint32_t *best_out)
         pa_start -= d * 200;
     }
     uint32_t fmax = fs[im];
+    uint32_t fmin = fs[0];
+    for (int i = 1; i < n; i++)
+        if (fs[i] < fmin) fmin = fs[i];
     int pmax = fpos[im];
     int ssm = n - 1 - im;   /* steps since the max */
     afd_fine_peak_pos = pmax;
     afd_best_s = fmax;
     afd_best_pos = pmax;
-    afd_log("# fineA max_s=%d max_idx=%d n=%d max_pos=%d\n", (int) fmax, im, n, pmax);
+    afd_log("# fineA max_s=%d min_s=%d max_idx=%d n=%d max_pos=%d\n", (int) fmax, (int) fmin, im, n, pmax);
+    if ((uint64_t) fmax * 100 < (uint64_t) fmin * AFD_NOPEAK_PCT)
+    {
+        /* no real peak (field: a blur floor landed as "success"): no retrace, no landing */
+        afd_nopeak = 1;
+        afd_log("# nopeak max_s=%d min_s=%d\n", (int) fmax, (int) fmin);
+        *best_out = fmax;
+        return 0;
+    }
 
     /* 5. retrace pass B (90 %, starts AFD_RT_BACK + steps_since_max*FINE before the max),
      * retrace 2 (80 %, starts AFD_RT_BACK2 + ... before it),
@@ -8103,28 +8129,50 @@ static void afd_probe_run(void)
     }
 }
 
-/* AF drive speed test: for each speed byte, +120 then -120 (net zero), with
- * FOCUS_DONE time/value and s before and after logged in "# speedtest" lines.
- * Only 0x07 is known to move the lens. */
-static const uint8_t afd_speed_tbl[8] = { 0x03, 0x05, 0x07, 0x09, 0x0B, 0x0F, 0x14, 0x1F };
+/* AF drive speed test v2: land in focus with the normal AF search first, then for
+ * each speed byte +40 and -40 (net zero) with FOCUS_DONE time and s after each, in
+ * "# speedtest2" lines.  A speed "moves" the lens if s changes by more than 15 % on
+ * +40.  After a speed whose -40 left s below 80 % of the landing, one quick retrace
+ * (the AF search's own helper) brings the lens back, so every speed starts near
+ * focus.  07 goes first as the reference. */
+static const uint8_t afd_speed_tbl[8] = { 0x07, 0x09, 0x0B, 0x0F, 0x14, 0x1F, 0x03, 0x05 };
 
 static void afd_speed_run(void)
 {
-    afd_move_ex("i", 0, 1, 0);
-    if (afd_aborted) return;
+    uint32_t best = 0;
+    afd_done_timeout = AFD_DONE_TIMEOUT_MS;
+    uint32_t land = afd_run(&best);
+    afd_deadline = 0;
+    afd_done_timeout = AFD_SPEED_DONE_MS;
+    afd_log("# speedtest2 landing s=%d best=%d pos=%d dir=%d moves=%d nopeak=%d\n",
+            (int) land, (int) best, afd_pos, afd_run_dir, afd_moves, afd_nopeak);
+    if (afd_aborted || afd_nopeak || afd_lowcontrast || !land) return;
+    afd_travel = 0;   /* the search's travel does not count against the test's cap */
+    int land_pos = afd_pos;
     for (int k = 0; k < 8; k++)
     {
         afd_speed = afd_speed_tbl[k];
         uint32_t sb = afd_move_ex("i", 0, 1, 0);
         if (afd_aborted) return;
-        uint32_t sp = afd_move_ex("v", 120, 1, 0);
+        uint32_t up = afd_move_ex("v", 40, 1, 0);
+        int up_done = afd_last_done_ms;
         if (afd_aborted) return;
-        afd_log("# speedtest speed=%x dir=1 done_ms=%d done_val=%x s_before=%d s_after=%d\n",
-                afd_speed, afd_last_done_ms, afd_last_done_val, (int) sb, (int) sp);
-        uint32_t sm = afd_move_ex("v", -120, 1, 0);
+        uint32_t dn = afd_move_ex("v", -40, 1, 0);
+        int dn_done = afd_last_done_ms;
         if (afd_aborted) return;
-        afd_log("# speedtest speed=%x dir=-1 done_ms=%d done_val=%x s_before=%d s_after=%d\n",
-                afd_speed, afd_last_done_ms, afd_last_done_val, (int) sp, (int) sm);
+        int moved = ((up > sb ? up - sb : sb - up) * 100 > (uint64_t) sb * 15) ? 1 : 0;
+        afd_log("# speedtest2 speed=%x up_done=%d up_s=%d dn_done=%d dn_s=%d ref_s=%d s_before=%d moves=%d\n",
+                afd_speed, up_done, (int) up, dn_done, (int) dn, (int) land, (int) sb, moved);
+        if ((uint64_t) dn * 100 < (uint64_t) land * 80 && k < 7)
+        {
+            int bidx = 0;
+            uint32_t rs = 0;
+            afd_speed = AFD_SPEED;   /* re-land with the known-good speed */
+            int hit = afd_retrace(1, AFD_RT_THR2, land, land_pos - afd_run_dir * AFD_RT_BACK, afd_run_dir,
+                                  AFD_RT_BACK / AFD_FINE + AFD_RT_SLACK + 2, &bidx, &rs);
+            if (hit < 0 || afd_aborted) return;
+            afd_log("# speedtest2 reland after speed=%x hit=%d s=%d pos=%d\n", afd_speed_tbl[k], hit, (int) rs, afd_pos);
+        }
     }
     afd_speed = AFD_SPEED;
 }
@@ -8158,6 +8206,46 @@ static void afd_log_flush(void)
     if (!afd_log_pending || afd_log_hold || afdiag_afdrive_busy) return;
     if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) return;
     afd_log_write();
+}
+
+/* Small "# ..." notes (monitor auto-close, REC test trigger / not-run reason) that
+ * come from the polling callback or the REC test task, possibly while recording:
+ * kept in RAM, appended to AFDRIVE.LOG by afd_note_flush() once recording has
+ * ended and no AF drive is running.  A note that does not fit is dropped. */
+static char afd_note_buf[512];
+static volatile int afd_note_len = 0, afd_note_lock = 0;
+
+static void afd_note(const char *fmt, ...)
+{
+    if (afd_note_lock) return;
+    afd_note_lock = 1;
+    int room = (int) sizeof(afd_note_buf) - afd_note_len;
+    if (room > 2)
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        int k = vsnprintf(afd_note_buf + afd_note_len, room, fmt, ap);
+        va_end(ap);
+        if (k > 0) afd_note_len += MIN(k, room - 1);
+    }
+    afd_note_lock = 0;
+}
+
+static void afd_note_flush(void)
+{
+    if (!afd_note_len || afd_note_lock || afdiag_afdrive_busy || afd_log_pending) return;
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) return;
+    afd_note_lock = 1;
+    if (!is_dir(AFDIAG_LOG_DIR))
+        FIO_CreateDirectory(AFDIAG_LOG_DIR);
+    FILE *f = FIO_CreateFileOrAppend(AFD_LOG_FILE);
+    if (f)
+    {
+        FIO_WriteFile(f, afd_note_buf, afd_note_len);
+        FIO_CloseFile(f);
+    }
+    afd_note_len = 0;
+    afd_note_lock = 0;
 }
 
 /* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe, 3 speed test. */
@@ -8197,6 +8285,10 @@ static int afd_engine(int mode, int flags)
     afd_moves = 0;
     afd_aborted = 0;
     afd_lowcontrast = 0;
+    afd_deadline = 0;
+    afd_timeout = 0;
+    afd_nopeak = 0;
+    afd_run_dir = 1;
     afd_travel = 0;
     afd_retraces = 0;
     afd_land_s = 0;
@@ -8239,7 +8331,7 @@ static int afd_engine(int mode, int flags)
             speedt ? "AFSPEED" : probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
             (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now);
     if (speedt)
-        afd_log("# speeds=3,5,7,9,b,f,14,1f moves=120,-120 done_timeout=%d frame=%d\n", afd_done_timeout, afd_frame_ms);
+        afd_log("# speeds=7,9,b,f,14,1f,3,5 moves=40,-40 after an AF search, done_timeout=%d frame=%d\n", afd_done_timeout, afd_frame_ms);
     else if (probe)
         afd_log("# speed=%d moves=20,20,20,40,40,120,-120,-40,-20,-20 extra_settle=%d poll_ms=%d "
                 "min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
@@ -8281,10 +8373,13 @@ static int afd_engine(int mode, int flags)
     else
     {
         final_s = afd_run(&best);
+        afd_deadline = 0;
         if (!best) best = afd_best_s;
         pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
-        ret_pct = pct;
+        ret_pct = afd_nopeak ? -1 : pct;   /* no peak found = no focus: a failure for Auto refocus */
     }
+    afd_deadline = 0;
+    if (mode == 0) afd_nopeak_last = afd_nopeak;
     int total_ms = get_ms_clock() - afd_t0;
 
     /* always: stop, close the session, close the monitor */
@@ -8302,13 +8397,17 @@ static int afd_engine(int mode, int flags)
     /* mon == 2: left open for the next run (closed on LV exit / menu / setting) */
 
     afd_log_reserve = 0;
-    const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0";
+    const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_nopeak ? "nopeak" :
+                     afd_timeout ? "timeout" : afd_aborted ? "1" : "0";
     afd_poll_on = 0;
     afd_extra_ms = 0;
     afd_speed = AFD_SPEED;
     afd_fast = 0;
     afd_done_timeout = AFD_DONE_TIMEOUT_MS;
-    if (probe || speedt)
+    if (speedt)
+        afd_log("# RESULT aborted=%s moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
+                ab, afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
+    else if (probe)
         afd_log("# RESULT aborted=%s moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
                 ab, afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
     else if (calib)
@@ -8343,10 +8442,10 @@ static int afd_engine(int mode, int flags)
                       afd_cal_peak_pos[2], afd_cal_peak_pos[0] - afd_cal_peak_pos[1]);
         else
             NotifyBox(6000, "AF drive %s: final/best pct=%d moves=%d %dms",
-                      afd_aborted ? "ABORTED" : "done", pct, afd_moves, total_ms);
+                      afd_nopeak ? "NO FOCUS FOUND" : afd_aborted ? "ABORTED" : "done", pct, afd_moves, total_ms);
     }
 
-    return afd_aborted ? -1 : ret_pct;
+    return (afd_aborted || afd_nopeak) ? -1 : ret_pct;
 }
 
 static void afd_task_common(int mode)
@@ -8404,19 +8503,47 @@ static unsigned int afd_rec_vsync_cbr(unsigned int unused)
     return 0;
 }
 
+/* Why the REC test did not run (shown in the menu, logged as "# REC notrun reason=..").
+ * Auto refocus is deliberately not a precondition: with it ON (without +REC) aref_step
+ * is blocked while recording (blk 64) and never leaves its idle phase, and with +REC it
+ * is stopped by afdiag_afdrive_busy (blk 2) once the test runs.  slim_af_state only
+ * leaves idle for a real Canon AF sequence (a half-press AF), which does conflict. */
+enum { AFD_RR_NONE = 0, AFD_RR_MON_CLOSED, AFD_RR_MON_MODE, AFD_RR_NO_LV, AFD_RR_NOT_RAW, AFD_RR_BUSY,
+       AFD_RR_LOG_PENDING, AFD_RR_AF_STATE, AFD_RR_MENU, AFD_RR_MF };
+static const char * const afd_rr_name[] = { "none", "mon_closed", "mon_mode", "no_lv", "not_raw", "busy",
+                                            "log_pending", "af_state", "menu", "mf" };
+static volatile int afd_rect_reason = 0;
+
+static int afd_rect_precond(void)
+{
+    if (!afd_mon_is_open) return AFD_RR_MON_CLOSED;
+    if (afdiag_afdrive_mon != 2) return AFD_RR_MON_MODE;
+    if (!lv) return AFD_RR_NO_LV;
+    if (!RECORDING_RAW) return AFD_RR_NOT_RAW;
+    if (afdiag_afdrive_busy || afdiag_afsearch_busy) return AFD_RR_BUSY;
+    if (afd_log_pending) return AFD_RR_LOG_PENDING;
+    if (slim_af_state != SLIM_AF_IDLE || slim_af_request) return AFD_RR_AF_STATE;
+    if (gui_menu_shown()) return AFD_RR_MENU;
+    if (is_manual_focus()) return AFD_RR_MF;
+    return AFD_RR_NONE;
+}
+
 static void afd_rect_task(void *unused)
 {
     (void) unused;
+    afd_rect_reason = 0;
+    afd_note("# REC trigger t=%d\n", get_ms_clock());
     msleep(1000);
-    if (!afd_mon_is_open || afdiag_afdrive_mon != 2 || !lv || !RECORDING_RAW)
+    afd_rect_reason = afd_rect_precond();
+    if (afd_rect_reason)
         goto not_run;
     /* baseline: LV cadence over the 2 s before the run */
     afd_rect_track = 1;
     afd_vs_frames = 0; afd_vs_last = 0; afd_vs_maxgap = 0;
     msleep(AFD_REC_DELAY_MS - 1000);
     int base_frames = afd_vs_frames, base_gap = afd_vs_maxgap;
-    if (!RECORDING_RAW || !lv || afdiag_afdrive_busy || afdiag_afsearch_busy || afd_log_pending ||
-        slim_af_state != SLIM_AF_IDLE || gui_menu_shown() || is_manual_focus() || !afd_mon_is_open)
+    afd_rect_reason = afd_rect_precond();
+    if (afd_rect_reason)
     {
         afd_rect_track = 0;
         goto not_run;
@@ -8470,7 +8597,8 @@ not_run:
     /* still recording (a precondition failed): wait for the next recording
      * instead of re-firing every poll; stopped before the 3 s: armed */
     afd_rect_state = (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) ? 3 : 1;
-    NotifyBox(3000, "AF REC test: not run, armed for the next recording");
+    afd_note("# REC notrun reason=%s t=%d\n", afd_rr_name[afd_rect_reason], get_ms_clock());
+    NotifyBox(3000, "AF REC test not run: %s", afd_rr_name[afd_rect_reason]);
 }
 
 static MENU_SELECT_FUNC(afdiag_afrect_select)
@@ -8484,13 +8612,17 @@ static MENU_SELECT_FUNC(afdiag_afrect_select)
         NotifyBox(5000, "AF REC test: needs LV, not recording, monitor Keep open and already open (run AF drive first), no unsaved log");
         return;
     }
+    afd_rect_reason = 0;
     afd_rect_state = 1;
     NotifyBox(4000, "AF REC test armed: start RAW rec, AF runs after 3 s");
 }
 
 static MENU_UPDATE_FUNC(afdiag_afrect_update)
 {
-    MENU_SET_VALUE(afd_rect_state == 2 ? "RUNNING" : afd_rect_state == 3 ? "ARMED (next rec)" : afd_rect_state == 1 ? "ARMED" : "off");
+    if ((afd_rect_state == 1 || afd_rect_state == 3) && afd_rect_reason)
+        MENU_SET_VALUE("NOT RUN: %s (armed)", afd_rr_name[afd_rect_reason]);
+    else
+        MENU_SET_VALUE(afd_rect_state == 2 ? "RUNNING" : afd_rect_state == 3 ? "ARMED (next rec)" : afd_rect_state == 1 ? "ARMED" : "off");
 }
 
 static void afd_rect_poll(void)
@@ -8559,7 +8691,7 @@ static MENU_SELECT_FUNC(afdiag_afprobe_select)
 static void afd_mon_close_task(void *unused)
 {
     (void) unused;
-    if (!afdiag_afdrive_busy && !afdiag_afsearch_busy)
+    if (!afdiag_afdrive_busy && !afdiag_afsearch_busy && !(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
         afd_mon_close_now();
     afd_mon_closing = 0;
 }
@@ -10910,6 +11042,19 @@ static void aref_step(void)
         aref_mpu_state = 0;
         aref_phase = AREF_MON;
         aref_next_at = now + (aref_mpu_pct < 0 ? AREF_FAIL_BACKOFF_MS : AREF_COOLDOWN_MS);
+        if (aref_mpu_pct < 0 && afd_nopeak_last)
+        {
+            /* "no focus found" is a failure, not an abort: count it, so repeated
+             * attempts end in the pause instead of a search every few seconds */
+            aref_fails++;
+            if (aref_fails >= AREF_MAX_FAILS && !aref_paused)
+            {
+                aref_paused = 1;
+                aref_pause_t = now ? now : 1;
+                aref_pause_ref = aref_trig_ref;
+                aref_log(5, 0);
+            }
+        }
         aref_drop_ref(now, AREF_SETTLE_MS, 0);
         if (aref_mpu_pct >= 0)
         {
@@ -11243,11 +11388,27 @@ static void aref_step(void)
 static unsigned int crop_rec_polling_cbr(unsigned int unused)
 {
     afd_log_flush();
+    afd_note_flush();
     afd_rect_poll();
-    if (afd_mon_is_open && !lv && !afd_mon_closing && !afdiag_afdrive_busy)
     {
-        afd_mon_closing = 1;
-        task_create("afd_monclose", 0x1e, 0x1000, afd_mon_close_task, (void*)0);
+        /* Close the MPU monitor only after LV has been off for a while (an LV blip,
+         * e.g. when recording starts, must not close it), never while recording
+         * and not within AFD_MON_REC_GUARD_MS after recording stopped. */
+        static int lv_off_since = 0, rec_prev = 0, rec_end_t = 0;
+        int now = get_ms_clock();
+        int rec = (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) ? 1 : 0;
+        if (rec_prev && !rec) rec_end_t = now ? now : 1;
+        rec_prev = rec;
+        if (lv) lv_off_since = 0;
+        else if (!lv_off_since) lv_off_since = now ? now : 1;
+        if (afd_mon_is_open && !lv && lv_off_since && !rec && !afd_mon_closing && !afdiag_afdrive_busy &&
+            now - lv_off_since >= AFD_MON_LV_OFF_MS &&
+            (!rec_end_t || now - rec_end_t >= AFD_MON_REC_GUARD_MS))
+        {
+            afd_note("# monitor auto-closed lv_off_ms=%d t=%d\n", now - lv_off_since, now);
+            afd_mon_closing = 1;
+            task_create("afd_monclose", 0x1e, 0x1000, afd_mon_close_task, (void*)0);
+        }
     }
     
     /* touch/Movie-tab shortcuts inject Q+SET into an open menu — not used on slim. */
