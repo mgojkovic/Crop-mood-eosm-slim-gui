@@ -445,6 +445,7 @@ enum slim_af_state
 static volatile int slim_af_request = 0;
 /* Defined further down: the AF lens test (not CONFIG_INT) and Auto refocus idle state. */
 static int afdiag_lens_test;
+static volatile int afdiag_afdrive_busy;   /* AF drive (MPU) running; defined further down */
 static int aref_is_idle(void);
 /* PROP_LV_AF_RESULT fires once at the end of every Canon AF run on EOS M
  * (0 = focused, 1 = failed); field logs showed it ~0.3-1 s after the AF
@@ -623,7 +624,7 @@ static int slim_handle_shutter_zoom(unsigned int key)
             /* Never swallow the key here: Canon must still see the half-press. */
             if (key == MODULE_KEY_PRESS_HALFSHUTTER && is_movie_mode() &&
                 CROP_PRESET_MENU && lv_dispsize == base &&
-                slim_af_state == SLIM_AF_IDLE && !afdiag_lens_test)
+                slim_af_state == SLIM_AF_IDLE && !afdiag_lens_test && !afdiag_afdrive_busy)
                 slim_af_request = 1;
             return 0;
         }
@@ -10912,7 +10913,9 @@ static void aref_step(void)
 
     if (!path || gate) return;
 
-    if (Auto_refocus_method == 1 && !RECORDING)
+    /* MPU drive needs the MPU monitor (AF drive monitor ON or Keep open); with
+     * it OFF the moves are rejected, so fall back to Canon AF. */
+    if (Auto_refocus_method == 1 && !RECORDING && afdiag_afdrive_mon)
     {
         /* TODO(recording): MPU drive is not used while recording (AFD_F_REC is
          * not implemented in afd_engine, recording safety is being investigated
