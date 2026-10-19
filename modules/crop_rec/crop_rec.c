@@ -7400,7 +7400,18 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFC_LOG_FILE         "ML/LOGS/AFCALIB.LOG"
 
 static volatile int afdiag_afdrive_busy = 0;
-static int afdiag_afdrive_mon = 1;   /* 1: MpuMonOpen/Close around the run (default; OFF does not drive the lens), 0: no monitor */
+static int afdiag_afdrive_mon = 2;   /* 0 OFF, 1 ON (open/close per run), 2 keep open after the first run */
+/* MPU monitor left open by "Keep open": MpuMonOpen = (8,3) to the MPU, which
+ * re-initialises its lens engine (LV dark ~2 s) and is what lets (9,1) moves
+ * execute.  Keeping it open pays that blackout once instead of every run. */
+static volatile int afd_mon_is_open = 0;
+static volatile int afd_mon_closing = 0;
+static void afd_mon_close_now(void)
+{
+    if (!afd_mon_is_open) return;
+    ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
+    afd_mon_is_open = 0;
+}   /* 1: MpuMonOpen/Close around the run (default; OFF does not drive the lens), 0: no monitor */
 static char afd_buf[AFD_LOG_SIZE];
 static int afd_log_reserve = AFD_LOG_RESERVE;
 static int afd_len, afd_pos, afd_moves, afd_t0, afd_aborted, afd_lowcontrast;
@@ -7458,14 +7469,14 @@ static int afd_luma_ok(int luma, int pct)
 /* After MonOpen + session open: wait until LV has its normal brightness again
  * (AFD_LV_N samples in a row >= AFD_LV_PCT of luma_pre and >= AFD_LV_MIN).
  * Returns 1 when recovered, 0 on timeout or abort (afd_aborted set on abort). */
-static int afd_wait_lv(void)
+static int afd_wait_lv(int expect_dark)
 {
     int t = get_ms_clock();
     int ok = 0, n = 0, luma = 0, timeout = 0, dark_ms = -1;
     /* The blackout starts with a delay (luma still normal ~20 ms after the
      * session open, black by ~300 ms): first watch up to 800 ms for the dip,
      * otherwise the recovery check below could pass before it begins. */
-    while (get_ms_clock() - t < 800)
+    while (expect_dark && get_ms_clock() - t < 800)
     {
         luma = afd_luma_now();
         if (!afd_luma_ok(luma, 50)) { dark_ms = get_ms_clock() - t; break; }
@@ -7829,7 +7840,10 @@ static void afd_task_common(int calib)
     afd_luma_pre = afd_luma_now();   /* before MonOpen */
     int mon = afdiag_afdrive_mon;
     int e = 0;
-    if (mon)
+    int opened_now = 0;
+    if (afd_mon_is_open && mon != 2)
+        afd_mon_close_now();               /* setting changed away from Keep open */
+    if (mon && !afd_mon_is_open)
     {
         e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
         if (e)
@@ -7837,14 +7851,16 @@ static void afd_task_common(int calib)
             NotifyBox(4000, "%s: MonOpen failed %d", name, e);
             goto out;
         }
+        opened_now = 1;
+        if (mon == 2) afd_mon_is_open = 1;
     }
     static const uint8_t stop = 0;
     static const uint8_t zeros[16] = { 0 };
     static const uint8_t open_s[16] = { 0x02 };
     int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
-    afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s\n",
+    afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d\n",
             calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
-            (int) lens_info.focus_dist, mon ? "ON" : "OFF");
+            (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now);
     if (calib)
         afd_log("# speed=%d step=%d moves_per_pass=%d max_total=%d done_timeout=%d "
                 "min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
@@ -7869,7 +7885,7 @@ static void afd_task_common(int calib)
 
     uint32_t best = 0, final_s = 0;
     int pct = 0;
-    if (!afd_wait_lv())
+    if (!afd_wait_lv(opened_now))
     {
         if (!afd_aborted) afd_nolv = 1;
     }
@@ -7887,7 +7903,8 @@ static void afd_task_common(int calib)
     msleep(500);
     send(9, 0x25, 16, zeros);
     msleep(1000);
-    if (mon) ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
+    if (mon == 1) ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
+    /* mon == 2: left open for the next run (closed on LV exit / menu / setting) */
 
     afd_log_reserve = 0;
     const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0";
@@ -7958,6 +7975,29 @@ static MENU_SELECT_FUNC(afdiag_afcalib_select)
     task_create("afdiag_afcalib", 0x1e, 0x3000, afdiag_afcalib_task, (void*)0);
 }
 
+static void afd_mon_close_task(void *unused)
+{
+    (void) unused;
+    if (!afdiag_afdrive_busy && !afdiag_afsearch_busy)
+        afd_mon_close_now();
+    afd_mon_closing = 0;
+}
+
+static MENU_SELECT_FUNC(afdiag_afdrive_monclose_select)
+{
+    (void) priv;
+    (void) delta;
+    if (!afd_mon_is_open)
+    {
+        NotifyBox(2000, "MPU monitor is not open");
+        return;
+    }
+    if (afd_mon_closing) return;
+    afd_mon_closing = 1;
+    task_create("afd_monclose", 0x1e, 0x1000, afd_mon_close_task, (void*)0);
+    NotifyBox(2000, "MPU monitor closed");
+}
+
 static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF diag log",
@@ -8003,13 +8043,19 @@ static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF drive monitor",
         .priv      = &afdiag_afdrive_mon,
-        .max       = 1,
-        .choices   = CHOICES("OFF", "ON"),
-        .icon_type = IT_BOOL,
-        .help      = "AF drive (MPU): open the MPU monitor (MpuMonOpen/Close) around the run.",
-        .help2     = "ON (default): required, the lens only moves with the monitor open. LiveView goes dark for\n"
-                     "~2 s after open; the run waits for it to recover. OFF does NOT drive the lens (the MPU rejects\n"
-                     "every move at once with 0x4A); keep it for experiments. Logged in the log header.",
+        .max       = 2,
+        .choices   = CHOICES("OFF", "ON", "Keep open"),
+        .icon_type = IT_DICE,
+        .help      = "AF drive (MPU): the MPU monitor must be open for the lens to move.",
+        .help2     = "Keep open (default): opened on the first run (LV dark ~2 s once), then left open so later runs\n"
+                     "start at once; closed when LV ends or via 'AF drive: close monitor'. ON: open/close every run\n"
+                     "(dark ~2 s each time). OFF does NOT drive the lens (MPU rejects moves with 0x4A).",
+    },
+    {
+        .name      = "AF drive: close monitor",
+        .select    = afdiag_afdrive_monclose_select,
+        .icon_type = IT_ACTION,
+        .help      = "Close the MPU monitor left open by 'AF drive monitor: Keep open'.",
     },
     {
         .name      = "AF drive calib",
@@ -10512,6 +10558,11 @@ static void aref_step(void)
 /* when closing ML menu, check whether we need to refresh the LiveView */
 static unsigned int crop_rec_polling_cbr(unsigned int unused)
 {
+    if (afd_mon_is_open && !lv && !afd_mon_closing && !afdiag_afdrive_busy)
+    {
+        afd_mon_closing = 1;
+        task_create("afd_monclose", 0x1e, 0x1000, afd_mon_close_task, (void*)0);
+    }
     
     /* touch/Movie-tab shortcuts inject Q+SET into an open menu — not used on slim. */
 #ifndef CONFIG_SLIM_MENUS
