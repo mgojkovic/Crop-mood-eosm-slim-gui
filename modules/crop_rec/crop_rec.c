@@ -7452,7 +7452,7 @@ static int afd_fine = AFD_FINE_DEF;
 #define AFD_LOG_SIZE         24576
 #define AFD_LOG_RESERVE     256    /* kept free for the "# RESULT" line */
 #define AFD_APPROACH         120    /* approach leg, longer than the backlash (real value 30-60) */
-#define AFD_MAX_TOTAL        8000   /* whole run, total |pulses| (B full range: 2 x 12 chunks + return moves) */
+#define AFD_MAX_TOTAL        9000   /* whole run, total |pulses| (B full range: 2 x 12 chunks + return moves) */
 #define AFD_CAL_STEP         40     /* AF drive calib: pulses per move */
 #define AFD_CAL_MOVES        8      /* ... moves per pass: -160..+160 */
 #define AFD_CAL_START        (-160) /* sweep start, centred on the current position */
@@ -8841,6 +8841,10 @@ static int afd_sweep_find(int pos0, int d, int spd, int maxch, int *dir_out, uin
         }
         afd_nopeak = 1;
         afd_log("# nopeak sweep smax=%d smin=%d\n", (int) gmax, (int) gmin);
+        /* no focus anywhere: do not leave the lens at an extreme, go back to
+         * where the search started (unmeasured fast move) */
+        if (!afd_aborted && afd_pos != pos0)
+            afd_move_ex("o", pos0 - afd_pos, 0, 0);
         *ref_out = gmax_ex;
         return 0;
     }
@@ -10103,7 +10107,7 @@ static int afd_engine(int mode, int flags)
     afd_ep_close2 = post_close2_s;
     afd_log("# epilogue pre_stop_s=%d post_stop_s=%d post_close_s=%d post_close2_s=%d session_close=%s\n", (int) pre_stop_s,
             (int) post_stop_s, (int) post_close_s, (int) post_close2_s, sc == 1 ? "OFF" : sc == 2 ? "Restore" : "ON");
-    if (sc == 2 && mode == 0 && !afd_aborted && !afd_nopeak && !afd_lowcontrast && !stale_final && pre_stop_s &&
+    if (sc == 2 && mode == 0 && !afd_rec_run && !afd_aborted && !afd_nopeak && !afd_lowcontrast && !stale_final && pre_stop_s &&
         (uint64_t) post_close_s * 100 < (uint64_t) pre_stop_s * 85 && lv && !afd_must_abort())
     {
         /* the lens left the landing: one short feedback landing at 07 inside a fresh session (stop, no close) */
