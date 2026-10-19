@@ -7407,7 +7407,13 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFC_LOG_FILE         "ML/LOGS/AFCALIB.LOG"
 #define AFP_LOG_FILE         "ML/LOGS/AFPROBE.LOG"
 #define AFP_BASE             0xFFF81B78   /* MPU lens-state struct */
-#define AFP_WORDS            128
+#define AFP_WORDS            (AFP_POS_WORDS + 128)
+/* RE: the lens's own position (lens opcode 0xC0) is cached at 0xFFF8132E
+ * (latest) / 0xFFF8132C (start of the last move), next to the poll gates at
+ * 0xFFF812B8.. and the reference 0xFFF812DC: snapshot that region first so
+ * it survives the slow-read fallback. */
+#define AFP_POS_BASE         0xFFF812B8
+#define AFP_POS_WORDS        36           /* 0xFFF812B8..0xFFF81347 */
 #define AFP_WORDS_SLOW       64           /* when a 128-word snapshot takes longer than AFP_SLOW_MS */
 #define AFP_SLOW_MS          1500
 #define AFP_MAX_CHG          32           /* CHG lines per move */
@@ -7516,12 +7522,14 @@ static int afd_mon_word(uint32_t addr, uint32_t *v)
 
 static void afd_poll_once(void)
 {
-    static const uint32_t a[5] = { 0xFFF81BB9, 0xFFF81C10, 0xFFF81C14, 0xFFF81C18, 0xFFF81C1C };
-    uint32_t v[5];
+    static const uint32_t a[7] = { 0xFFF81BB9, 0xFFF81C10, 0xFFF81C14, 0xFFF81C18, 0xFFF81C1C, 0xFFF8132C, 0xFFF812DC };
+    uint32_t v[7];
     int err = 0;
-    for (int i = 0; i < 5; i++) err += afd_mon_word(a[i], &v[i]) ? 1 : 0;
-    afd_log("POLL t=%d val=%x c10=%x c14=%x c18=%x c1c=%x err=%d\n",
-            get_ms_clock() - afd_poll_t0, v[0], v[1], v[2], v[3], v[4], err);
+    for (int i = 0; i < 7; i++) err += afd_mon_word(a[i], &v[i]) ? 1 : 0;
+    /* pos32c = word at 0xFFF8132C: high half = move-start position, low half
+     * = latest lens position (0xFFF8132E); ref = 0xFFF812DC high half */
+    afd_log("POLL t=%d val=%x c10=%x c14=%x c18=%x c1c=%x pos32c=%x ref=%x err=%d\n",
+            get_ms_clock() - afd_poll_t0, v[0], v[1], v[2], v[3], v[4], v[5], v[6], err);
 }
 
 /* msleep that keeps polling when afd_poll_on */
@@ -7936,6 +7944,10 @@ static void afd_calib_run(void)
 static uint32_t afp_prev[AFP_WORDS], afp_cur[AFP_WORDS];
 static uint8_t afp_err[AFP_WORDS];
 static int afp_words = AFP_WORDS;
+static uint32_t afp_addr(int i)
+{
+    return i < AFP_POS_WORDS ? AFP_POS_BASE + 4 * i : AFP_BASE + 4 * (i - AFP_POS_WORDS);
+}
 
 static int afp_snapshot(uint32_t *out, int *errs)
 {
@@ -7944,7 +7956,7 @@ static int afp_snapshot(uint32_t *out, int *errs)
     for (int i = 0; i < afp_words; i++)
     {
         if ((i & 15) == 0 && afd_must_abort()) { afd_aborted = 1; return 0; }
-        int e = afd_mon_word(AFP_BASE + 4 * i, &out[i]);
+        int e = afd_mon_word(afp_addr(i), &out[i]);
         afp_err[i] = e ? 1 : 0;
         *errs += afp_err[i];
     }
@@ -7959,7 +7971,7 @@ static void afd_probe_run(void)
     if (afd_aborted) return;
     int ms = afp_snapshot(afp_prev, &errs);
     if (afd_aborted) return;
-    afd_log("# snapshot A words=%d base=0x%x ms=%d errs=%d\n", afp_words, AFP_BASE, ms, errs);
+    afd_log("# snapshot A words=%d base=0x%x+0x%x ms=%d errs=%d\n", afp_words, AFP_POS_BASE, AFP_BASE, ms, errs);
     if (ms > AFP_SLOW_MS)
     {
         afp_words = AFP_WORDS_SLOW;
@@ -7984,7 +7996,7 @@ static void afd_probe_run(void)
             if (nchg > AFP_MAX_CHG) continue;
             uint32_t o = afp_prev[i], w = afp_cur[i];
             afd_log("CHG move=%d cmd=%d addr=0x%x old=0x%x new=0x%x delta=%d dhi=%d dlo=%d\n",
-                    k + 1, n, AFP_BASE + 4 * i, o, w, (int) (w - o),
+                    k + 1, n, afp_addr(i), o, w, (int) (w - o),
                     (int) (int16_t) ((w >> 16) - (o >> 16)), (int) (int16_t) ((w & 0xFFFF) - (o & 0xFFFF)));
         }
         afd_log("# snapshot move=%d words=%d ms=%d errs=%d changed=%d%s\n", k + 1, afp_words, ms, errs, nchg,
