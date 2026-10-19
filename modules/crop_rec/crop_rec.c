@@ -9936,6 +9936,7 @@ static int afd_engine(int mode, int flags)
     return (afd_aborted || afd_nopeak) ? -1 : ret_pct;
 }
 
+static int afd_worker_ensure(void);   /* defined with the Auto refocus code */
 static void afd_task_common(int mode)
 {
     int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
@@ -9971,6 +9972,10 @@ static void afd_task_common(int mode)
 
     afd_engine(mode, 0);
 
+    /* create the persistent AF worker now (LV running, not recording, mlv_lite
+     * long initialised), so Auto refocus has it before recording starts */
+    if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+        afd_worker_ensure();
 out:
     afdiag_afdrive_busy = 0;
 }
@@ -14544,7 +14549,10 @@ static unsigned int crop_rec_init()
         menu_move_entry_after("Settings", "AF diag log", "Shutter zoom");
         menu_move_entry_after("Settings", "AF lens test", "AF diag log");
         task_create("afdiag_lens", 0x1e, 0x2000, afdiag_lens_task, (void*)0);
-        afd_worker_ensure();   /* the persistent AF worker (task_create fails while recording) */
+        /* NOT here: creating the AF worker at module init (crop_rec loads before
+         * mlv_lite) made mlv_lite's compress_task creation fail -> mlv_lite never
+         * initialised, REC did nothing, console stayed open.  It is created lazily
+         * after the first menu AF run (afd_task_common) or Auto refocus trigger. */
         menu_add("Settings", slim_more_hacks_menu, COUNT(slim_more_hacks_menu));
         lvinfo_add_items(info_items, COUNT(info_items));
         return 0;
