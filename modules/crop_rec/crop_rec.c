@@ -446,6 +446,7 @@ static volatile int slim_af_request = 0;
 /* Defined further down: the AF lens test (not CONFIG_INT) and Auto refocus idle state. */
 static int afdiag_lens_test;
 static volatile int afdiag_afdrive_busy;   /* AF drive (MPU) running; defined further down */
+static volatile int afdiag_afsearch_busy;  /* AF search (MPU) running; defined further down */
 static int aref_is_idle(void);
 /* PROP_LV_AF_RESULT fires once at the end of every Canon AF run on EOS M
  * (0 = focused, 1 = failed); field logs showed it ~0.3-1 s after the AF
@@ -6842,7 +6843,7 @@ static void afdiag_mpu_stop(void)
 static int afdiag_mpu_busy(void)
 {
     return RECORDING || is_continuous_af() || slim_af_state != SLIM_AF_IDLE ||
-           slim_af_request || !aref_is_idle();
+           slim_af_request || !aref_is_idle() || afdiag_afdrive_busy || afdiag_afsearch_busy;
 }
 
 /* One step: request, watch focus_dist / pulse count / sharpness for the
@@ -7915,7 +7916,7 @@ static uint32_t afd_run(uint32_t *best_out)
             if (afd_aborted) return 0;
         }
         n = 0; im = 0; below = 0;
-        while (n < AFD_FINE_MAX && below < ((n > 0 && (uint64_t) fs[im] * 100 >= (uint64_t) fs[0] * AFD_FINE_WELL_PCT) ? 1 : AFD_FINE_DROP_N))
+        while (n < AFD_FINE_MAX && below < AFD_FINE_DROP_N)   /* single samples: one dip may be noise, always need 2 */
         {
             fs[n] = afd_move_ex("f", d * AFD_FINE, 2, 0);
             fpos[n] = afd_pos;
@@ -8214,10 +8215,13 @@ static int afd_engine(int mode, int flags)
     afp_words = AFP_WORDS;
     int e = 0;
     int opened_now = 0;
-    if (afd_mon_is_open && mon != 2)
+    int recnow = (RECORDING || RECORDING_RAW || mlv_raw_rec_busy());
+    if (afd_mon_is_open && mon != 2 && !recnow)
         afd_mon_close_now();               /* setting changed away from Keep open */
     if (mon && !afd_mon_is_open)
     {
+        /* never open the monitor while recording (LV blackout ~2 s) */
+        if (recnow) return -1;
         e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
         if (e)
         {
@@ -8288,7 +8292,13 @@ static int afd_engine(int mode, int flags)
     msleep(500);
     send(9, 0x25, 16, zeros);
     msleep(1000);
-    if (mon == 1) ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
+    if (mon == 1)
+    {
+        /* recording started during the run: never close the monitor while
+         * recording; keep it open and let the LV-exit / menu closer handle it */
+        if ((RECORDING || RECORDING_RAW || mlv_raw_rec_busy())) afd_mon_is_open = 1;
+        else ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
+    }
     /* mon == 2: left open for the next run (closed on LV exit / menu / setting) */
 
     afd_log_reserve = 0;
@@ -8457,8 +8467,10 @@ static void afd_rect_task(void *unused)
     return;
 not_run:
     afd_rect_track = 0;
-    afd_rect_state = 1;      /* recording stopped before the 3 s: stay armed */
-    NotifyBox(3000, "AF REC test: not run, still armed");
+    /* still recording (a precondition failed): wait for the next recording
+     * instead of re-firing every poll; stopped before the 3 s: armed */
+    afd_rect_state = (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) ? 3 : 1;
+    NotifyBox(3000, "AF REC test: not run, armed for the next recording");
 }
 
 static MENU_SELECT_FUNC(afdiag_afrect_select)
@@ -8478,11 +8490,13 @@ static MENU_SELECT_FUNC(afdiag_afrect_select)
 
 static MENU_UPDATE_FUNC(afdiag_afrect_update)
 {
-    MENU_SET_VALUE(afd_rect_state == 2 ? "RUNNING" : afd_rect_state == 1 ? "ARMED" : "off");
+    MENU_SET_VALUE(afd_rect_state == 2 ? "RUNNING" : afd_rect_state == 3 ? "ARMED (next rec)" : afd_rect_state == 1 ? "ARMED" : "off");
 }
 
 static void afd_rect_poll(void)
 {
+    if (afd_rect_state == 3 && !(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+        afd_rect_state = 1;
     if (afd_rect_state == 1 && RECORDING_RAW && mlv_raw_rec_busy() && lv)
     {
         afd_rect_state = 2;
@@ -8557,6 +8571,11 @@ static MENU_SELECT_FUNC(afdiag_afdrive_monclose_select)
     if (!afd_mon_is_open)
     {
         NotifyBox(2000, "MPU monitor is not open");
+        return;
+    }
+    if ((RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+    {
+        NotifyBox(2000, "Not while recording (LV would go dark)");
         return;
     }
     if (afd_mon_closing) return;
@@ -10983,7 +11002,7 @@ static void aref_step(void)
     /* Eligibility as a bit mask of what blocks us, so the log can say which gate. */
     int blk = 0;
     if (!(Auto_refocus && is_EOSM && lv && is_movie_mode() && CROP_PRESET_MENU)) blk |= 1;
-    if (busy || slim_af_request || afdiag_lens_test) blk |= 2;
+    if (busy || slim_af_request || afdiag_lens_test || afdiag_afdrive_busy || afdiag_afsearch_busy) blk |= 2;
     if (is_manual_focus() || is_continuous_af()) blk |= 4;
     if (gui_menu_shown() || lv_disp_mode != 0) blk |= 8;
     if (crop_rec_lv_transition_busy() || raw_transition) blk |= 16;
@@ -11190,9 +11209,8 @@ static void aref_step(void)
      * it OFF the moves are rejected, so fall back to Canon AF. */
     if (Auto_refocus_method == 1 && !RECORDING && afdiag_afdrive_mon)
     {
-        /* TODO(recording): MPU drive is not used while recording (AFD_F_REC is
-         * not implemented in afd_engine, recording safety is being investigated
-         * separately).  While recording, the Canon path below stays unchanged. */
+        /* Not while recording yet: AFD_F_REC exists but its safety is still
+         * being field-tested (AF drive REC test).  Recording uses Canon AF. */
         if (afdiag_afdrive_busy || afdiag_afsearch_busy)
         {
             aref_next_at = now + 1000;   /* AF drive / search in use: look again shortly */
