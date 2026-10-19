@@ -7367,10 +7367,16 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_SPEED            0x07
 #define AFD_COARSE           60     /* coarse step, measured on g */
 #define AFD_FINE             20     /* fine sweep step, measured on s */
-#define AFD_FINE_SPAN        80     /* fine sweep covers best_g_pos -80 .. +80 */
-#define AFD_FINE_PTS         9
-#define AFD_REC_STEP         10     /* recovery sweep step */
-#define AFD_REC_PTS          9
+#define AFD_FINE_BACK        60     /* pass A back move: -d*(AFD_COARSE + this) from the coarse best */
+#define AFD_FINE_MAX         16     /* pass A: max points */
+#define AFD_FINE_DROP_PCT    70     /* pass A stop: this many points in a row below this % of the max, after the max ... */
+#define AFD_FINE_DROP_N      2
+#define AFD_RT_BACK          100    /* retrace: starts this far before the pass A max */
+#define AFD_RT_EXTRA         40     /* each further retrace starts this much earlier */
+#define AFD_RT_THR1          90     /* retrace 1 landing: s >= this % of the pass A max */
+#define AFD_RT_THR2          80     /* retrace 2 */
+#define AFD_RT_SLACK         6      /* retrace: max steps = steps_since_max + this (+ AFD_RT_EXTRA/AFD_FINE per further retrace) */
+#define AFD_RT_FALL_PCT      80     /* retrace failed: after its max, a point below this % of it */
 #define AFD_PROBE_PCT        95     /* probe: < this % of g0 = wrong way, within +-5% = ambiguous */
 #define AFD_COARSE_STOP_PCT  75     /* coarse stop: one move below this % of best g ... */
 #define AFD_COARSE_DROP_PCT  90     /* ... or this many moves in a row below this % */
@@ -7391,8 +7397,7 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_LOG_SIZE         24576
 #define AFD_LOG_RESERVE     256    /* kept free for the "# RESULT" line */
 #define AFD_APPROACH         120    /* approach leg, longer than the backlash (real value 30-60) */
-#define AFD_RECOVER_PCT      85     /* final s < this % of the fine max: one recovery sweep */
-#define AFD_MAX_TOTAL        5000   /* whole run, total |pulses| */
+#define AFD_MAX_TOTAL        6000   /* whole run, total |pulses| */
 #define AFD_CAL_STEP         40     /* AF drive calib: pulses per move */
 #define AFD_CAL_MOVES        8      /* ... moves per pass: -160..+160 */
 #define AFD_CAL_START        (-160) /* sweep start, centred on the current position */
@@ -7436,7 +7441,8 @@ static void afd_mon_close_now(void)
 static char afd_buf[AFD_LOG_SIZE];
 static int afd_log_reserve = AFD_LOG_RESERVE;
 static int afd_len, afd_pos, afd_moves, afd_t0, afd_aborted, afd_lowcontrast;
-static int afd_travel, afd_recovered;
+static int afd_travel, afd_retraces;
+static uint32_t afd_land_s;
 static int afd_peak_g_pos, afd_fine_peak_pos;
 static uint32_t afd_last_g;   /* g of the last measurement (afd_move_ex) */
 static int afd_luma_pre, afd_nolv, afd_n_nodone, afd_n_err, afd_n_fast;
@@ -7709,20 +7715,33 @@ static void afd_gbest(uint32_t *bg, int *bpos)
     if (afd_last_g > *bg) { *bg = afd_last_g; *bpos = afd_pos; }
 }
 
-/* goto start (approach d, measured), then npts-1 measured moves of d*step.
- * Fills pos/sv; returns the number of points, 0 after an abort. */
-static int afd_sweep(const char *phase, int start, int d, int step, int npts, int *pos, uint32_t *sv)
+/* One retrace pass: unmeasured back move ("o") to start, then measured steps of
+ * d*AFD_FINE ("r"), at most max_steps. Stops at the first point with
+ * s >= thr_pct % of ref (hit, the lens stays there), or when s has risen and
+ * then fallen (below AFD_RT_FALL_PCT % of the pass max). *s_out = s at the
+ * landing (hit) or the pass max (fail), *bidx = step index of the pass max.
+ * Returns 1 hit, 0 failed, -1 abort. Logs "# retrace". */
+static int afd_retrace(int k, int thr_pct, uint32_t ref, int start, int d, int max_steps, int *bidx, uint32_t *s_out)
 {
-    sv[0] = afd_goto(phase, start, d, 0);
-    pos[0] = afd_pos;
-    if (afd_aborted) return 0;
-    for (int i = 1; i < npts; i++)
+    if (start != afd_pos)
     {
-        sv[i] = afd_move_ex(phase, d * step, 1, 0);
-        pos[i] = afd_pos;
-        if (afd_aborted) return 0;
+        afd_move_ex("o", start - afd_pos, 0, 0);
+        if (afd_aborted) return -1;
     }
-    return npts;
+    uint32_t pm = 0;
+    int pi = -1, hit = 0;
+    for (int i = 0; i < max_steps; i++)
+    {
+        uint32_t s = afd_move_ex("r", d * AFD_FINE, 1, 0);
+        if (afd_aborted) return -1;
+        if (s > pm) { pm = s; pi = i; }
+        if (!afd_below(s, ref, thr_pct)) { hit = 1; pm = s; pi = i; break; }
+        if (i > pi && afd_below(s, pm, AFD_RT_FALL_PCT)) break;
+    }
+    afd_log("# retrace k=%d thr_pct=%d hit=%d s=%d\n", k, thr_pct, hit, (int) pm);
+    *bidx = pi;
+    *s_out = pm;
+    return hit;
 }
 
 static int afd_argmax(const uint32_t *sv, int n)
@@ -7823,55 +7842,75 @@ static uint32_t afd_run(uint32_t *best_out)
     afd_log("# coarse peak_g_pos=%d peak_g=%d g0=%d dir=%d moves=%d travel=%d\n",
             bgpos, (int) bg, (int) g0, d, cmoves, afd_travel);
 
-    /* 4. fine sweep on s, one direction only: 9 points, best_g_pos-80 .. +80 */
-    int fpos[AFD_FINE_PTS];
-    uint32_t fs[AFD_FINE_PTS];
-    int n = afd_sweep("f", bgpos - d * AFD_FINE_SPAN, d, AFD_FINE, AFD_FINE_PTS, fpos, fs);
-    if (afd_aborted || !n) return 0;
-    int im = afd_argmax(fs, n);
-    int peak = fpos[im];
-    uint32_t fmax = fs[im];
-    if (im > 0 && im < n - 1)
+    /* 4. fine pass A on s, direction d, uniform steps: one unmeasured move back
+     * to bgpos - d*(COARSE + FINE_BACK), then measured d*FINE steps until s has
+     * dropped below FINE_DROP_PCT % of the max FINE_DROP_N times in a row after
+     * the max, or FINE_MAX points */
+    int fpos[AFD_FINE_MAX];
+    uint32_t fs[AFD_FINE_MAX];
+    int n = 0, im = 0, below = 0;
+    int pa_start = bgpos - d * (AFD_COARSE + AFD_FINE_BACK);
+    for (int att = 0; att < 2; att++)
     {
-        int64_t num = (int64_t) fs[im - 1] - (int64_t) fs[im + 1];
-        int64_t den = 2 * ((int64_t) fs[im - 1] - 2 * (int64_t) fs[im] + (int64_t) fs[im + 1]);
-        if (den < 0)
+        int back = pa_start - afd_pos;
+        if (back)
         {
-            int64_t off = (int64_t) AFD_FINE * num / den;   /* in sweep direction */
-            if (off > AFD_FINE) off = AFD_FINE;
-            if (off < -AFD_FINE) off = -AFD_FINE;
-            peak += d * (int) off;
+            afd_move_ex("o", back, 0, 0);
+            if (afd_aborted) return 0;
         }
+        n = 0; im = 0; below = 0;
+        while (n < AFD_FINE_MAX && below < AFD_FINE_DROP_N)
+        {
+            fs[n] = afd_move_ex("f", d * AFD_FINE, 1, 0);
+            fpos[n] = afd_pos;
+            if (afd_aborted) return 0;
+            if (n == 0 || fs[n] > fs[im]) { im = n; below = 0; }
+            else if (afd_below(fs[n], fs[im], AFD_FINE_DROP_PCT)) below++;
+            else below = 0;
+            n++;
+        }
+        /* max at the first point: the s peak is behind the start (only falling
+         * s seen).  Retry once from 200 pulses further back. */
+        if (im != 0 || att == 1) break;
+        afd_log("# fineA edge max_idx=0 s=%d: widening back by 200\n", (int) fs[0]);
+        pa_start -= d * 200;
     }
-    afd_fine_peak_pos = peak;
+    uint32_t fmax = fs[im];
+    int pmax = fpos[im];
+    int ssm = n - 1 - im;   /* steps since the max */
+    afd_fine_peak_pos = pmax;
     afd_best_s = fmax;
-    afd_best_pos = peak;
-    afd_log("# fine max_idx=%d max_pos=%d max_s=%d fine_peak_pos=%d\n", im, fpos[im], (int) fmax, peak);
+    afd_best_pos = pmax;
+    afd_log("# fineA max_s=%d max_idx=%d n=%d max_pos=%d\n", (int) fmax, im, n, pmax);
 
-    /* 5. final approach to the peak, approaching in d */
-    uint32_t s = afd_goto("r", peak, d, 0);
-    if (afd_aborted) return 0;
-    *best_out = fmax;
-
-    /* 6. the final measurement missed the fine max: one finer sweep around the
-     * peak (9 points, step 10); its own measurements decide */
-    if (afd_below(s, fmax, AFD_RECOVER_PCT))
+    /* 5. retrace pass B (90 %), retrace 2 (80 %, starts AFD_RT_EXTRA earlier),
+     * then, failing both, go to the best point of retrace 2 without a threshold */
+    int bidx = 0, start = 0;
+    uint32_t land = 0;
+    int hit = 0;
+    for (int k = 1; k <= 2 && !hit; k++)
     {
-        afd_recovered = 1;
-        afd_log("# recovery final_s=%d fine_max_s=%d center=%d dir=%d\n", (int) s, (int) fmax, peak, d);
-        int rpos[AFD_REC_PTS];
-        uint32_t rs[AFD_REC_PTS];
-        n = afd_sweep("v", peak - d * (AFD_REC_PTS / 2) * AFD_REC_STEP, d, AFD_REC_STEP, AFD_REC_PTS, rpos, rs);
-        if (afd_aborted || !n) return 0;
-        im = afd_argmax(rs, n);
-        afd_log("# recovery new_best_pos=%d new_best_s=%d old_best_s=%d\n", rpos[im], (int) rs[im], (int) fmax);
-        afd_best_s = rs[im];
-        afd_best_pos = rpos[im];
-        s = afd_goto("r", rpos[im], d, 0);
-        if (afd_aborted) return 0;
-        *best_out = rs[im];
+        start = pmax - d * (AFD_RT_BACK + AFD_RT_EXTRA * (k - 1));
+        hit = afd_retrace(k, k == 1 ? AFD_RT_THR1 : AFD_RT_THR2, fmax, start, d,
+                          ssm + AFD_RT_SLACK + (AFD_RT_EXTRA / AFD_FINE) * (k - 1), &bidx, &land);
+        afd_retraces = k;
+        if (hit < 0) return 0;
     }
-    return s;
+    if (!hit)
+    {
+        afd_retraces = 3;
+        afd_move_ex("o", start - afd_pos, 0, 0);   /* one more back move, to the start of retrace 2 */
+        if (afd_aborted) return 0;
+        for (int i = 0; i <= bidx; i++)
+        {
+            land = afd_move_ex("l", d * AFD_FINE, 1, 0);
+            if (afd_aborted) return 0;
+        }
+        afd_log("# retrace k=3 thr_pct=0 hit=0 s=%d\n", (int) land);
+    }
+    afd_land_s = land;
+    *best_out = fmax;
+    return land;
 }
 
 /* AF drive calib: hysteresis measurement. Go to -160 (approach +), then
@@ -8034,7 +8073,8 @@ static void afd_task_common(int mode)
     afd_aborted = 0;
     afd_lowcontrast = 0;
     afd_travel = 0;
-    afd_recovered = 0;
+    afd_retraces = 0;
+    afd_land_s = 0;
     afd_peak_g_pos = afd_fine_peak_pos = 0;
     afd_last_dir = 0;
     afd_best_dir = 0;
@@ -8082,11 +8122,12 @@ static void afd_task_common(int mode)
                 AFD_MIN_BASE_MS, AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS, AFD_FRAME_MS, AFD_SETTLE_MS);
     else
         afd_log("# speed=%d coarse=%d fine=%d approach=%d probe_pct=%d coarse_stop_pct=%d coarse_drop_pct=%d coarse_drop_n=%d "
-                "flat_pct=%d flat_n=%d max_travel=%d max_total=%d max_coarse=%d fine_span=%d fine_pts=%d rec_step=%d "
-                "recover_pct=%d done_timeout=%d min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
+                "flat_pct=%d flat_n=%d max_travel=%d max_total=%d max_coarse=%d fine_back=%d fine_max=%d fine_drop_pct=%d "
+                "rt_back=%d rt_thr=%d/%d rt_extra=%d rt_slack=%d done_timeout=%d min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
                 AFD_SPEED, AFD_COARSE, AFD_FINE, AFD_APPROACH, AFD_PROBE_PCT, AFD_COARSE_STOP_PCT,
                 AFD_COARSE_DROP_PCT, AFD_COARSE_DROP_N, AFD_FLAT_PCT, AFD_FLAT_N, AFD_MAX_TRAVEL, AFD_MAX_TOTAL, AFD_MAX_COARSE,
-                AFD_FINE_SPAN, AFD_FINE_PTS, AFD_REC_STEP, AFD_RECOVER_PCT, AFD_DONE_TIMEOUT_MS, AFD_MIN_BASE_MS,
+                AFD_FINE_BACK, AFD_FINE_MAX, AFD_FINE_DROP_PCT, AFD_RT_BACK, AFD_RT_THR1, AFD_RT_THR2, AFD_RT_EXTRA,
+                AFD_RT_SLACK, AFD_DONE_TIMEOUT_MS, AFD_MIN_BASE_MS,
                 AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS, AFD_FRAME_MS, AFD_SETTLE_MS);
     afd_log("# ms phase cmd pos s g luma done_val flags done_ms ret dist\n");
     afd_luma_probe("pre_monopen_or_session");
@@ -8136,8 +8177,8 @@ static void afd_task_common(int mode)
                 afd_cal_peak_pos[0] - afd_cal_peak_pos[1],
                 afd_cal_peak_pos[2] - afd_cal_peak_pos[0], afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
     else
-        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d peak_g_pos=%d fine_peak_pos=%d final_s=%d final_best_pct=%d recovery=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
-                ab, afd_best_pos, (int) best, afd_peak_g_pos, afd_fine_peak_pos, (int) final_s, pct, afd_recovered, afd_moves,
+        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d peak_g_pos=%d fine_peak_pos=%d final_s=%d final_best_pct=%d retraces=%d land_s=%d land_pct=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
+                ab, afd_best_pos, (int) best, afd_peak_g_pos, afd_fine_peak_pos, (int) final_s, pct, afd_retraces, (int) afd_land_s, pct, afd_moves,
                 afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
 
     if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
