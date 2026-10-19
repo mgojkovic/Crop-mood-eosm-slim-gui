@@ -7763,6 +7763,9 @@ static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, a
             extra = AFT_EXTRA_FRAMES;
         }
         if (r->done_ms < 0 && t >= AFT_DONE_TIMEOUT_MS) break;
+        /* hard cap: if vsync stops after FOCUS_DONE, the extra-frame count
+         * never runs out; never track more than 1.5 s past the done/limit */
+        if (r->done_ms >= 0 && t > MAX(r->done_ms, afd_track_min_ms) + 1500) break;
         if (afd_must_abort())
         {
             r->aborted = 1; afd_aborted = 1;
@@ -9300,6 +9303,8 @@ static void afw_run(int mode)
     afw_file = (mode == 4) ? AFW_SWEEP_FILE : AFW_STOP_FILE;
     afw_len = 0;
     afw_cap = AFW_LOG_SIZE;
+    if (afw_buf) { fio_free(afw_buf); afw_buf = 0; }
+    if (afw_samp) { fio_free(afw_samp); afw_samp = 0; }
     afw_buf = fio_malloc(AFW_LOG_SIZE);
     afw_samp = fio_malloc(AFT_MAX_SAMPLES * sizeof(struct afd_samp));
     if (!afw_buf || !afw_samp)
@@ -9515,9 +9520,11 @@ static int afd_engine(int mode, int flags)
         afd_mon_stale = 0;
         int recst = (afd_rec_run || RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) ? 1 : 0;
         afd_note("# monitor stale t=%d rec=%d reopened=%d\n", get_ms_clock(), recst, reopened);
-        if (recst || reopened || !lv)
+        if (recst || reopened || !lv || !mon)
         {
-            stale_final = 1;   /* never re-open while recording; at most one re-open per run */
+            /* never re-open while recording; at most one re-open per run;
+             * monitor OFF means OFF (the user asked for no monitor) */
+            stale_final = 1;
             break;
         }
         reopened = 1;
@@ -9526,6 +9533,11 @@ static int afd_engine(int mode, int flags)
         msleep(300);
         send(9, 0x25, 16, zeros);
         msleep(300);
+        if ((RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) || !lv)
+        {
+            stale_final = 1;   /* recording started during the waits: no monitor operations */
+            break;
+        }
         int was_open = afd_mon_is_open;
         if (afd_mon_is_open) afd_mon_close_now("stale");
         else if (mon)
@@ -12747,7 +12759,7 @@ static unsigned int crop_rec_polling_cbr(unsigned int unused)
         {
             wake_at = 0;
             afd_mon_wake_busy = 1;
-            task_create("afd_monwake", 0x1e, 0x1000, afd_mon_wake_task, (void*)wake_off_ms);
+            task_create("afd_monwake", 0x1e, 0x3000, afd_mon_wake_task, (void*)wake_off_ms);
         }
         if (afd_mon_is_open && afdiag_mon_autoclose && !lv && lv_off_since && !rec && !afd_mon_closing && !afdiag_afdrive_busy &&
             now - lv_off_since >= afd_mon_autoclose_ms[afdiag_mon_autoclose] &&
