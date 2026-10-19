@@ -7385,7 +7385,7 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 /* FOCUS_DONE is a ~510 ms timer for long moves, not the end of the motion (field run: sharpness kept
  * changing hundreds of ms after it).  Every command is therefore short enough to finish within the
  * timer: max |pulses| per command by speed (07: ~0.35 pulses/ms; 1F: ~3x), each chunk waits for its done. */
-#define AFD_CHUNK_07         120
+#define AFD_CHUNK_07         100
 #define AFD_CHUNK_MID        200    /* speed 14 (between the two, estimated) */
 #define AFD_CHUNK_FAST       300
 #define AFD_TASK_PRIO        0x1f   /* AF engine tasks: below Canon's tasks and ML's 0x1e ones (CPU starvation, CLR_CALC assert) */
