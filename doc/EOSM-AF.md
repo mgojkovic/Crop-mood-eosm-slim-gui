@@ -272,6 +272,30 @@ best sharpness, first retrace each time, 8.5-10.6 s per run).**
 Next: speed (each move ~0.5 s incl. settle and stable sampling), wider distance coverage,
 Auto refocus integration, and behaviour with the monitor open while recording.
 
+**Experiment tooling (2026-10-19 overnight, commits 03bb0e1..2fa454a, not yet field-tested).**
+
+- Monitor:
+  - "Monitor auto-close" (Never by default), stale-monitor self-heal (one re-open when the
+    first move is rejected; never while recording, never with monitor OFF), and "Re-open on
+    wake".
+  - ML's "Turn off LCD" pauses LiveView (lv=0) when not recording (src/powersave.c:315-331),
+    so the wake re-open matters for it.
+- Measurement:
+  - afd_measure (s1/s2/s4/g/q/band) and afd_move_track (samples every LV frame during a move;
+    an optional stop callback sends (9,3,1)).
+  - "AF sweep record" → AFSWEEP.LOG; "AF stop test" → AFSTOP.LOG.
+- Algorithms:
+  - "AF algorithm": A stepwise / B sweep / C sweep+stop / D model jump / E warm start /
+    F predictive.
+  - "AF bench" → AFBENCH.LOG (each algorithm from ±150 and ±400 defocus, vs a reference
+    landing).
+  - "AF reversal cal" → AFREV.LOG (reversal offset vs move size).
+- Offline simulator `contrib/af_replay/` (REPORT.md), fitted on 22 real curves:
+  - Curve widths: sigma_s median 21 pulses, sigma_g 35.
+  - FOCUS_DONE has a ~510 ms timer mode (bit 0x0400) on most long moves.
+  - Predicted ranking, cold start: B 85% / 5.0 s, C 88% / 5.6 s, F 76% / 9.5 s, A 72% / 10.8 s.
+  - The reversal offset is the main sensitivity.
+
 **Other.** The LV blackout seen in the "AF search (MPU)" runs came from MpuMonOpen, not from
 the (8,2,32) index-16 call. That call still always ends at infinity and is not used.
 
