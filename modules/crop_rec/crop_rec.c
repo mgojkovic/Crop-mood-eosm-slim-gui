@@ -7364,21 +7364,24 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
  * waits for the count to increase (error bits are only logged) and in any
  * case for AFD_MIN_BASE_MS + |n|*AFD_MIN_PER_PULSE, then 2 LV frames. */
 #define AFD_LOG_FILE         "ML/LOGS/AFDRIVE.LOG"
+#define AFV_LOG_FILE         "ML/LOGS/AFSPEED.LOG"
 #define AFD_SPEED            0x07
-#define AFD_COARSE           60     /* coarse step, measured on g */
+#define AFD_COARSE           100    /* coarse step, measured on g (broad peak, +-120) */
 #define AFD_FINE             20     /* fine sweep step, measured on s */
-#define AFD_FINE_BACK        60     /* pass A back move: -d*(AFD_COARSE + this) from the coarse best */
+#define AFD_FINE_BACK        0      /* pass A starts d*(AFD_COARSE + this) before the coarse g best (one coarse step) */
 #define AFD_FINE_MAX         16     /* pass A: max points */
 #define AFD_FINE_DROP_PCT    70     /* pass A stop: this many points in a row below this % of the max, after the max ... */
-#define AFD_FINE_DROP_N      2
-#define AFD_RT_BACK          100    /* retrace: starts this far before the pass A max */
-#define AFD_RT_EXTRA         40     /* each further retrace starts this much earlier */
+#define AFD_FINE_DROP_N      2      /* ... (one point when the max is well defined: see AFD_FINE_WELL_PCT) */
+#define AFD_FINE_WELL_PCT    130    /* well defined max: max >= this % of the first pass A point */
+#define AFD_RT_BACK          60     /* retrace 1 starts d*(this + steps_since_max*AFD_FINE) before the pass A max */
+#define AFD_RT_BACK2         140    /* retrace 2 (fallback): starts d*(this + steps_since_max*AFD_FINE) before it */
+#define AFD_RT_EXTRA         40     /* retrace 2 may run this much further */
 #define AFD_RT_THR1          90     /* retrace 1 landing: s >= this % of the pass A max */
 #define AFD_RT_THR2          80     /* retrace 2 */
-#define AFD_RT_SLACK         6      /* retrace: max steps = steps_since_max + this (+ AFD_RT_EXTRA/AFD_FINE per further retrace) */
+#define AFD_RT_SLACK         4      /* retrace: max steps = steps from its start to the pass A max + this (+ AFD_RT_EXTRA/AFD_FINE for retrace 2) */
 #define AFD_RT_FALL_PCT      80     /* retrace failed: after its max, a point below this % of it */
 #define AFD_PROBE_PCT        95     /* probe: < this % of g0 = wrong way, within +-5% = ambiguous */
-#define AFD_COARSE_STOP_PCT  75     /* coarse stop: one move below this % of best g ... */
+#define AFD_COARSE_STOP_PCT  80     /* coarse stop: one move below this % of best g ... */
 #define AFD_COARSE_DROP_PCT  90     /* ... or this many moves in a row below this % */
 #define AFD_COARSE_DROP_N    2
 #define AFD_FLAT_PCT         3      /* stop: |change| below this % ... */
@@ -7386,11 +7389,13 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_MAX_TRAVEL       1500   /* coarse phase, total |pulses| */
 #define AFD_MAX_COARSE       25     /* coarse phase moves (probes included) */
 #define AFD_DONE_TIMEOUT_MS  800
-#define AFD_MIN_BASE_MS      100
+#define AFD_MIN_BASE_MS      100    /* legacy wait floor, only calib/probe (afd_fast = 0) */
 #define AFD_MIN_PER_PULSE    2
 #define AFD_MIN_CAP_MS       700
+#define AFD_FRAME_DEF_MS     42     /* one LV frame at 23.98 fps; the run measures it (fps_get_current_x1000) */
+#define AFD_SPEED_DONE_MS    2500   /* speed test: FOCUS_DONE timeout (slow speeds) */
 #define AFD_MIN_S            2000   /* below this s0 the scene has no contrast: skip */
-#define AFD_FRAME_MS         45     /* one LV frame, between the two samples */
+#define AFD_FRAME_MS         45     /* legacy (calib/probe): between the two samples; the AF drive uses the measured frame */
 #define AFD_SETTLE_MS        90     /* after FOCUS_DONE */
 #define AFD_STABLE_PCT       5      /* two samples one frame apart differing by more than this %: lens still moving */
 #define AFD_STABLE_TRIES     3      /* ... re-sample after AFD_SETTLE_MS, at most this many tries */
@@ -7449,6 +7454,11 @@ static int afd_peak_g_pos, afd_fine_peak_pos;
 static uint32_t afd_last_g;   /* g of the last measurement (afd_move_ex) */
 static int afd_luma_pre, afd_nolv, afd_n_nodone, afd_n_err, afd_n_fast;
 static int afd_last_dir;     /* direction of the last non-zero move */
+static int afd_fast;          /* 1: AF drive / speed test timing (one frame after FOCUS_DONE, no floor); 0: legacy (calib/probe) */
+static int afd_frame_ms = AFD_FRAME_MS;   /* LV frame period: between the two samples, and the wait after FOCUS_DONE when afd_fast */
+static int afd_speed = AFD_SPEED;         /* speed byte of the move payload */
+static int afd_done_timeout = AFD_DONE_TIMEOUT_MS;
+static int afd_last_done_ms, afd_last_done_val;   /* FOCUS_DONE of the last move (-1 = none) */
 static uint32_t afd_best_s;
 static int afd_best_pos;
 static int afd_best_dir;     /* direction of travel when the best was measured */
@@ -7477,13 +7487,20 @@ static uint32_t afd_sample_pair(uint32_t *g_out, int *luma_out, uint32_t *s1_out
     int m1 = 0, m2 = 0, c = 0, x = 0;
     uint32_t g1 = 0, g2 = 0;
     uint32_t s1 = afdiag_sharpness_ex(&m1, &c, &x, &g1);
-    msleep(AFD_FRAME_MS);
+    msleep(afd_frame_ms);
     uint32_t s2 = afdiag_sharpness_ex(&m2, &c, &x, &g2);
     *g_out = (g1 + g2) / 2;
     *luma_out = (m1 + m2) / 2;
     *s1_out = s1;
     *s2_out = s2;
     return (s1 + s2) / 2;
+}
+
+/* one sample, no waiting */
+static uint32_t afd_sample_one(uint32_t *g_out, int *luma_out)
+{
+    int c = 0, x = 0;
+    return afdiag_sharpness_ex(luma_out, &c, &x, g_out);
 }
 
 static uint32_t afd_sample(uint32_t *g_out, int *luma_out)
@@ -7605,7 +7622,8 @@ static void afd_luma_probe(const char *tag)
 }
 
 /* Move by n pulses (0: just sample), settle, sample (sample=0: no
- * measurement, the line shows zeros); logs one line. track=1: the measurement
+ * measurement, the line shows zeros; 1: stable pair check; 2: one sample);
+ * logs one line (wait = ms after FOCUS_DONE, samp = ms of the sample, q = s*1000/g). track=1: the measurement
  * may become the best (position, direction of travel). Returns the sharpness,
  * or 0 after setting afd_aborted. */
 static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
@@ -7617,20 +7635,20 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
     }
     uint32_t g = 0;
     int luma = 0;
-    int done_val = 0, done_ms = -1, ret = 0;
+    int done_val = 0, done_ms = -1, ret = 0, wait_ms = 0, samp_ms = 0;
     if (n)
     {
         afd_last_dir = n > 0 ? 1 : -1;
-        uint8_t d[5] = { (uint8_t)((n >> 8) & 0xFF), (uint8_t)(n & 0xFF), AFD_SPEED, 0, 0 };
+        uint8_t d[5] = { (uint8_t)((n >> 8) & 0xFF), (uint8_t)(n & 0xFF), afd_speed, 0, 0 };
         int cnt0 = afdiag_focus_done_count;
         int t = get_ms_clock();
         afd_poll_t0 = t;
         ret = ((int (*)(int,int,int,const void *)) 0x38C4)(9, 1, 5, d);
         afd_pos += n;
         afd_travel += ABS(n);
-        int min_ms = AFD_MIN_BASE_MS + ABS(n) * AFD_MIN_PER_PULSE;
+        int min_ms = afd_fast ? 0 : AFD_MIN_BASE_MS + ABS(n) * AFD_MIN_PER_PULSE;
         if (min_ms > AFD_MIN_CAP_MS) min_ms = AFD_MIN_CAP_MS;
-        while (get_ms_clock() - t < AFD_DONE_TIMEOUT_MS)
+        while (get_ms_clock() - t < afd_done_timeout)
         {
             if (done_ms < 0 && afdiag_focus_done_count != cnt0)
             {
@@ -7639,10 +7657,14 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             }
             if (done_ms >= 0 && get_ms_clock() - t >= min_ms) break;
             if (afd_poll_on) { afd_poll_once(); msleep(AFP_POLL_MS); }
-            else msleep(10);
+            else msleep(afd_fast ? 4 : 10);
         }
-        afd_wait(AFD_SETTLE_MS + afd_extra_ms);
+        int tw = get_ms_clock();
+        afd_wait((afd_fast ? afd_frame_ms : AFD_SETTLE_MS) + afd_extra_ms);
+        wait_ms = get_ms_clock() - tw;
     }
+    afd_last_done_ms = done_ms;
+    afd_last_done_val = done_val;
     uint32_t s = 0;
     int lowluma = 0;
     if (sample && afd_luma_pre > 0 && !afd_luma_ok(afd_luma_now(), AFD_LOW_PCT))
@@ -7656,7 +7678,10 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
         }
     }
     int tries = 0;
-    if (sample) s = afd_sample_stable(&g, &luma, &tries);
+    int ts = get_ms_clock();
+    if (sample == 1) s = afd_sample_stable(&g, &luma, &tries);
+    else if (sample) { s = afd_sample_one(&g, &luma); tries = 1; }
+    samp_ms = get_ms_clock() - ts;
     afd_last_g = g;
     afd_moves += n ? 1 : 0;
     int f_nodone = n && done_ms < 0;
@@ -7665,13 +7690,14 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
     afd_n_nodone += f_nodone;
     afd_n_err += f_err;
     afd_n_fast += f_fast;
-    afd_log("%d %s %d %d %d %d %d %x %s%s%s%s%s %d ret%d dist=%d t=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
+    afd_log("%d %s %d %d %d %d %d %x %s%s%s%s%s %d ret%d dist=%d t=%d wait=%d samp=%d q=%d\n", get_ms_clock() - afd_t0, phase, n, afd_pos,
             (int) s, (int) g, luma, done_val,
             (f_nodone || f_err || f_fast || lowluma) ? "" : "-",
             f_nodone ? "nodone" : "", f_err ? (f_nodone ? "+err" : "err") : "",
             f_fast ? ((f_nodone || f_err) ? "+fast" : "fast") : "",
             lowluma ? ((f_nodone || f_err || f_fast) ? "+lowluma" : "lowluma") : "",
-            done_ms, ret, (int) lens_info.focus_dist, tries);
+            done_ms, ret, (int) lens_info.focus_dist, tries, wait_ms, samp_ms,
+            g ? (int) ((uint64_t) s * 1000 / g) : 0);
     if (sample && track && s > afd_best_s)
     {
         afd_best_s = s;
@@ -7683,7 +7709,7 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
 
 static uint32_t afd_move(const char *phase, int n)
 {
-    return afd_move_ex(phase, n, 1, 1);
+    return afd_move_ex(phase, n, 2, 1);   /* one sample: coarse phase */
 }
 
 /* Go to target so that the last movement is in approach_dir (+1/-1). If the
@@ -7693,16 +7719,16 @@ static uint32_t afd_move(const char *phase, int n)
  * equally, so the landing position does not depend on the backlash as long as
  * the leg is longer than it.  A long move already in approach_dir is a single
  * measured move.  Measures once at the target. */
-static uint32_t afd_goto(const char *phase, int target, int approach_dir, int track)
+static uint32_t afd_goto(const char *phase, int target, int approach_dir, int track, int sample)
 {
     int need = target - afd_pos;
     if (need == 0)   /* no move at all, so no direction change: the backlash state is the one we arrived with */
-        return afd_move_ex(phase, 0, 1, track);
+        return afd_move_ex(phase, 0, sample, track);
     if (need * approach_dir >= AFD_APPROACH)
-        return afd_move_ex(phase, need, 1, track);
+        return afd_move_ex(phase, need, sample, track);
     afd_move_ex("o", need - approach_dir * AFD_APPROACH, 0, 0);
     if (afd_aborted) return 0;
-    return afd_move_ex(phase, approach_dir * AFD_APPROACH, 1, track);
+    return afd_move_ex(phase, approach_dir * AFD_APPROACH, sample, track);
 }
 
 /* a < b * pct / 100 */
@@ -7734,7 +7760,7 @@ static int afd_retrace(int k, int thr_pct, uint32_t ref, int start, int d, int m
     int pi = -1, hit = 0;
     for (int i = 0; i < max_steps; i++)
     {
-        uint32_t s = afd_move_ex("r", d * AFD_FINE, 1, 0);
+        uint32_t s = afd_move_ex("r", d * AFD_FINE, 1, 0)   /* stable pair: the landing decision */;
         if (afd_aborted) return -1;
         if (s > pm) { pm = s; pi = i; }
         if (!afd_below(s, ref, thr_pct)) { hit = 1; pm = s; pi = i; break; }
@@ -7794,7 +7820,7 @@ static uint32_t afd_run(uint32_t *best_out)
     if (afd_below(gc, g0, AFD_PROBE_PCT))
     {
         d = -1;
-        afd_goto("p", -AFD_COARSE, -1, 0);
+        afd_goto("p", -AFD_COARSE, -1, 0, 2);
         cmoves++;
         if (afd_aborted) return 0;
         gc = afd_last_g;
@@ -7814,7 +7840,7 @@ static uint32_t afd_run(uint32_t *best_out)
         else
         {
             d = -1;
-            afd_goto("p", -AFD_COARSE, -1, 0);
+            afd_goto("p", -AFD_COARSE, -1, 0, 2);
             cmoves++;
             if (afd_aborted) return 0;
             gc = afd_last_g;
@@ -7844,10 +7870,11 @@ static uint32_t afd_run(uint32_t *best_out)
     afd_log("# coarse peak_g_pos=%d peak_g=%d g0=%d dir=%d moves=%d travel=%d\n",
             bgpos, (int) bg, (int) g0, d, cmoves, afd_travel);
 
-    /* 4. fine pass A on s, direction d, uniform steps: one unmeasured move back
-     * to bgpos - d*(COARSE + FINE_BACK), then measured d*FINE steps until s has
-     * dropped below FINE_DROP_PCT % of the max FINE_DROP_N times in a row after
-     * the max, or FINE_MAX points */
+    /* 4. fine pass A on s, direction d, uniform steps (one sample each): one
+     * unmeasured move back to bgpos - d*(COARSE + FINE_BACK), then measured
+     * d*FINE steps until s has dropped below FINE_DROP_PCT % of the max
+     * FINE_DROP_N times in a row after the max (once if the max is >=
+     * FINE_WELL_PCT % of the first point), or FINE_MAX points */
     int fpos[AFD_FINE_MAX];
     uint32_t fs[AFD_FINE_MAX];
     int n = 0, im = 0, below = 0;
@@ -7861,9 +7888,9 @@ static uint32_t afd_run(uint32_t *best_out)
             if (afd_aborted) return 0;
         }
         n = 0; im = 0; below = 0;
-        while (n < AFD_FINE_MAX && below < AFD_FINE_DROP_N)
+        while (n < AFD_FINE_MAX && below < ((n > 0 && (uint64_t) fs[im] * 100 >= (uint64_t) fs[0] * AFD_FINE_WELL_PCT) ? 1 : AFD_FINE_DROP_N))
         {
-            fs[n] = afd_move_ex("f", d * AFD_FINE, 1, 0);
+            fs[n] = afd_move_ex("f", d * AFD_FINE, 2, 0);
             fpos[n] = afd_pos;
             if (afd_aborted) return 0;
             if (n == 0 || fs[n] > fs[im]) { im = n; below = 0; }
@@ -7885,16 +7912,18 @@ static uint32_t afd_run(uint32_t *best_out)
     afd_best_pos = pmax;
     afd_log("# fineA max_s=%d max_idx=%d n=%d max_pos=%d\n", (int) fmax, im, n, pmax);
 
-    /* 5. retrace pass B (90 %), retrace 2 (80 %, starts AFD_RT_EXTRA earlier),
+    /* 5. retrace pass B (90 %, starts AFD_RT_BACK + steps_since_max*FINE before the max),
+     * retrace 2 (80 %, starts AFD_RT_BACK2 + ... before it),
      * then, failing both, go to the best point of retrace 2 without a threshold */
     int bidx = 0, start = 0;
     uint32_t land = 0;
     int hit = 0;
     for (int k = 1; k <= 2 && !hit; k++)
     {
-        start = pmax - d * (AFD_RT_BACK + AFD_RT_EXTRA * (k - 1));
+        int back = (k == 1 ? AFD_RT_BACK : AFD_RT_BACK2) + ssm * AFD_FINE;   /* start -> pass A max, in pulses */
+        start = pmax - d * back;
         hit = afd_retrace(k, k == 1 ? AFD_RT_THR1 : AFD_RT_THR2, fmax, start, d,
-                          ssm + AFD_RT_SLACK + (AFD_RT_EXTRA / AFD_FINE) * (k - 1), &bidx, &land);
+                          back / AFD_FINE + AFD_RT_SLACK + (AFD_RT_EXTRA / AFD_FINE) * (k - 1), &bidx, &land);
         afd_retraces = k;
         if (hit < 0) return 0;
     }
@@ -7905,7 +7934,7 @@ static uint32_t afd_run(uint32_t *best_out)
         if (afd_aborted) return 0;
         for (int i = 0; i <= bidx; i++)
         {
-            land = afd_move_ex("l", d * AFD_FINE, 1, 0);
+            land = afd_move_ex("l", d * AFD_FINE, 1, 0);   /* stable pair */
             if (afd_aborted) return 0;
         }
         afd_log("# retrace k=3 thr_pct=0 hit=0 s=%d\n", (int) land);
@@ -7959,7 +7988,7 @@ static void afd_calib_run(void)
     }
     static const char * const names[3] = { "u", "d", "u" };
     static const char * const titles[3] = { "up1", "down", "up2" };
-    uint32_t last = afd_goto("u", AFD_CAL_START, 1, 0);   /* overshoot leg "o" (unmeasured), then up to the start */
+    uint32_t last = afd_goto("u", AFD_CAL_START, 1, 0, 1);   /* overshoot leg "o" (unmeasured), then up to the start */
     if (afd_aborted) return;
     for (int pass = 0; pass < 3; pass++)
     {
@@ -7974,7 +8003,7 @@ static void afd_calib_run(void)
     }
     /* leave the lens in focus: back to the up2 peak (up1 if up2 has none), approaching +1 */
     int rp = afd_cal_peak_s[2] ? afd_cal_peak_pos[2] : afd_cal_peak_pos[0];
-    last = afd_goto("r", rp, 1, 0);
+    last = afd_goto("r", rp, 1, 0, 1);
     if (afd_aborted) return;
     afd_log("# calib_return pos=%d s=%d\n", afd_pos, (int) last);
 }
@@ -8046,18 +8075,53 @@ static void afd_probe_run(void)
     }
 }
 
-/* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe. */
+/* AF drive speed test: for each speed byte, +120 then -120 (net zero), with
+ * FOCUS_DONE time/value and s before and after logged in "# speedtest" lines.
+ * Only 0x07 is known to move the lens. */
+static const uint8_t afd_speed_tbl[8] = { 0x03, 0x05, 0x07, 0x09, 0x0B, 0x0F, 0x14, 0x1F };
+
+static void afd_speed_run(void)
+{
+    afd_move_ex("i", 0, 1, 0);
+    if (afd_aborted) return;
+    for (int k = 0; k < 8; k++)
+    {
+        afd_speed = afd_speed_tbl[k];
+        uint32_t sb = afd_move_ex("i", 0, 1, 0);
+        if (afd_aborted) return;
+        uint32_t sp = afd_move_ex("v", 120, 1, 0);
+        if (afd_aborted) return;
+        afd_log("# speedtest speed=%x dir=1 done_ms=%d done_val=%x s_before=%d s_after=%d\n",
+                afd_speed, afd_last_done_ms, afd_last_done_val, (int) sb, (int) sp);
+        uint32_t sm = afd_move_ex("v", -120, 1, 0);
+        if (afd_aborted) return;
+        afd_log("# speedtest speed=%x dir=-1 done_ms=%d done_val=%x s_before=%d s_after=%d\n",
+                afd_speed, afd_last_done_ms, afd_last_done_val, (int) sp, (int) sm);
+    }
+    afd_speed = AFD_SPEED;
+}
+
+/* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe, 3 speed test. */
 /* The AF drive engine: everything after the preconditions and the menu
  * wait.  The caller owns afdiag_afdrive_busy and has checked LV / AF mode.
- * mode: 0 AF drive, 1 calib, 2 probe.  flags: AFD_F_QUIET suppresses the
+ * mode: 0 AF drive, 1 calib, 2 probe, 3 speed test.  flags: AFD_F_QUIET suppresses the
  * NotifyBoxes (for Auto refocus); AFD_F_REC is reserved for running while
  * recording (not handled yet: callers must not set it).  Returns the landing
  * sharpness as % of the best (AF drive), 0 for calib/probe, -1 if aborted. */
 static int afd_engine(int mode, int flags)
 {
-    int calib = (mode == 1), probe = (mode == 2);
-    const char *name = probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
+    int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
+    const char *name = speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     int ret_pct = 0;
+    afd_fast = !calib && !probe;
+    afd_speed = AFD_SPEED;
+    afd_done_timeout = speedt ? AFD_SPEED_DONE_MS : AFD_DONE_TIMEOUT_MS;
+    afd_frame_ms = AFD_FRAME_MS;
+    if (afd_fast)
+    {
+        int fps = fps_get_current_x1000();
+        afd_frame_ms = fps > 5000 ? COERCE(1000000 / fps + 1, 20, 100) : AFD_FRAME_DEF_MS;
+    }
     afd_len = 0;
     afd_pos = 0;
     afd_moves = 0;
@@ -8099,9 +8163,11 @@ static int afd_engine(int mode, int flags)
     static const uint8_t open_s[16] = { 0x02 };
     int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
     afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d\n",
-            probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
+            speedt ? "AFSPEED" : probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
             (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now);
-    if (probe)
+    if (speedt)
+        afd_log("# speeds=3,5,7,9,b,f,14,1f moves=120,-120 done_timeout=%d frame=%d\n", afd_done_timeout, afd_frame_ms);
+    else if (probe)
         afd_log("# speed=%d moves=20,20,20,40,40,120,-120,-40,-20,-20 extra_settle=%d poll_ms=%d "
                 "min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
                 AFD_SPEED, AFP_EXTRA_MS, AFP_POLL_MS, AFD_MIN_BASE_MS, AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS,
@@ -8114,13 +8180,14 @@ static int afd_engine(int mode, int flags)
     else
         afd_log("# speed=%d coarse=%d fine=%d approach=%d probe_pct=%d coarse_stop_pct=%d coarse_drop_pct=%d coarse_drop_n=%d "
                 "flat_pct=%d flat_n=%d max_travel=%d max_total=%d max_coarse=%d fine_back=%d fine_max=%d fine_drop_pct=%d "
-                "rt_back=%d rt_thr=%d/%d rt_extra=%d rt_slack=%d done_timeout=%d min_ms=%d+%d*|n|(cap %d) frame=%d settle=%d\n",
+                "fine_drop_n=%d fine_well_pct=%d rt_back=%d rt_back2=%d rt_thr=%d/%d rt_extra=%d rt_slack=%d rt_fall_pct=%d "
+                "done_timeout=%d wait=frame(%d) fast=%d settle=%d stable_pct=%d stable_tries=%d\n",
                 AFD_SPEED, AFD_COARSE, AFD_FINE, AFD_APPROACH, AFD_PROBE_PCT, AFD_COARSE_STOP_PCT,
                 AFD_COARSE_DROP_PCT, AFD_COARSE_DROP_N, AFD_FLAT_PCT, AFD_FLAT_N, AFD_MAX_TRAVEL, AFD_MAX_TOTAL, AFD_MAX_COARSE,
-                AFD_FINE_BACK, AFD_FINE_MAX, AFD_FINE_DROP_PCT, AFD_RT_BACK, AFD_RT_THR1, AFD_RT_THR2, AFD_RT_EXTRA,
-                AFD_RT_SLACK, AFD_DONE_TIMEOUT_MS, AFD_MIN_BASE_MS,
-                AFD_MIN_PER_PULSE, AFD_MIN_CAP_MS, AFD_FRAME_MS, AFD_SETTLE_MS);
-    afd_log("# ms phase cmd pos s g luma done_val flags done_ms ret dist\n");
+                AFD_FINE_BACK, AFD_FINE_MAX, AFD_FINE_DROP_PCT, AFD_FINE_DROP_N, AFD_FINE_WELL_PCT, AFD_RT_BACK, AFD_RT_BACK2,
+                AFD_RT_THR1, AFD_RT_THR2, AFD_RT_EXTRA, AFD_RT_SLACK, AFD_RT_FALL_PCT,
+                AFD_DONE_TIMEOUT_MS, afd_frame_ms, afd_fast, AFD_SETTLE_MS, AFD_STABLE_PCT, AFD_STABLE_TRIES);
+    afd_log("# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q\n");
     afd_luma_probe("pre_monopen_or_session");
 
     int r_open = send(9, 0x25, 16, open_s);
@@ -8135,6 +8202,7 @@ static int afd_engine(int mode, int flags)
     {
         if (!afd_aborted) afd_nolv = 1;
     }
+    else if (speedt) afd_speed_run();
     else if (probe) afd_probe_run();
     else if (calib) afd_calib_run();
     else
@@ -8158,7 +8226,10 @@ static int afd_engine(int mode, int flags)
     const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_aborted ? "1" : "0";
     afd_poll_on = 0;
     afd_extra_ms = 0;
-    if (probe)
+    afd_speed = AFD_SPEED;
+    afd_fast = 0;
+    afd_done_timeout = AFD_DONE_TIMEOUT_MS;
+    if (probe || speedt)
         afd_log("# RESULT aborted=%s moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
                 ab, afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
     else if (calib)
@@ -8177,7 +8248,7 @@ static int afd_engine(int mode, int flags)
     {
         if (!is_dir(AFDIAG_LOG_DIR))
             FIO_CreateDirectory(AFDIAG_LOG_DIR);
-        FILE *f = FIO_CreateFileOrAppend(probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE);
+        FILE *f = FIO_CreateFileOrAppend(speedt ? AFV_LOG_FILE : probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE);
         if (f)
         {
             FIO_WriteFile(f, afd_buf, afd_len);
@@ -8192,7 +8263,9 @@ static int afd_engine(int mode, int flags)
 
     if (!(flags & AFD_F_QUIET))
     {
-        if (probe)
+        if (speedt)
+            NotifyBox(6000, "AF speed test %s: %d moves %dms, log AFSPEED.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
+        else if (probe)
             NotifyBox(6000, "AF probe %s: %d moves %dms, log AFPROBE.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
         else if (calib)
             NotifyBox(6000, "AF calib %s: peak up1=%d down=%d up2=%d backlash_est=%d",
@@ -8208,8 +8281,8 @@ static int afd_engine(int mode, int flags)
 
 static void afd_task_common(int mode)
 {
-    int calib = (mode == 1), probe = (mode == 2);
-    const char *name = probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
+    int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
+    const char *name = speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
     afdiag_afdrive_busy = 1;
 
@@ -8250,6 +8323,19 @@ static void afdiag_afprobe_task(void *unused)
 {
     (void) unused;
     afd_task_common(2);
+}
+
+static void afdiag_afspeed_task(void *unused)
+{
+    (void) unused;
+    afd_task_common(3);
+}
+
+static MENU_SELECT_FUNC(afdiag_afspeed_select)
+{
+    (void) priv;
+    (void) delta;
+    task_create("afdiag_afspeed", 0x1e, 0x3000, afdiag_afspeed_task, (void*)0);
 }
 
 static MENU_SELECT_FUNC(afdiag_afdrive_select)
@@ -8370,6 +8456,14 @@ static struct menu_entry afdiag_menu[] = {
         .help      = "DIAGNOSTIC: find the MPU RAM word that holds the real focus motor position.",
         .help2     = "Moves +20 x3, +40 x2, +120, -120, -40, -20 x2 and logs the MPU words (0xFFF81B78..) that change.\n"
                      "Needs the MPU monitor (opened if OFF). Same conditions as AF drive. Log: ML/LOGS/AFPROBE.LOG.",
+    },
+    {
+        .name      = "AF drive speed test",
+        .select    = afdiag_afspeed_select,
+        .icon_type = IT_DICE,
+        .help      = "DIAGNOSTIC: does a speed byte faster than 0x07 move the lens?",
+        .help2     = "For speed 03,05,07,09,0B,0F,14,1F moves +120 then -120 and logs FOCUS_DONE time/value and the\n"
+                     "sharpness before/after. Same conditions as AF drive. Log: ML/LOGS/AFSPEED.LOG.",
     },
 };
 
