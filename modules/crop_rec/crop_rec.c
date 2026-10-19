@@ -9047,6 +9047,14 @@ static uint32_t afd_run_local(uint32_t *best_out)
         afd_path_local = 0;
         return afd_run_sweep(best_out, 0);
     }
+    if (!dir && zoom_ok && afd_below(smax, afd_last_land_s, 70))
+    {
+        /* no side is better, but we are well below the last landing: a blurry
+         * plateau, not focus -> full search instead of locking onto blur */
+        afd_log("# local: flat but below 70pct of the last landing -> B\n");
+        afd_path_local = 0;
+        return afd_run_sweep(best_out, 0);
+    }
     if (!dir)
     {
         uint32_t se = afd_move_ex("w", p1, 1, 0);   /* back to the start */
@@ -13214,6 +13222,9 @@ static void aref_step(void)
     if (mpu_m)
     {
         dwell += AREF_MPU_DWELL_EXTRA_MS;
+        /* the scene-hold penalty decays 45 s after the last hold */
+        if (aref_mpu_pen && aref_mpu_hold_until && now - aref_mpu_hold_until > 45000)
+            aref_mpu_pen = 0;
         pct = MAX(20, pct - aref_mpu_pen);
     }
     int gate = 0;
