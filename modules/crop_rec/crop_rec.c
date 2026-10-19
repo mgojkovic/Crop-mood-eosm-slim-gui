@@ -7659,6 +7659,7 @@ static int afd_rec_run = 0, afd_rec_state0 = 0;
 #define AFD_NOPEAK_PCT       115   /* pass A max below this % of its min = no real peak */
 static int afd_deadline = 0, afd_timeout = 0, afd_nopeak = 0, afd_run_dir = 1;
 static volatile int afd_nopeak_last = 0;   /* result of the last afd_engine AF drive, for Auto refocus */
+static volatile int afd_searched_last = 0;   /* the last AF drive run really ran (moved or judged the scene) */
 static int afd_rec_state(void)
 {
     return (RECORDING ? 1 : 0) | (RECORDING_RAW ? 2 : 0) | (mlv_raw_rec_busy() ? 4 : 0);
@@ -10134,7 +10135,7 @@ static int afd_engine(int mode, int flags)
             afd_deadline = 0;
             if (!best) best = afd_best_s;
             pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
-            ret_pct = afd_nopeak ? -1 : pct;   /* no peak found = no focus: a failure for Auto refocus */
+            ret_pct = (afd_nopeak || afd_lowcontrast) ? -1 : pct;   /* no peak / no texture = no focus: a failure for Auto refocus */
         }
         if (!afd_mon_stale) break;
         /* self-heal: the MPU rejected the first move, the monitor is no longer effective */
@@ -10179,7 +10180,7 @@ static int afd_engine(int mode, int flags)
         if (afd_must_abort()) { afd_aborted = 1; break; }
     }
     afd_deadline = 0;
-    if (mode == 0) afd_nopeak_last = afd_nopeak;
+    if (mode == 0) { afd_nopeak_last = afd_nopeak; afd_searched_last = afd_moves > 0 || afd_lowcontrast; }
     int total_ms = get_ms_clock() - afd_t0;
 
     /* always: stop, close the session (Session close ON / Restore), close the monitor.  Sharpness samples (RAM only)
@@ -13066,7 +13067,7 @@ static int aref_mpu_notified = 0;
 #define AREF_SW_N                8     /* window samples kept (200 ms apart) */
 #define AREF_SCENE_LUMA_PCT      25
 #ifndef AREF_MIN_G
-#define AREF_MIN_G               30000
+#define AREF_MIN_G               12000   /* ex-scale g of the remembered in-focus peak; in-focus subjects seen down to ~11-15k */
 #endif
 #define AREF_FAILED_MS           20000
 #define AREF_FAIL_LUMA_PCT       20
@@ -13116,6 +13117,7 @@ static void aref_mpu_exec(int fl)
     int t0 = get_ms_clock();
     int pct = -1;
     afd_nopeak_last = 0;   /* a skipped/refused run must not count as "no peak" */
+    afd_searched_last = 0;
     aref_mpu_path = 0;
     aref_mpu_land = 0;
     aref_mpu_ep2 = 0;
@@ -13570,8 +13572,9 @@ static int aref_eval(int now, int sens, int mpu_m)
         }
         if (!gate && mpu_m)
         {
-            uint32_t tex = path == 2 ? gsum : aref_ref_g;
-            if (tex < AREF_MIN_G) gate = 10;
+            /* texture gate only on the remembered in-focus peak: a blurred
+             * textured scene (path 2, no usable peak) sits at the blur floor */
+            if (path != 2 && aref_ref_g && aref_ref_g < AREF_MIN_G) gate = 10;
             else if (fs_same)
             {
                 gate = 11;
@@ -13633,9 +13636,9 @@ static void aref_mpu_finish(int now)
         }
     }
     aref_drop_ref(now, AREF_SETTLE_MS, 0);
-    if (aref_mpu_pct < 0)
+    if (aref_mpu_pct < 0 && afd_searched_last)
     {
-        /* nopeak / lowtexture / abort: remember what the scene looked like, no new run on the same picture */
+        /* nopeak / lowtexture after a real search (not a skipped run): remember what the scene looked like, no new run on the same picture */
         int m = 0, c = 0, x = 0;
         uint32_t g = 0;
         uint32_t s = afdiag_sharpness_ex(&m, &c, &x, &g);
@@ -14155,6 +14158,7 @@ static void aref_test_task(void *unused)
         NotifyBox(4000, "Refocus test: needs AF drive monitor = Keep open");
         return;
     }
+    if (afdiag_afdrive_busy || afd_wk_req) { NotifyBox(3000, "Refocus test: AF busy"); return; }
     afdiag_afdrive_busy = 1;
     NotifyBox(3000, "Refocus test: close menu, starts in 2 s");
     msleep(1500);
