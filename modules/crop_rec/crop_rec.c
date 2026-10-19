@@ -127,6 +127,7 @@ CONFIG_INT("crop.button_INFO",      INFO_button, 0);
 CONFIG_INT("crop.auto_refocus", Auto_refocus, 0); /* EOS M slim: 0=OFF, 1=ON, 2=ON + REC */
 CONFIG_INT("crop.auto_refocus_sens", Auto_refocus_sens, 1); /* EOS M slim: 0=Low, 1=Medium, 2=High */
 CONFIG_INT("crop.auto_refocus_method", Auto_refocus_method, 0); /* EOS M slim: 0=Canon AF, 1=MPU drive (not recording) */
+CONFIG_INT("crop.auto_refocus_mpu_rec", Auto_refocus_mpu_rec, 0); /* EOS M slim: MPU drive refocus while RAW recording: 0=OFF, 1=ON */
 CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10, 3=AF assist */
 CONFIG_INT("crop.arrows_U_D",       Arrows_U_D, 3); /* ISO */
 CONFIG_INT("crop.more_hacks",       more_hacks, 1);
@@ -5971,8 +5972,19 @@ static struct menu_entry slim_info_button_menu[] = {
         .edit_mode = EM_INLINE_ADJUST,
         .icon_type = IT_DICE,
         .help      = "How Auto refocus moves the lens. Canon: half-press AF. MPU drive: ML's own AF drive.",
-        .help2     = "MPU drive only while not recording (Canon AF is used while recording). Needs AF drive\n"
+        .help2     = "While recording Canon AF is used unless 'MPU drive while recording' is ON. Needs AF drive\n"
                      "monitor = Keep open: the first refocus opens it (LV dark ~2 s).",
+    },
+    {
+        .name      = "MPU drive while recording",
+        .priv      = &Auto_refocus_mpu_rec,
+        .max       = 1,
+        .choices   = CHOICES("OFF", "ON"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_BOOL,
+        .help      = "Auto refocus + Refocus method MPU drive: also use the MPU drive during RAW recording.",
+        .help2     = "Needs ON + REC and the MPU monitor already open (Keep open); otherwise Canon AF is used for\n"
+                     "that refocus. Never opens/closes the monitor or writes the card while recording.",
     },
 };
 
@@ -7460,7 +7472,7 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFP_POLL_MS          30
 
 static volatile int afdiag_afdrive_busy = 0;
-static int afdiag_afalgo = 1;        /* AF algorithm: 0 A Stepwise, 1 B Sweep (default) .. 5 F Predictive */
+static int afdiag_afalgo = 1;        /* AF algorithm menu index: 0 A Stepwise, 1 B Sweep (default), 2 D, 3 E, 4 F (see afd_algo_menu_tbl; C is not offered) */
 static int afdiag_afdrive_mon = 2;   /* 0 OFF, 1 ON (open/close per run), 2 keep open after the first run */
 /* MPU monitor left open by "Keep open": MpuMonOpen = (8,3) to the MPU, which
  * re-initialises its lens engine (LV dark ~2 s) and is what lets (9,1) moves
@@ -7505,7 +7517,8 @@ static int afd_speed = AFD_SPEED;         /* speed byte of the move payload */
 static int afd_unm_fast = 0;              /* 1: unmeasured moves (sample = 0) use AFD_SPEED_FAST */
 static int afd_meas_full = 0;             /* 1: afd_measure also computes s2, s4, band (sweep record), at stride 2 */
 static int afd_sw_speed = AFD_SPEED_FAST; /* B/C sweep speed ("Sweep speed" setting, or the bench's B07/B14/B1F) */
-static int afdiag_afsweepspd = 2;         /* 0 07, 1 14, 2 1F */
+static int afdiag_afsweepspd = 0;         /* 0 07 (default), 1 14, 2 1F */
+static const uint8_t afd_algo_menu_tbl[5] = { 0, 1, 3, 4, 5 };   /* menu index -> afd_algo_cur (2 = C is kept in the code only) */
 static const uint8_t afd_sw_speed_tbl[3] = { AFD_SPEED, AFD_SPEED_MID, AFD_SPEED_FAST };
 
 /* max |pulses| of one command at this speed byte */
@@ -7519,6 +7532,26 @@ static int afd_mon_stale = 0;   /* the first move of the run was rejected (monit
 static uint32_t afd_best_s;
 static int afd_best_pos;
 static int afd_best_dir;     /* direction of travel when the best was measured */
+/* end stop detection (see afd_endstop_hit) and B's landing safety nets */
+#define AFD_ENDSTOP_MIN      40     /* end stop: only moves of at least this many pulses count ... */
+#define AFD_ENDSTOP_PCT      2      /* ... when neither s nor g changed by more than this % ... */
+#define AFD_ENDSTOP_FAST_MS  40     /* ... and FOCUS_DONE had bit 0x1000 or came sooner than this */
+#define AFD_FLAT_RT_N        4      /* retrace: this many steps in a row within +-AFD_FLAT_RT_PCT % of each other ... */
+#define AFD_FLAT_RT_PCT      3
+#define AFD_FLAT_RT_REF_PCT  60     /* ... and below this % of the reference = flat floor, abort the retrace */
+static int afd_endstop_dir = 0;     /* direction of the last move judged an end stop (0 = none this run) */
+static uint32_t afd_base_s, afd_base_g;   /* s / g after the previous measured move */
+static int afd_base_ok = 0;         /* afd_base_* valid: no unmeasured or tracked move since */
+static int afd_land_flat = 0;       /* the last landing retrace was aborted on a flat floor */
+static int afd_flat_det = 0;        /* flat floor detection on (B's landing, before its one re-sweep) */
+static int afd_resweep_used = 0;    /* B has used its one re-sweep this run */
+
+/* |a - b| <= pct % of b */
+static int afd_close(uint32_t a, uint32_t b, int pct)
+{
+    uint32_t d = a > b ? a - b : b - a;
+    return (uint64_t) d * 100 <= (uint64_t) b * pct;
+}
 
 /* NOTE: ML snprintf lacks the char conversion and mishandles the percent escape: the AFD/AFS/calib log text
  * uses only %d, %x and plain %s, percentages are written as name_pct=N. */
@@ -8044,6 +8077,23 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             lowluma ? ((f_nodone || f_err || f_fast) ? "+lowluma" : "lowluma") : "",
             done_ms, ret, (int) lens_info.focus_dist, tries, wait_ms, samp_ms,
             g ? (int) ((uint64_t) s * 1000 / g) : 0);
+    if (!sample)
+    {
+        if (n) afd_base_ok = 0;   /* an unmeasured move: the next one has no baseline */
+    }
+    else
+    {
+        /* end stop: a long move changed nothing and FOCUS_DONE flagged an error (or came at once) */
+        if (n && ABS(n) >= AFD_ENDSTOP_MIN && afd_base_ok && (f_err || f_fast) && s &&
+            afd_close(s, afd_base_s, AFD_ENDSTOP_PCT) && afd_close(g, afd_base_g, AFD_ENDSTOP_PCT))
+        {
+            afd_endstop_dir = n > 0 ? 1 : -1;
+            afd_log("# endstop dir=%d\n", afd_endstop_dir);
+        }
+        afd_base_s = s;
+        afd_base_g = g;
+        afd_base_ok = 1;
+    }
     if (sample && track && s > afd_best_s)
     {
         afd_best_s = s;
@@ -8104,7 +8154,8 @@ static int afd_retrace(int k, int thr_pct, uint32_t ref, int start, int d, int m
         if (afd_aborted) return -1;
     }
     uint32_t pm = 0;
-    int pi = -1, hit = 0;
+    int pi = -1, hit = 0, flat = 0;
+    uint32_t last[AFD_FLAT_RT_N];
     for (int i = 0; i < max_steps; i++)
     {
         uint32_t s = afd_move_ex("r", d * AFD_FINE, afd_rt_sample, 0)   /* A: stable pair, the landing decision */;
@@ -8112,8 +8163,21 @@ static int afd_retrace(int k, int thr_pct, uint32_t ref, int start, int d, int m
         if (s > pm) { pm = s; pi = i; }
         if (!afd_below(s, ref, thr_pct)) { hit = 1; pm = s; pi = i; break; }
         if (i > pi && afd_below(s, pm, AFD_RT_FALL_PCT)) break;
+        last[i % AFD_FLAT_RT_N] = s;
+        if (afd_flat_det && i + 1 >= AFD_FLAT_RT_N)
+        {
+            /* flat floor: the last AFD_FLAT_RT_N steps all within +-3 % of each other and far below the reference */
+            uint32_t hi = 0, lo = 0xFFFFFFFFu;
+            for (int j = 0; j < AFD_FLAT_RT_N; j++)
+            {
+                if (last[j] > hi) hi = last[j];
+                if (last[j] < lo) lo = last[j];
+            }
+            if (afd_close(hi, lo, AFD_FLAT_RT_PCT) && afd_below(hi, ref, AFD_FLAT_RT_REF_PCT)) { flat = 1; break; }
+        }
     }
-    afd_log("# retrace k=%d thr_pct=%d hit=%d s=%d\n", k, thr_pct, hit, (int) pm);
+    afd_log("# retrace k=%d thr_pct=%d hit=%d s=%d%s\n", k, thr_pct, hit, (int) pm, flat ? " flat=1" : "");
+    if (flat) afd_land_flat = 1;
     *bidx = pi;
     *s_out = pm;
     return hit;
@@ -8476,6 +8540,7 @@ struct afd_sw
     int n, imax, peak;
     uint32_t smax, smin, smax_ex;
     int t_pk, moved, pos_pk, over;   /* ms, then pulses from the sweep start */
+    int endstop;                     /* the sweep did not change s or g: lens end stop in this direction */
 };
 
 /* One tracked move of dir*len with a stop callback, then the model and the peak analysis.
@@ -8494,6 +8559,7 @@ static void afd_sweep(const char *tag, int dir, int len, int speed, afd_stop_fn 
     afd_track_min_ms = 0;
     afd_moves++;
     afd_last_dir = dir;
+    afd_base_ok = 0;   /* position after a tracked move is an estimate: no end stop baseline */
     w->n = n;
     if (w->r.aborted) return;
     /* end of motion by s stability (only used when the move was not stopped) */
@@ -8513,13 +8579,24 @@ static void afd_sweep(const char *tag, int dir, int len, int speed, afd_stop_fn 
     int end_t = w->r.stop_ms >= 0 ? w->r.stop_ms + AFD_SW_COAST_MS : (t_stab >= 0 ? MAX(t_stab, t_exp) : t_exp);
     int moved = COERCE((end_t - AFD_SW_LAT_MS) * 10 / mspp, 0, len);
     afd_pos -= dir * (len - moved);
-    uint32_t smax = 0, smin = 0xFFFFFFFFu;
+    uint32_t smax = 0, smin = 0xFFFFFFFFu, gmx = 0, gmn = 0xFFFFFFFFu;
     int imax = 0;
     for (int i = 0; i < n; i++)
     {
-        uint32_t s = afd_sw_samp[i].m.s1;
+        uint32_t s = afd_sw_samp[i].m.s1, g = afd_sw_samp[i].m.g;
         if (s > smax) { smax = s; imax = i; }
         if (s < smin) smin = s;
+        if (g > gmx) gmx = g;
+        if (g < gmn) gmn = g;
+    }
+    /* end stop: a long sweep with flat s and g, and FOCUS_DONE flagged an error or came at once */
+    if (len >= AFD_ENDSTOP_MIN && n >= 2 && smax &&
+        afd_close(smax, smin, AFD_ENDSTOP_PCT) && afd_close(gmx, gmn, AFD_ENDSTOP_PCT) &&
+        ((w->r.done_val & 0x1000) || (w->r.done_ms >= 0 && w->r.done_ms < AFD_ENDSTOP_FAST_MS)))
+    {
+        w->endstop = 1;
+        afd_endstop_dir = dir;
+        afd_log("# endstop dir=%d\n", dir);
     }
     int tpk = n ? afd_sw_samp[imax].t_ms : 0;
     if (imax > 0 && imax < n - 1)
@@ -8588,16 +8665,21 @@ static int afd_start(uint32_t *s0_out, uint32_t *g0_out)
 static int afd_probe_dir(uint32_t g0, uint32_t *s_out, int go_back)
 {
     int d = 1;
+    afd_endstop_dir = 0;
     *s_out = afd_move("p", AFD_COARSE);
     if (afd_aborted) return 0;
     uint32_t gc = afd_last_g;
-    if (afd_below(gc, g0, AFD_PROBE_PCT))
+    if (afd_endstop_dir)
+        d = -afd_endstop_dir;   /* the probe ran into an end stop: the other way */
+    else if (afd_below(gc, g0, AFD_PROBE_PCT))
         d = -1;
     else if (!((uint64_t) gc * 100 > (uint64_t) g0 * (200 - AFD_PROBE_PCT)))
     {
         *s_out = afd_move("p", AFD_COARSE);
         if (afd_aborted) return 0;
-        if (!((uint64_t) afd_last_g * 100 > (uint64_t) gc * 105))
+        if (afd_endstop_dir)
+            d = -afd_endstop_dir;
+        else if (!((uint64_t) afd_last_g * 100 > (uint64_t) gc * 105))
             d = -1;
     }
     if (d < 0 && go_back)
@@ -8627,6 +8709,7 @@ static uint32_t afd_land_steps_i(int d, int start, int back, uint32_t ref)
                           back / AFD_FINE + AFD_RT_SLACK + (AFD_RT_EXTRA / AFD_FINE) * (k - 1), &bidx, &land);
         afd_retraces = k;
         if (hit < 0) return 0;
+        if (afd_land_flat) return 0;   /* the caller decides (B: one re-sweep) */
     }
     if (!hit)
     {
@@ -8648,25 +8731,22 @@ static uint32_t afd_land_steps_i(int d, int start, int back, uint32_t ref)
 static uint32_t afd_land_steps(int d, int start, int back, uint32_t ref)
 {
     afd_rt_sample = 2;
+    afd_land_flat = 0;
     uint32_t r = afd_land_steps_i(d, start, back, ref);
     afd_rt_sample = 1;
     return r;
 }
 
-/* B and C (cmode = 1): probe, a tracked sweep of up to AFD_SW_CHUNKS chunks (each afd_chunk(speed) pulses at
- * the sweep speed, default 1F; the next chunk goes on in the same direction when no peak was found),
- * then a feedback landing.  At 1F the s peak is only 1-2 frames wide: the sweep max is the maximum over
- * the per-frame samples of all chunks, the landing is by feedback (unmeasured back move past the peak
- * region, then AFD_FINE steps at 07 until >= 90 % of the sweep max). */
-static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
+/* The sweep part of B: from pos0, a tracked sweep of up to AFD_SW_CHUNKS chunks (each afd_chunk(spd) pulses
+ * at speed spd; the next chunk goes on in the same direction when no peak was found), first in direction d,
+ * then, once, the other way.  A sweep that ends at a lens end stop (afd_sweep: nothing changed) is not
+ * continued: B goes to the other direction.  Returns 1 with the peak (ref = s at the peak in the
+ * afdiag_sharpness_ex scale, pk = its position, *dir_out = the sweep direction), 0 = no peak (afd_nopeak
+ * set, ref = the sweep max) or abort (afd_aborted). */
+static int afd_sweep_find(int pos0, int d, int spd, int *dir_out, uint32_t *ref_out, int *pk_out)
 {
-    uint32_t s0, g0, sp;
-    if (!afd_start(&s0, &g0)) return afd_aborted ? 0 : s0;
-    int pos0 = afd_pos;
-    int d = afd_probe_dir(g0, &sp, 0);
-    if (!d) return 0;
     struct afd_sw w;
-    int spd = afd_sw_speed, chunk = afd_chunk(spd);
+    int chunk = afd_chunk(spd);
     int dir = d, other = 0, found = 0;
     int target = pos0 - d * AFD_SW_PRE;   /* sweep start: a little before the start, in direction d */
     uint32_t gmax = 0, gmax_ex = 0, gmin = 0xFFFFFFFFu;
@@ -8679,7 +8759,8 @@ static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
             if (afd_aborted) return 0;
         }
         gmax = 0; gmax_ex = 0; gmin = 0xFFFFFFFFu; gpk = 0;
-        for (int k = 0; k < AFD_SW_CHUNKS && !found; k++)
+        int stopped = 0;
+        for (int k = 0; k < AFD_SW_CHUNKS && !found && !stopped; k++)
         {
             afd_sw_max0 = gmax;
             afd_sweep("sweep", dir, chunk, spd, afd_sw_stop, &w);
@@ -8691,46 +8772,88 @@ static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
             }
             found = w.n >= 3 && gmax_ex >= AFD_MIN_S && (uint64_t) gmax * 100 >= (uint64_t) gmin * AFD_NOPEAK_PCT &&
                     afd_below(afd_sw_samp[w.n - 1].m.s1, gmax, AFD_SW_FALL_END_PCT);
+            if (w.endstop) stopped = 1;   /* do not push on into the end stop */
         }
         if (found) break;
         if (!other) { other = 1; dir = -d; target = pos0 + d * AFD_SW_PRE; continue; }   /* then the other way, once */
         afd_nopeak = 1;
         afd_log("# nopeak sweep smax=%d smin=%d\n", (int) gmax, (int) gmin);
-        *best_out = gmax_ex;
+        *ref_out = gmax_ex;
         return 0;
     }
-    uint32_t ref = gmax_ex;
-    int pk = gpk;
-    afd_log("# sweep peak dir=%d chunks_max=%d spd=%x pk=%d ref=%d pos=%d\n", dir, AFD_SW_CHUNKS, spd, pk, (int) ref, afd_pos);
-    int start = pk - dir * AFD_SW_MARGIN;
-    afd_best_s = ref;
-    afd_best_pos = pk;
-    afd_fine_peak_pos = pk;
-    afd_run_dir = dir;
-    uint32_t land = 0;
-    if (!cmode)
-        land = afd_land_steps(dir, start, AFD_SW_MARGIN + AFD_SW_ERR, ref);
-    else
+    *dir_out = dir;
+    *ref_out = gmax_ex;
+    *pk_out = gpk;
+    return 1;
+}
+
+/* B and C (cmode = 1): probe, the sweep (afd_sweep_find; default speed 07, the setting), then a feedback landing
+ * (unmeasured back move past the peak region, then AFD_FINE steps at 07 until >= 90 % of the sweep max).
+ * If the landing retrace walks on a flat floor (afd_retrace: the peak is not where the sweep put it), one fresh
+ * 07 sweep from the current position follows (original direction first), then the landing again. */
+static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
+{
+    uint32_t s0, g0, sp;
+    if (!afd_start(&s0, &g0)) return afd_aborted ? 0 : s0;
+    int pos0 = afd_pos;
+    int d = afd_probe_dir(g0, &sp, 0);
+    if (!d) return 0;
+    int spd = afd_sw_speed, dir = d, pk = 0;
+    uint32_t ref = 0;
+    if (!afd_sweep_find(pos0, d, spd, &dir, &ref, &pk))
     {
-        afd_move_ex("o", start - afd_pos, 0, 0);   /* back move past the peak, unmeasured */
-        if (afd_aborted) return 0;
-        afd_c_thr = (uint32_t) ((uint64_t) gmax * AFD_C_STOP_PCT / 100);
-        struct afd_sw lw;
-        afd_sweep("cland", dir, AFD_C_LEN, AFD_SPEED, afd_c_stop, &lw);
-        if (afd_aborted) return 0;
-        uint32_t se = afd_move_ex("i", 0, 1, 0);
-        if (afd_aborted) return 0;
-        int ok = lw.r.stop_ms >= 0 && !afd_below(se, ref, AFD_C_OK_PCT);
-        afd_log("# cland stop_ms=%d done_ms=%d thr=%d settled_s=%d ref=%d ok=%d\n",
-                lw.r.stop_ms, lw.r.done_ms, (int) afd_c_thr, (int) se, (int) ref, ok);
-        if (ok)
-            land = se;
-        else if (lw.r.stop_ms >= 0)
-            land = afd_land_steps(dir, afd_pos - dir * AFD_RT_BACK, AFD_RT_BACK, ref);   /* stopped too early: B's retrace */
-        else
-            land = afd_land_steps(dir, start, AFD_SW_MARGIN + AFD_SW_ERR, ref);        /* never reached: past the peak */
+        *best_out = ref;
+        return 0;
     }
-    if (afd_aborted) return 0;
+    uint32_t land = 0;
+    for (;;)
+    {
+        afd_log("# sweep peak dir=%d chunks_max=%d spd=%x pk=%d ref=%d pos=%d\n", dir, AFD_SW_CHUNKS, spd, pk, (int) ref, afd_pos);
+        int start = pk - dir * AFD_SW_MARGIN;
+        afd_best_s = ref;
+        afd_best_pos = pk;
+        afd_fine_peak_pos = pk;
+        afd_run_dir = dir;
+        afd_flat_det = !afd_resweep_used;
+        if (!cmode)
+            land = afd_land_steps(dir, start, AFD_SW_MARGIN + AFD_SW_ERR, ref);
+        else
+        {
+            afd_move_ex("o", start - afd_pos, 0, 0);   /* back move past the peak, unmeasured */
+            if (afd_aborted) { afd_flat_det = 0; return 0; }
+            afd_c_thr = (uint32_t) ((uint64_t) ref * AFD_C_STOP_PCT / 100);
+            struct afd_sw lw;
+            afd_sweep("cland", dir, AFD_C_LEN, AFD_SPEED, afd_c_stop, &lw);
+            if (afd_aborted) { afd_flat_det = 0; return 0; }
+            uint32_t se = afd_move_ex("i", 0, 1, 0);
+            if (afd_aborted) { afd_flat_det = 0; return 0; }
+            int ok = lw.r.stop_ms >= 0 && !afd_below(se, ref, AFD_C_OK_PCT);
+            afd_log("# cland stop_ms=%d done_ms=%d thr=%d settled_s=%d ref=%d ok=%d\n",
+                    lw.r.stop_ms, lw.r.done_ms, (int) afd_c_thr, (int) se, (int) ref, ok);
+            if (ok)
+                land = se;
+            else if (lw.r.stop_ms >= 0)
+                land = afd_land_steps(dir, afd_pos - dir * AFD_RT_BACK, AFD_RT_BACK, ref);   /* stopped too early: B's retrace */
+            else
+                land = afd_land_steps(dir, start, AFD_SW_MARGIN + AFD_SW_ERR, ref);        /* never reached: past the peak */
+        }
+        afd_flat_det = 0;
+        if (afd_aborted) return 0;
+        if (!land && afd_land_flat && !afd_resweep_used)
+        {
+            afd_resweep_used = 1;
+            afd_land_flat = 0;
+            afd_log("# land flat -> resweep\n");
+            spd = AFD_SPEED;   /* the re-sweep is always at 07 */
+            if (!afd_sweep_find(afd_pos, dir, spd, &dir, &ref, &pk))
+            {
+                *best_out = ref;
+                return 0;
+            }
+            continue;
+        }
+        break;
+    }
     afd_land_s = land;
     *best_out = ref;
     return land;
@@ -9171,9 +9294,10 @@ static void afw_log_samples(const struct afd_samp *s, int n)
 #define AFR_FILE       "ML/LOGS/AFREV.LOG"
 #define AFB_NDEF       4
 #define AFB_DEF_BACK   40      /* the defocus target is approached with this back move (direction toward focus) */
-#define AFB_RELAND_PCT 70      /* re-land with A when a trial ends below this % of ref_s */
+#define AFB_RELAND_PCT 70      /* re-land (B07) when a trial ends below this % of ref_s */
+#define AFB_DRIFT_PCT  80      /* a re-land below this % of the previous ref_s: scene / light drift, re-reference (drift=1) */
 #define AFB_OK_PCT     90      /* success: land_s >= this % of ref_s */
-#define AFB_CUSTOM_MASK 0x16   /* "Custom" bench algos: bit0 A .. bit5 F (B, C, E) */
+#define AFB_CUSTOM_MASK 0x12   /* "Custom" bench algos: bit0 A .. bit5 F (B, E; C is not offered) */
 #define AFR_NX         3
 #define AFR_REPS       3
 #define AFB_NALGO      9       /* A..F, then B07 B14 B1F (B at a fixed sweep speed) */
@@ -9185,7 +9309,7 @@ static const char * const afd_algo_str[AFB_NALGO] = { "A", "B", "C", "D", "E", "
 
 static int afb_mask(void)
 {
-    return afdiag_afbench_algos == 0 ? 0x3F : afdiag_afbench_algos == 1 ? 0x2B : afdiag_afbench_algos == 3 ? 0x1C0 : AFB_CUSTOM_MASK;
+    return afdiag_afbench_algos == 0 ? 0x3B : afdiag_afbench_algos == 1 ? 0x2B : afdiag_afbench_algos == 3 ? 0x1C0 : AFB_CUSTOM_MASK;
 }
 
 /* the per-run state afd_engine resets once; the bench/cal start every trial from scratch */
@@ -9195,6 +9319,7 @@ static void afb_run_reset(void)
     afd_peak_g_pos = 0; afd_fine_peak_pos = 0;
     afd_lowcontrast = 0; afd_timeout = 0; afd_nopeak = 0;
     afd_retraces = 0; afd_land_s = 0; afd_deadline = 0; afd_travel = 0;
+    afd_endstop_dir = 0; afd_base_ok = 0; afd_land_flat = 0; afd_flat_det = 0; afd_resweep_used = 0;
 }
 
 static int afb_open(const char *file, int *cap)
@@ -9236,11 +9361,11 @@ static int afb_user_abort(void)
     return afd_aborted;
 }
 
-/* land in focus with A; *ref_s = a stable measurement afterwards.  1 = ok */
+/* land in focus with B at sweep speed 07 (the proven method); *ref_s = a stable measurement afterwards.  1 = ok */
 static int afb_land_a(uint32_t *ref_s)
 {
     uint32_t own;
-    int ok = afb_search(0, &own);
+    int ok = afb_search(6, &own);
     if (afb_user_abort() || !ok) return 0;
     uint32_t s = afd_move_ex("i", 0, 1, 0);
     if (afd_aborted) return 0;
@@ -9289,6 +9414,16 @@ static void afb_run(void)
     for (int a = 0; a < AFB_NALGO && !stop; a++)
     {
         if (!(mask & (1 << a))) continue;
+        /* a fresh reference for every algorithm's block: re-land with B07, stable measure (scene / light drift) */
+        uint32_t old_ref = ref_s;
+        if (!afb_land_a(&ref_s))
+        {
+            afw_log("# BENCH stopped: reference for algo=%s failed aborted=%d nopeak=%d lowcontrast=%d\n", afd_algo_str[a],
+                    afd_aborted, afd_nopeak, afd_lowcontrast);
+            stop = 1;
+            break;
+        }
+        afw_log("# BENCH_REF algo=%s ref_s=%d prev_ref_s=%d\n", afd_algo_str[a], (int) ref_s, (int) old_ref);
         for (int k = 0; k < AFB_NDEF && !stop; k++)
         {
             ntr++;
@@ -9313,17 +9448,28 @@ static void afb_run(void)
             uint32_t land = afd_move_ex("i", 0, 1, 0);   /* the same stable measurement for every algorithm */
             if (afd_aborted) { stop = 1; break; }
             int pct = (int) ((uint64_t) land * 100 / ref_s);
-            afw_log("# BENCH algo=%s defocus=%d land_s=%d ref_s=%d pct=%d moves=%d ms=%d travel=%d ab=%s\n",
-                    afd_algo_str[a], def, (int) land, (int) ref_s, pct, moves, ms, travel, ab);
             int n = afb_n[a]++;
             afb_ms[a][n] = ms;
             afb_pct[a][n] = pct;
+            int trial_ref = (int) ref_s, drift = 0, rl_ok = 1;
+            uint32_t r2 = 0;
             if (pct < AFB_RELAND_PCT)
             {
-                uint32_t r2 = 0;
-                int ok = afb_land_a(&r2);
-                afw_log("# BENCH reland ok=%d s=%d ref_s=%d\n", ok, (int) r2, (int) ref_s);
-                if (!ok) { afw_log("# BENCH stopped: reland failed\n"); stop = 1; }
+                rl_ok = afb_land_a(&r2);
+                if (rl_ok && afd_below(r2, ref_s, AFB_DRIFT_PCT))
+                {
+                    /* the re-land itself reached less than 80 % of the reference: scene / light drift.
+                     * Re-reference at once; this trial is marked drift=1 */
+                    drift = 1;
+                    ref_s = r2;
+                }
+            }
+            afw_log("# BENCH algo=%s defocus=%d land_s=%d ref_s=%d pct=%d moves=%d ms=%d travel=%d ab=%s drift=%d\n",
+                    afd_algo_str[a], def, (int) land, trial_ref, pct, moves, ms, travel, ab, drift);
+            if (pct < AFB_RELAND_PCT)
+            {
+                afw_log("# BENCH reland ok=%d s=%d ref_s=%d drift=%d\n", rl_ok, (int) r2, (int) ref_s, drift);
+                if (!rl_ok) { afw_log("# BENCH stopped: reland failed\n"); stop = 1; }
             }
         }
     }
@@ -9511,7 +9657,14 @@ static int afd_engine(int mode, int flags)
     int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3), meas = (mode >= 4);
     const char *name = mode == 7 ? "AF reversal cal" : mode == 6 ? "AF bench" : mode == 4 ? "AF sweep record" : mode == 5 ? "AF stop test" : speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     int ret_pct = 0;
-    if (afd_log_pending) return -1;   /* the previous log is still waiting for the card */
+    int nolog = 0;
+    if (afd_log_pending)
+    {
+        /* the previous log is still waiting for the card; a further run while recording goes without a log
+         * (Auto refocus: only the afd_note line) */
+        if (!(flags & AFD_F_REC)) return -1;
+        nolog = 1;
+    }
     if (meas && (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())) return -1;   /* never while recording */
     if (mode >= 6 && afdiag_afdrive_mon != 2) return -1;   /* bench / reversal cal: monitor Keep open only */
     afd_rec_run = 0;
@@ -9527,7 +9680,7 @@ static int afd_engine(int mode, int flags)
     afd_meas_full = (mode == 4);
     afd_sw_speed = afd_sw_speed_tbl[COERCE(afdiag_afsweepspd, 0, 2)];
     afd_sw_max0 = 0;
-    afd_algo_cur = (mode == 0) ? afdiag_afalgo : 0;   /* the speed test and the bench set their own */
+    afd_algo_cur = (mode == 0) ? afd_algo_menu_tbl[COERCE(afdiag_afalgo, 0, 4)] : 0;   /* the speed test and the bench set their own */
     afd_rt_sample = 1;
     afd_track_min_ms = 0;
     afd_speed = AFD_SPEED;
@@ -9550,6 +9703,7 @@ static int afd_engine(int mode, int flags)
     afd_travel = 0;
     afd_retraces = 0;
     afd_land_s = 0;
+    afd_endstop_dir = 0; afd_base_ok = 0; afd_land_flat = 0; afd_flat_det = 0; afd_resweep_used = 0;
     afd_peak_g_pos = afd_fine_peak_pos = 0;
     afd_last_dir = 0;
     afd_best_dir = 0;
@@ -9585,7 +9739,7 @@ static int afd_engine(int mode, int flags)
     static const uint8_t zeros[16] = { 0 };
     static const uint8_t open_s[16] = { 0x02 };
     int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
-    afd_log_quiet = mode >= 6 ? 2 : meas;
+    afd_log_quiet = mode >= 6 ? 2 : (meas || nolog);
     afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d algo=%s\n",
             speedt ? "AFSPEED" : probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
             (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now, afd_algo_str[afd_algo_cur]);
@@ -9750,7 +9904,7 @@ static int afd_engine(int mode, int flags)
     afd_log_quiet = 0;
     afd_rec_run = 0;
     if (meas) afw_finish();
-    else
+    else if (!nolog)
     {
     afd_pend_file = speedt ? AFV_LOG_FILE : probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE;
     afd_pend_len = afd_len;
@@ -10246,13 +10400,13 @@ static struct menu_entry afdiag_menu[] = {
     {
         .name      = "AF algorithm",
         .priv      = &afdiag_afalgo,
-        .max       = 5,
-        .choices   = CHOICES("A Stepwise", "B Sweep", "C Sweep+stop", "D Model jump", "E Warm start", "F Predictive"),
+        .max       = 4,
+        .choices   = CHOICES("A Stepwise", "B Sweep", "D Model jump", "E Warm start", "F Predictive"),
         .icon_type = IT_DICE,
         .help      = "Search used by AF drive (MPU), Auto refocus (MPU) and the AF drive REC test.",
-        .help2     = "A: coarse g climb + fine pass + retrace (baseline). B (default): tracked sweep chunks, then stepped landing.\n"
-                     "C: B, landing by a stop command at 90 pct. D: Gaussian model jump. E: warm start (Auto refocus).\n"
-                     "F: A with a parabola-predicted early stop. Compare with AF bench.",
+        .help2     = "B (default, proven): tracked sweep at speed 07, then stepped landing. A: coarse g climb + fine pass + retrace.\n"
+                     "The stop command (9,3,1) does NOT halt a move (the lens runs on to its end), so a landing by stop is not offered.\n"
+                     "D: Gaussian model jump. E: warm start. F: A with a parabola-predicted early stop. Compare with AF bench.",
     },
     {
         .name      = "Sweep speed",
@@ -10260,8 +10414,8 @@ static struct menu_entry afdiag_menu[] = {
         .max       = 2,
         .choices   = CHOICES("07", "14", "1F"),
         .icon_type = IT_DICE,
-        .help      = "Lens speed byte of the tracked sweep of algorithm B / C (default 1F, ~3x faster than 07).",
-        .help2     = "A sweep command is at most 120 (07) / 200 (14) / 300 (1F) pulses so that it ends within the done timer.\n"
+        .help      = "Lens speed byte of the tracked sweep of algorithm B (default 07: proven; 1F mixed with a 07 landing is unreliable).",
+        .help2     = "A sweep command is at most 100 (07) / 200 (14) / 300 (1F) pulses so that it ends within the done timer.\n"
                      "Landing steps stay at 07. AF bench 'B speeds' compares the three.",
     },
     {
@@ -10336,7 +10490,7 @@ static struct menu_entry afdiag_menu[] = {
         .max       = 3,
         .choices   = CHOICES("All", "A+B+D+F", "Custom", "B speeds"),
         .icon_type = IT_DICE,
-        .help      = "Algorithms run by AF bench. Custom = AFB_CUSTOM_MASK in the source (default B, C, E). B speeds = B at sweep speed 07, 14 and 1F (B07/B14/B1F).",
+        .help      = "Algorithms run by AF bench. Custom = AFB_CUSTOM_MASK in the source (default B, E). B speeds = B at sweep speed 07, 14 and 1F (B07/B14/B1F).",
     },
     {
         .name      = "AF bench",
@@ -12477,26 +12631,58 @@ static volatile int aref_mpu_state = 0; /* 0 idle, 1 task running, 2 task finish
 static volatile int aref_mpu_pct = -1;  /* afd_engine result: landing % of best, -1 = aborted */
 static volatile int aref_mpu_ms = 0;
 static int aref_mpu_notified = 0;
+static int aref_rec_fb_noted = 0;    /* the fallback to Canon AF while recording was noted (once per recording) */
 
-/* Glue task: one afd_engine AF drive, off the polling callback (it blocks for
- * seconds).  aref_step set afdiag_afdrive_busy before creating us; we clear it. */
-static void aref_mpu_task(void *unused)
+/* Persistent AF worker: ONE task for all Auto refocus MPU runs.  A task_create fails while RAW recording
+ * (mlv_lite holds the memory), so the task is created once at module init (afd_worker_ensure, retried from
+ * aref_step while not recording) and waits on a request flag.  aref_step claims afdiag_afdrive_busy when it
+ * posts (so no menu run / REC test can slip in during the <= 50 ms pickup) and the worker releases it when the
+ * run is over, then publishes the result in aref_mpu_pct / aref_mpu_ms and aref_mpu_state = 2.
+ * Menu actions keep their own task_create (not while recording); the REC test its arm-time task.  All of them
+ * are mutually excluded by afdiag_afdrive_busy alone, nobody waits for anybody: no lock to deadlock on. */
+static volatile int afd_wk_req = 0;     /* 0 idle, 1 posted by aref_step, 2 running */
+static volatile int afd_wk_flags = 0;
+static volatile int afd_wk_ok = 0;      /* the task exists */
+static volatile int aref_mpu_moves = 0;
+
+static void afd_worker_task(void *unused)
 {
     (void) unused;
-    int t0 = get_ms_clock();
-    int pct = -1;
-    if (afdiag_afdrive_mon && !afd_mon_is_open && !aref_mpu_notified)
+    while (1)
     {
-        aref_mpu_notified = 1;
-        NotifyBox(3000, "MPU AF: opening monitor");
+        msleep(50);
+        if (afd_wk_req != 1) continue;
+        afd_wk_req = 2;
+        int fl = afd_wk_flags;
+        int t0 = get_ms_clock();
+        int pct = -1;
+        afdiag_afdrive_busy = 1;
+        if (afdiag_afdrive_mon && !afd_mon_is_open && !aref_mpu_notified && !(fl & AFD_F_REC))
+        {
+            aref_mpu_notified = 1;
+            NotifyBox(3000, "MPU AF: opening monitor");
+        }
+        /* the engine re-checks these itself and aborts, this only skips a pointless start */
+        if (lv && !is_manual_focus() && !gui_menu_shown() && ((fl & AFD_F_REC) ? RECORDING_RAW : !RECORDING))
+            pct = afd_engine(0, fl);
+        aref_mpu_pct = pct;
+        aref_mpu_ms = get_ms_clock() - t0;
+        aref_mpu_moves = afd_moves;
+        if (fl & AFD_F_REC)
+            afd_note("# aref rec pct=%d ms=%d moves=%d\n", pct, aref_mpu_ms, aref_mpu_moves);
+        afdiag_afdrive_busy = 0;
+        aref_mpu_state = 2;
+        afd_wk_req = 0;
     }
-    /* the engine re-checks these itself and aborts, this only skips a pointless start */
-    if (lv && !RECORDING && !is_manual_focus() && !gui_menu_shown())
-        pct = afd_engine(0, AFD_F_QUIET);
-    aref_mpu_pct = pct;
-    aref_mpu_ms = get_ms_clock() - t0;
-    afdiag_afdrive_busy = 0;
-    aref_mpu_state = 2;
+}
+
+/* create the worker once; 1 = it exists.  Not while recording (task_create fails there). */
+static int afd_worker_ensure(void)
+{
+    if (afd_wk_ok) return 1;
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) return 0;
+    if (task_create("afd_worker", AFD_TASK_PRIO, 0x3000, afd_worker_task, (void*)0)) afd_wk_ok = 1;
+    return afd_wk_ok;
 }
 
 static void aref_log(int what, uint32_t cur)
@@ -12695,7 +12881,7 @@ static void aref_step(void)
      * recording starts. */
     static int aref_rec_since = 0;
     if (RECORDING_RAW) { if (!aref_rec_since) aref_rec_since = now ? now : 1; }
-    else aref_rec_since = 0;
+    else { aref_rec_since = 0; aref_rec_fb_noted = 0; }
     int raw_transition = (mlv_raw_rec_busy() && !RECORDING_RAW) ||
                          (RECORDING_RAW && now - aref_rec_since < AREF_REC_START_MS);
 
@@ -12906,27 +13092,45 @@ static void aref_step(void)
     if (!path || gate) return;
 
     /* MPU drive needs the MPU monitor (AF drive monitor ON or Keep open); with
-     * it OFF the moves are rejected, so fall back to Canon AF. */
-    if (Auto_refocus_method == 1 && !RECORDING && afdiag_afdrive_mon)
+     * it OFF the moves are rejected, so fall back to Canon AF.  While RAW recording only with
+     * "MPU drive while recording" ON and the monitor already open (Keep open): never open/close it
+     * while recording.  The run is posted to the persistent worker (no task_create). */
+    if (Auto_refocus_method == 1 && afdiag_afdrive_mon)
     {
-        /* Not while recording yet: AFD_F_REC exists but its safety is still
-         * being field-tested (AF drive REC test).  Recording uses Canon AF. */
-        if (afdiag_afdrive_busy || afdiag_afsearch_busy)
+        int rec = RECORDING ? 1 : 0, use = 0, why = 0;
+        if (!rec) use = afd_worker_ensure();
+        else if (Auto_refocus_mpu_rec)
         {
-            aref_next_at = now + 1000;   /* AF drive / search in use: look again shortly */
+            if (!RECORDING_RAW) why = 1;
+            else if (afdiag_afdrive_mon != 2 || !afd_mon_is_open) why = 2;
+            else if (!afd_wk_ok) why = 3;
+            else use = 1;
+            if (why && !aref_rec_fb_noted)
+            {
+                aref_rec_fb_noted = 1;
+                afd_note("# aref rec fallback canon reason=%s t=%d\n", why == 1 ? "not_raw" : why == 2 ? "monitor_closed" : "no_worker", now);
+            }
+        }
+        if (use)
+        {
+            if (afdiag_afdrive_busy || afdiag_afsearch_busy || afd_wk_req)
+            {
+                aref_next_at = now + 1000;   /* AF drive / search in use: look again shortly */
+                return;
+            }
+            aref_trig_ref = peak;
+            aref_low_since = 0;
+            if (path == 2) aref_abs_used = 1;
+            aref_mpu_state = 1;
+            aref_mpu_pct = -1;
+            afdiag_afdrive_busy = 1;   /* claimed here, released by the worker */
+            aref_phase = AREF_MPU;
+            aref_log(1, cur);
+            aref_log_affr();
+            afd_wk_flags = rec ? (AFD_F_REC | AFD_F_QUIET) : AFD_F_QUIET;
+            afd_wk_req = 1;
             return;
         }
-        aref_trig_ref = peak;
-        aref_low_since = 0;
-        if (path == 2) aref_abs_used = 1;
-        aref_mpu_state = 1;
-        aref_mpu_pct = -1;
-        afdiag_afdrive_busy = 1;
-        aref_phase = AREF_MPU;
-        aref_log(1, cur);
-        aref_log_affr();
-        task_create("aref_mpu", AFD_TASK_PRIO, 0x3000, aref_mpu_task, (void*)0);
-        return;
     }
 
     aref_trig_ref = peak;
@@ -14323,6 +14527,7 @@ static unsigned int crop_rec_init()
         menu_move_entry_after("Settings", "AF diag log", "Shutter zoom");
         menu_move_entry_after("Settings", "AF lens test", "AF diag log");
         task_create("afdiag_lens", 0x1e, 0x2000, afdiag_lens_task, (void*)0);
+        afd_worker_ensure();   /* the persistent AF worker (task_create fails while recording) */
         menu_add("Settings", slim_more_hacks_menu, COUNT(slim_more_hacks_menu));
         lvinfo_add_items(info_items, COUNT(info_items));
         return 0;
@@ -14371,6 +14576,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(Auto_refocus)
     MODULE_CONFIG(Auto_refocus_sens)
     MODULE_CONFIG(Auto_refocus_method)
+    MODULE_CONFIG(Auto_refocus_mpu_rec)
     MODULE_CONFIG(tapdisp)
     MODULE_CONFIG(Arrows_L_R)
     MODULE_CONFIG(Arrows_U_D)
