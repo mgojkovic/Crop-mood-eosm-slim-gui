@@ -261,6 +261,17 @@ blacks out LV (luma→1) from ~300 ms to ~2.5 s. Keeping the monitor open
 - At x5 the Laplacian sharpness peak is only ~40-60 pulses wide; the gradient sum rises over
   ~±120 pulses (use it for the coarse search).
 
+**Working algorithm (commit 8917e0b, field run 2026-10-19: 4/4 landed at 93-108% of the
+best sharpness, first retrace each time, 8.5-10.6 s per run).**
+
+1. Coarse climb on g in 60-pulse steps after a direction probe.
+2. Fine pass A on s: back move, then 20-pulse steps until s drops below 70% of the max twice.
+3. Retrace: back move, then the same 20-pulse steps, stopping at the first s >= 90% of pass A's
+   max (80% on a second retrace).
+
+Next: speed (each move ~0.5 s incl. settle and stable sampling), wider distance coverage,
+Auto refocus integration, and behaviour with the monitor open while recording.
+
 **Other.** The LV blackout seen in the "AF search (MPU)" runs came from MpuMonOpen, not from
 the (8,2,32) index-16 call. That call still always ends at infinity and is not used.
 
