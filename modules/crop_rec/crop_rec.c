@@ -7571,6 +7571,13 @@ static int afd_best_dir;     /* direction of travel when the best was measured *
 #define AFD_ENDSTOP_MIN      40     /* end stop: only moves of at least this many pulses count ... */
 #define AFD_ENDSTOP_PCT      2      /* ... when neither s nor g changed by more than this % ... */
 #define AFD_ENDSTOP_FAST_MS  40     /* ... and FOCUS_DONE had bit 0x1000 or came sooner than this */
+#define AFD_ES_MS            150    /* end stop by flags: a move of >= AFD_ENDSTOP_MIN pulses whose FOCUS_DONE (bit 0x1000) came sooner than this ... */
+#define AFD_ES_N             2      /* ... this many times in a row in the same direction (field: refused chunks answer in 40-95 ms, normal ones 300-510) */
+#define AFD_ES_EARLY_CHUNKS  4      /* B: an end stop within fewer chunks than this = the peak is probably the other way */
+#define AFD_MIN_G            5000   /* below this baseline g (afdiag_sharpness_ex scale) the scene is blank: aborted=lowtexture.  Field: real runs that
+                                     * succeeded started at g 7.9k..14.6k (defocused), the texture-less scene showed 13.5k..14.5k: g cannot separate them */
+#define AFD_CAP_RANGE        1000   /* nopeak cap: only for a full-range sweep (chunks * pulses >= this; not the 4-chunk re-sweep) */
+#define AFD_CAP_G_PCT        130    /* ... g never above this % of its first sample */
 #define AFD_FLAT_RT_N        4      /* retrace: this many steps in a row within +-AFD_FLAT_RT_PCT % of each other ... */
 #define AFD_FLAT_RT_PCT      3
 #define AFD_FLAT_RT_REF_PCT  60     /* ... and below this % of the reference = flat floor, abort the retrace */
@@ -7612,13 +7619,43 @@ static void afd_log(const char *fmt, ...)
     if (k > 0) afd_len += MIN(k, room - afd_len - 1);
 }
 
+/* End stop by flags.  afd_es_check is fed every move / chunk of >= AFD_ENDSTOP_MIN pulses: AFD_ES_N in a row in the
+ * same direction with FOCUS_DONE < AFD_ES_MS and bit 0x1000 = the lens is at its end stop and refuses the command.
+ * Then afd_endstop_dir is set and afd_pos gives back the refused pulses (the lens did not move).  Returns 1 when declared.
+ * Range memory (log only, no absolute lens position exists): the commanded offsets from the run start at which end stops
+ * were hit in this session, per direction. */
+static int afd_es_dir = 0, afd_es_n = 0, afd_es_acc = 0;
+static int afd_es_off[2], afd_es_have[2];   /* [0] = - direction, [1] = + direction: last offset */
+static void afd_es_note(int dir, const char *how)
+{
+    int i = dir > 0;
+    afd_endstop_dir = dir;
+    afd_es_off[i] = afd_pos;
+    afd_es_have[i] = 1;
+    afd_log("# endstop dir=%d how=%s off=%d range_mem=%d,%d,%d,%d\n", dir, how, afd_pos,
+            afd_es_have[0], afd_es_off[0], afd_es_have[1], afd_es_off[1]);
+}
+static int afd_es_check(int dir, int len, int pulses, int done_ms, int done_val)
+{
+    if (ABS(len) < AFD_ENDSTOP_MIN) return 0;
+    if (done_ms < 0 || done_ms >= AFD_ES_MS || !(done_val & 0x1000)) { afd_es_n = 0; afd_es_acc = 0; return 0; }
+    if (dir != afd_es_dir) { afd_es_dir = dir; afd_es_n = 0; afd_es_acc = 0; }
+    afd_es_n++;
+    afd_es_acc += pulses;
+    if (afd_es_n < AFD_ES_N) return 0;
+    afd_pos -= dir * afd_es_acc;
+    afd_es_n = 0; afd_es_acc = 0;
+    afd_es_note(dir, "flags");
+    return 1;
+}
+
 /* Running while RAW recording (AFD_F_REC): recording is no abort reason, but any
  * change of the recording state (stopping) is. */
 static int afd_rec_run = 0, afd_rec_state0 = 0;
 /* AFD_RUN_CAP_MS: the AF search (afd_run) is cut off after this long (aborted=timeout);
  * afd_deadline is 0 outside afd_run.  afd_nopeak: pass A saw no real peak. */
 #define AFD_RUN_CAP_MS       15000
-#define AFD_RUN_CAP_B_MS     25000   /* B and local -> B: full-range search (AFD_SW_MAX_CHUNKS) */
+#define AFD_RUN_CAP_B_MS     18000   /* B and local -> B: full-range search (AFD_SW_MAX_CHUNKS); never ~20 s */
 #define AFD_NOPEAK_PCT       115   /* pass A max below this % of its min = no real peak */
 static int afd_deadline = 0, afd_timeout = 0, afd_nopeak = 0, afd_run_dir = 1;
 static volatile int afd_nopeak_last = 0;   /* result of the last afd_engine AF drive, for Auto refocus */
@@ -7875,6 +7912,7 @@ static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, a
     afd_pos += n;
     afd_travel += ABS(n);
     int extra = -1;   /* frames still wanted after FOCUS_DONE; -1 = not done yet */
+    int refused = 0;  /* FOCUS_DONE at once with bit 0x1000 on a long move: end stop signature, no need to wait for the expected travel time */
     while (1)
     {
         int t = get_ms_clock() - t0;
@@ -7883,6 +7921,7 @@ static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, a
             r->done_ms = t;
             r->done_val = afdiag_focus_done_val;
             extra = AFT_EXTRA_FRAMES;
+            refused = ABS(n) >= AFD_ENDSTOP_MIN && t < AFD_ES_MS && (r->done_val & 0x1000);
         }
         if (r->done_ms < 0 && t >= AFT_DONE_TIMEOUT_MS) break;
         /* hard cap: if vsync stops after FOCUS_DONE, the extra-frame count
@@ -7912,7 +7951,7 @@ static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, a
             }
             if (extra > 0) extra--;
         }
-        if (extra == 0 && (r->stop_ms >= 0 || t >= afd_track_min_ms)) break;
+        if (extra == 0 && (r->stop_ms >= 0 || refused || t >= afd_track_min_ms)) break;
         msleep(AFD_POLL_MS);   /* yields the CPU to Canon's tasks between frames */
     }
     if (r->done_ms < 0 && !r->aborted)
@@ -8064,7 +8103,8 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             }
             if (!nch) { first_done_ms = done_ms; first_done_val = done_val; }
             nch++;
-            if (done_ms < 0) { any_nodone = 1; break; }   /* no done: do not send the rest on top of a running motor */
+            if (done_ms < 0) { any_nodone = 1; afd_es_n = 0; afd_es_acc = 0; break; }   /* no done: do not send the rest on top of a running motor */
+            if (afd_es_check(c > 0 ? 1 : -1, c, c, done_ms, done_val)) break;   /* end stop: do not push the rest of the move into it */
         }
         int tw = get_ms_clock();
         afd_wait((afd_fast ? afd_frame_ms : AFD_SETTLE_MS) + afd_extra_ms);
@@ -8123,8 +8163,7 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
         if (n && ABS(n) >= AFD_ENDSTOP_MIN && afd_base_ok && (f_err || f_fast) && s &&
             afd_close(s, afd_base_s, AFD_ENDSTOP_PCT) && afd_close(g, afd_base_g, AFD_ENDSTOP_PCT))
         {
-            afd_endstop_dir = n > 0 ? 1 : -1;
-            afd_log("# endstop dir=%d\n", afd_endstop_dir);
+            afd_es_note(n > 0 ? 1 : -1, "flat");
         }
         afd_base_s = s;
         afd_base_g = g;
@@ -8255,6 +8294,12 @@ static uint32_t afd_run_a(uint32_t *best_out)
     if (s0 < AFD_MIN_S)
     {
         afd_lowcontrast = 1;
+        return s0;
+    }
+    if (g0 < AFD_MIN_G)
+    {
+        afd_lowcontrast = 2;
+        afd_log("# lowtexture g0=%d min_g=%d\n", (int) g0, AFD_MIN_G);
         return s0;
     }
 
@@ -8589,7 +8634,8 @@ struct afd_sw
     int n, imax, peak;
     uint32_t smax, smin, smax_ex;
     int t_pk, moved, pos_pk, over;   /* ms, then pulses from the sweep start */
-    int endstop;                     /* the sweep did not change s or g: lens end stop in this direction */
+    int endstop;                     /* lens end stop in this direction: refused chunks (flags) or nothing changed (flat) */
+    uint32_t gmax, gfirst;           /* g over the samples (sweep scale) and the first one */
 };
 
 /* One tracked move of dir*len with a stop callback, then the model and the peak analysis.
@@ -8638,15 +8684,19 @@ static void afd_sweep(const char *tag, int dir, int len, int speed, afd_stop_fn 
         if (g > gmx) gmx = g;
         if (g < gmn) gmn = g;
     }
-    /* end stop: a long sweep with flat s and g, and FOCUS_DONE flagged an error or came at once */
-    if (len >= AFD_ENDSTOP_MIN && n >= 2 && smax &&
+    w->gmax = gmx;
+    w->gfirst = n ? afd_sw_samp[0].m.g : 0;
+    /* end stop: AFD_ES_N refused chunks in a row (flags), or alternatively a long sweep with flat s and g and
+     * FOCUS_DONE flagged an error or came at once */
+    if (afd_es_check(dir, len, moved, w->r.done_ms, w->r.done_val))
+        w->endstop = 1;   /* afd_es_check gave the refused pulses back */
+    else if (len >= AFD_ENDSTOP_MIN && n >= 2 && smax &&
         afd_close(smax, smin, AFD_ENDSTOP_PCT) && afd_close(gmx, gmn, AFD_ENDSTOP_PCT) &&
         ((w->r.done_val & 0x1000) || (w->r.done_ms >= 0 && w->r.done_ms < AFD_ENDSTOP_FAST_MS)))
     {
         w->endstop = 1;
-        afd_endstop_dir = dir;
         afd_pos -= dir * moved;   /* at the end stop the lens did not travel: assume nothing moved */
-        afd_log("# endstop dir=%d\n", dir);
+        afd_es_note(dir, "flat");
     }
     int tpk = n ? afd_sw_samp[imax].t_ms : 0;
     if (imax > 0 && imax < n - 1)
@@ -8704,6 +8754,12 @@ static int afd_start(uint32_t *s0_out, uint32_t *g0_out)
     if (s0 < AFD_MIN_S)
     {
         afd_lowcontrast = 1;
+        return 0;
+    }
+    if (g0 < AFD_MIN_G)
+    {
+        afd_lowcontrast = 2;   /* 2 = lowtexture (reason string), every check treats non-zero alike */
+        afd_log("# lowtexture g0=%d min_g=%d\n", (int) g0, AFD_MIN_G);
         return 0;
     }
     return 1;
@@ -8806,7 +8862,7 @@ static int afd_sweep_find(int pos0, int d, int spd, int maxch, int *dir_out, uin
     int chunk = afd_chunk(spd);
     int dir = d, other = 0, found = 0;
     int target = pos0 - d * AFD_SW_PRE;   /* sweep start: a little before the start, in direction d */
-    uint32_t gmax = 0, gmax_ex = 0, gmin = 0xFFFFFFFFu;
+    uint32_t gmax = 0, gmax_ex = 0, gmin = 0xFFFFFFFFu, gfirst = 0, gtop = 0;
     int gpk = 0;
     for (;;)
     {
@@ -8815,15 +8871,18 @@ static int afd_sweep_find(int pos0, int d, int spd, int maxch, int *dir_out, uin
             afd_move_ex("o", target - afd_pos, 0, 0);
             if (afd_aborted) return 0;
         }
-        gmax = 0; gmax_ex = 0; gmin = 0xFFFFFFFFu; gpk = 0;
-        int stopped = 0;
+        gmax = 0; gmax_ex = 0; gmin = 0xFFFFFFFFu; gpk = 0; gfirst = 0; gtop = 0;
+        int stopped = 0, kdone = 0;
         for (int k = 0; k < maxch && !found && !stopped; k++)
         {
             afd_sw_max0 = gmax;
             afd_sweep("sweep", dir, chunk, spd, afd_sw_stop, &w);
             if (afd_aborted) return 0;
+            kdone = k + 1;
             if (w.n)
             {
+                if (!gfirst) gfirst = w.gfirst;
+                if (w.gmax > gtop) gtop = w.gmax;
                 if (w.smax > gmax) { gmax = w.smax; gmax_ex = w.smax_ex; gpk = afd_pos - dir * w.over; }
                 if (w.smin < gmin) gmin = w.smin;
             }
@@ -8832,7 +8891,15 @@ static int afd_sweep_find(int pos0, int d, int spd, int maxch, int *dir_out, uin
             if (w.endstop) stopped = 1;   /* do not push on into the end stop */
         }
         if (found) break;
-        if (!other && !afd_sweep_one_dir)
+        /* nothing to find: a full-range direction (not the re-sweep) with s flat and g never rising, and no early end stop
+         * (which would suggest the peak is the other way) ends here instead of 12 more chunks the other way */
+        int cap = !other && !afd_sweep_one_dir && maxch * chunk >= AFD_CAP_RANGE && gmax && gfirst &&
+                  (uint64_t) gmax * 100 < (uint64_t) gmin * AFD_NOPEAK_PCT &&
+                  (uint64_t) gtop * 100 <= (uint64_t) gfirst * AFD_CAP_G_PCT && !(stopped && kdone < AFD_ES_EARLY_CHUNKS);
+        if (cap)
+            afd_log("# sweep dir=%d: flat after %d chunks (smax=%d smin=%d gtop=%d gfirst=%d endstop=%d), no other way\n", d, kdone,
+                    (int) gmax, (int) gmin, (int) gtop, (int) gfirst, stopped);
+        if (!other && !afd_sweep_one_dir && !cap)
         {
             other = 1; dir = -d; target = pos0 + d * AFD_SW_PRE;   /* then the other way, once, from the start position */
             afd_log("# sweep dir=%d: no peak in %d chunks (spd=%x smax=%d smin=%d), other way from pos0=%d\n", d, maxch, spd,
@@ -9526,7 +9593,7 @@ static void afb_run_reset(void)
     afd_peak_g_pos = 0; afd_fine_peak_pos = 0;
     afd_lowcontrast = 0; afd_timeout = 0; afd_nopeak = 0;
     afd_retraces = 0; afd_land_s = 0; afd_deadline = 0; afd_travel = 0;
-    afd_endstop_dir = 0; afd_base_ok = 0; afd_land_flat = 0; afd_flat_det = 0; afd_resweep_used = 0;
+    afd_endstop_dir = 0; afd_es_dir = 0; afd_es_n = 0; afd_es_acc = 0; afd_base_ok = 0; afd_land_flat = 0; afd_flat_det = 0; afd_resweep_used = 0;
 }
 
 static int afb_open(const char *file, int *cap)
@@ -9650,7 +9717,7 @@ static void afb_run(void)
             uint32_t own = 0;
             afb_search(a, &own);
             int ms = get_ms_clock() - t0, moves = afd_moves - m0, travel = afd_travel;
-            const char *ab = afd_nopeak ? "nopeak" : afd_lowcontrast ? "lowcontrast" : afd_timeout ? "timeout" :
+            const char *ab = afd_nopeak ? "nopeak" : afd_lowcontrast ? (afd_lowcontrast == 2 ? "lowtexture" : "lowcontrast") : afd_timeout ? "timeout" :
                              afd_aborted ? "1" : "0";
             if (afb_user_abort()) { afw_log("# BENCH aborted algo=%s defocus=%d\n", afd_algo_str[a], def); stop = 1; break; }
             uint32_t land = afd_move_ex("i", 0, 1, 0);   /* the same stable measurement for every algorithm */
@@ -9926,7 +9993,7 @@ static int afd_engine(int mode, int flags)
     afd_travel = 0;
     afd_retraces = 0;
     afd_land_s = 0;
-    afd_endstop_dir = 0; afd_base_ok = 0; afd_land_flat = 0; afd_flat_det = 0; afd_resweep_used = 0;
+    afd_endstop_dir = 0; afd_es_dir = 0; afd_es_n = 0; afd_es_acc = 0; afd_base_ok = 0; afd_land_flat = 0; afd_flat_det = 0; afd_resweep_used = 0;
     afd_peak_g_pos = afd_fine_peak_pos = 0;
     afd_last_dir = 0;
     afd_best_dir = 0;
@@ -10138,7 +10205,7 @@ static int afd_engine(int mode, int flags)
     /* mon == 2: left open for the next run (closed on LV exit / menu / setting) */
 
     afd_log_reserve = 0;
-    const char *ab = stale_final ? "mon_stale" : afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_nopeak ? "nopeak" :
+    const char *ab = stale_final ? "mon_stale" : afd_nolv ? "nolv" : afd_lowcontrast ? (afd_lowcontrast == 2 ? "lowtexture" : "lowcontrast") : afd_nopeak ? "nopeak" :
                      afd_timeout ? "timeout" : afd_aborted ? "1" : "0";
     afd_poll_on = 0;
     afd_extra_ms = 0;
