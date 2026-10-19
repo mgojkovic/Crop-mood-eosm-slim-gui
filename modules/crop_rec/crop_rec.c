@@ -8875,6 +8875,30 @@ static uint32_t afd_land_steps(int d, int start, int back, uint32_t ref)
     afd_rt_sample = 2;
     afd_land_flat = 0;
     uint32_t r = afd_land_steps_i(d, start, back, ref);
+    /* the landing stops at the first step >= the threshold (the flank): climb
+     * on in half steps while the picture still gets sharper, and step back one
+     * half step if the last one went past the top (short reversals return
+     * reliably: rev-cal +-40/+-80 came back at 95-103%) */
+    if (r && !afd_aborted && !afd_land_flat)
+    {
+        int h = MAX(AFD_FINE / 2, 6);
+        uint32_t best = r;
+        for (int i = 0; i < 6; i++)
+        {
+            uint32_t s2 = afd_move_ex("t", d * h, 2, 0);
+            if (afd_aborted || !s2) break;
+            if (s2 >= best) { best = s2; r = s2; continue; }   /* r = the picture where the lens is now */
+            if (afd_below(s2, best, 97))
+            {
+                uint32_t s3 = afd_move_ex("t", -d * h, 2, 0);
+                if (!afd_aborted && s3) r = s3;
+                afd_log("# land top: stepped back, best=%d now=%d\n", (int) best, (int) r);
+            }
+            else r = s2;
+            break;
+        }
+        afd_log("# land top: best=%d final=%d half=%d\n", (int) best, (int) r, h);
+    }
     afd_rt_sample = 1;
     return r;
 }
@@ -13034,6 +13058,9 @@ static int eosm_lv_guard_step(int menu_shown, int mlv_busy)
  *  - peak floor: noise-only plateaus sit at 10..14k, so 24..45k means "has texture";
  *  - dwell: how long the drop must persist before we spend an AF run. */
 static const uint8_t  aref_drop_pct[3]  = { 45, 60, 70 };
+/* MPU method: the settle gate removed false triggers (Refocus test: 0 in 30 s),
+ * and a 77-87% picture is visibly soft on detailed subjects -> trigger earlier */
+static const uint8_t  aref_drop_pct_mpu[3] = { 60, 75, 85 };
 static const uint16_t aref_dwell_ms[3]  = { 1000, 700, 500 };
 static const uint16_t aref_dwell_rec[3] = { 600, 350, 250 };
 static const uint32_t aref_peak_min[3]  = { 30000, 20000, 16000 }; /* field: blur 16-25k, noise 10-14k */
@@ -13505,7 +13532,7 @@ static int aref_eval(int now, int sens, int mpu_m)
     aref_dec.peak = peak;
     aref_dec.pct = peak ? (int) ((uint64_t) cur * 100 / peak) : 0;
     uint32_t pmin = aref_peak_min[sens];
-    int pct = aref_drop_pct[sens];
+    int pct = mpu_m ? aref_drop_pct_mpu[sens] : aref_drop_pct[sens];
     int dwell = RECORDING ? aref_dwell_rec[sens] : aref_dwell_ms[sens];
     if (mpu_m)
     {
@@ -14093,7 +14120,7 @@ static void aref_test_run(void)
             "fail_ms=%d dwell_ms=%d drop_pct=%d peak_min=%d hold1_ms=%d hold2_ms=%d trig_ms=%d watch_ms=%d ok_pct=%d\n", t_start,
             lens_info.name, lv_dispsize, crop_preset_index, (int) lens_info.focal_len, afd_fine_eff(), sens,
             Auto_refocus_af ? "full" : "local", AREF_MIN_G, AREF_SETTLED_MS, AREF_SETTLED_PCT, AREF_FAILED_MS,
-            aref_dwell_ms[sens] + AREF_MPU_DWELL_EXTRA_MS, aref_drop_pct[sens], (int) aref_peak_min[sens], AFRT_HOLD1_MS,
+            aref_dwell_ms[sens] + AREF_MPU_DWELL_EXTRA_MS, aref_drop_pct_mpu[sens], (int) aref_peak_min[sens], AFRT_HOLD1_MS,
             AFRT_HOLD2_MS, AFRT_TRIG_MS, AFRT_WATCH_MS, AFRT_OK_PCT);
 
     int false_trig = 0, pre_trig = 0, ok = 0, runs_total = 0, ntr = 0, aborted = 0, ntrig_ms = 0, nfin = 0, need_ref = 0, f1 = 0;
