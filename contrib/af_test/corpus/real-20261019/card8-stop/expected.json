@@ -1,0 +1,343 @@
+{
+  "name": "real-20261019-card8-stop",
+  "historical_fixture": true,
+  "session": "2026-10-19",
+  "notes": "AF stop test on card8: two runs of four planned stops (150/250/350/450 ms), 8 trials.  Sharpness keeps changing for 300-500 ms after t_stop in all 8; 0/8 classified halted.  This is the historical evidence that (9,3,1) does NOT halt a (9,1) relative move.  Classifier thresholds live in contrib/af_test/stop_analysis.py (|slope| <= 2 %/s and |excursion| <= 1 %).",
+  "provenance": {
+    "source_dir": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card8",
+    "source_file": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card8/AFSTOP.LOG",
+    "copied": "2026-10-19",
+    "build": "AF stop test build, 2026-10-19 (pre-task-6 tree)",
+    "files": {
+      "AFSTOP.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card8/AFSTOP.LOG",
+        "bytes": 6243,
+        "sha256": "9201beac26cd3af63675b5c0d6be4658ce3b53df815aabb231c187835974a3f1"
+      }
+    }
+  },
+  "facts": {
+    "stop": {
+      "files": 1,
+      "sessions": 2,
+      "trials": 8,
+      "planned_stop_ms": [
+        150,
+        250,
+        350,
+        450
+      ],
+      "halted_trials": 0,
+      "continued_trials": 8,
+      "changed_trials": 0,
+      "incomplete_trials": 0,
+      "median_abs_slope_pct_s": {
+        "min": 22.1,
+        "max": 41.0
+      },
+      "median_abs_delta_pct": {
+        "min": 3.86,
+        "max": 7.86
+      },
+      "zero_columns": [],
+      "rows": [
+        {
+          "card": "card8",
+          "session": 1,
+          "k": 1,
+          "at": 150,
+          "dir": 1,
+          "t_stop": {
+            "min": 134,
+            "max": 174
+          },
+          "t_done": {
+            "min": 450,
+            "max": 570
+          },
+          "s_at_stop": {
+            "min": 18157,
+            "max": 24565
+          },
+          "s_end": {
+            "min": 21290,
+            "max": 28804
+          },
+          "delta_pct": {
+            "min": 12.95,
+            "max": 21.58
+          },
+          "post_stop_slope_pct_s": {
+            "min": 27.9,
+            "max": 46.5
+          },
+          "max_excursion_pct": {
+            "min": 12.95,
+            "max": 21.58
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 1,
+          "k": 2,
+          "at": 250,
+          "dir": -1,
+          "t_stop": {
+            "min": 269,
+            "max": 309
+          },
+          "t_done": {
+            "min": 448,
+            "max": 568
+          },
+          "s_at_stop": {
+            "min": 18686,
+            "max": 25282
+          },
+          "s_end": {
+            "min": 17585,
+            "max": 23791
+          },
+          "delta_pct": {
+            "min": -7.38,
+            "max": -4.43
+          },
+          "post_stop_slope_pct_s": {
+            "min": -23.2,
+            "max": -14.0
+          },
+          "max_excursion_pct": {
+            "min": -7.38,
+            "max": -4.43
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 1,
+          "k": 3,
+          "at": 350,
+          "dir": 1,
+          "t_stop": {
+            "min": 343,
+            "max": 383
+          },
+          "t_done": {
+            "min": 449,
+            "max": 569
+          },
+          "s_at_stop": {
+            "min": 18715,
+            "max": 25321
+          },
+          "s_end": {
+            "min": 19802,
+            "max": 26792
+          },
+          "delta_pct": {
+            "min": 4.36,
+            "max": 7.26
+          },
+          "post_stop_slope_pct_s": {
+            "min": 25.6,
+            "max": 42.6
+          },
+          "max_excursion_pct": {
+            "min": 4.36,
+            "max": 7.26
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 1,
+          "k": 4,
+          "at": 450,
+          "dir": -1,
+          "t_stop": {
+            "min": 463,
+            "max": 503
+          },
+          "t_done": {
+            "min": 443,
+            "max": 563
+          },
+          "s_at_stop": {
+            "min": 18353,
+            "max": 24831
+          },
+          "s_end": {
+            "min": 18364,
+            "max": 24846
+          },
+          "delta_pct": {
+            "min": -0.94,
+            "max": 1.06
+          },
+          "post_stop_slope_pct_s": {
+            "min": 21.6,
+            "max": 36.0
+          },
+          "max_excursion_pct": {
+            "min": -2.44,
+            "max": -0.44
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 2,
+          "k": 1,
+          "at": 150,
+          "dir": 1,
+          "t_stop": {
+            "min": 141,
+            "max": 181
+          },
+          "t_done": {
+            "min": 463,
+            "max": 583
+          },
+          "s_at_stop": {
+            "min": 15301,
+            "max": 20701
+          },
+          "s_end": {
+            "min": 18911,
+            "max": 25585
+          },
+          "delta_pct": {
+            "min": 17.69,
+            "max": 29.49
+          },
+          "post_stop_slope_pct_s": {
+            "min": 46.5,
+            "max": 77.5
+          },
+          "max_excursion_pct": {
+            "min": 17.69,
+            "max": 29.49
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 2,
+          "k": 2,
+          "at": 250,
+          "dir": -1,
+          "t_stop": {
+            "min": 235,
+            "max": 275
+          },
+          "t_done": {
+            "min": 484,
+            "max": 604
+          },
+          "s_at_stop": {
+            "min": 16484,
+            "max": 22302
+          },
+          "s_end": {
+            "min": 15334,
+            "max": 20746
+          },
+          "delta_pct": {
+            "min": -8.73,
+            "max": -5.24
+          },
+          "post_stop_slope_pct_s": {
+            "min": -24.0,
+            "max": -14.4
+          },
+          "max_excursion_pct": {
+            "min": -8.73,
+            "max": -5.24
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 2,
+          "k": 3,
+          "at": 350,
+          "dir": 1,
+          "t_stop": {
+            "min": 360,
+            "max": 400
+          },
+          "t_done": {
+            "min": 441,
+            "max": 561
+          },
+          "s_at_stop": {
+            "min": 17199,
+            "max": 23269
+          },
+          "s_end": {
+            "min": 17547,
+            "max": 23739
+          },
+          "delta_pct": {
+            "min": 1.02,
+            "max": 3.02
+          },
+          "post_stop_slope_pct_s": {
+            "min": 45.2,
+            "max": 75.2
+          },
+          "max_excursion_pct": {
+            "min": 9.2,
+            "max": 15.32
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card8",
+          "session": 2,
+          "k": 4,
+          "at": 450,
+          "dir": -1,
+          "t_stop": {
+            "min": 449,
+            "max": 489
+          },
+          "t_done": {
+            "min": 446,
+            "max": 566
+          },
+          "s_at_stop": {
+            "min": 15929,
+            "max": 21551
+          },
+          "s_end": {
+            "min": 15768,
+            "max": 21332
+          },
+          "delta_pct": {
+            "min": -2.01,
+            "max": -0.01
+          },
+          "post_stop_slope_pct_s": {
+            "min": -10.4,
+            "max": -6.2
+          },
+          "max_excursion_pct": {
+            "min": -2.01,
+            "max": -0.01
+          },
+          "halted": false,
+          "continued": true
+        }
+      ]
+    }
+  }
+}

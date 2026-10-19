@@ -1,0 +1,167 @@
+{
+  "name": "real-20261019-card17-refocus",
+  "historical_fixture": true,
+  "session": "2026-10-19",
+  "notes": "Previous 2026-10-19 Refocus test (2/5). Confirms the handover reference erosion claim from the raw log: ref_s 115624 -> 94755 -> 85927 -> 76595; def=150 and def=400 never triggered. Historical fixture of the OLD build; post_patch_expectation is the target, not current behaviour.",
+  "provenance": {
+    "captured_from": "Claude scratchpad copy of the EOS M card",
+    "source_dir": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card17/20261019-143547/ML/LOGS",
+    "copied": "2026-10-19",
+    "build": "pre-task-6 AF build (old Re-focus reference, before the anchored RT reference / AFRT_REF_FLOOR_PCT=95)",
+    "files": {
+      "AFDRIVE.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card17/20261019-143547/ML/LOGS/AFDRIVE.LOG",
+        "bytes": 24216,
+        "sha256": "6046ea3171bb744433e7af1124c59fb8e9b30216966620e45008c4b489905c2c"
+      },
+      "AFRTEST.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card17/20261019-143547/ML/LOGS/AFRTEST.LOG",
+        "bytes": 26645,
+        "sha256": "dbb96abbc4656c8ca994e075b58341d8d3ed1313dc317b1191c162c78b4e1cf7"
+      }
+    }
+  },
+  "verdicts": {
+    "must_contain": [
+      "AF drive NOT OK",
+      "Refocus test: only 2/5 ok",
+      "Auto refocus trigger rate OK"
+    ],
+    "must_not_contain": [
+      "CRASH",
+      "HUNTING"
+    ]
+  },
+  "afdrive": {
+    "min_runs": 6,
+    "min_success_pct": 83,
+    "max_median_ms": 6006
+  },
+  "rtest": {
+    "ok_at_least": 2,
+    "of": 5,
+    "false_trig_max": 0
+  },
+  "replay": {
+    "min_runs": 6,
+    "min_moves": 57,
+    "min_series": 1
+  },
+  "facts": {
+    "drive": {
+      "results": 6,
+      "aborted": {
+        "0": 5,
+        "nopeak": 1
+      },
+      "aborted_total": 1,
+      "fast_moves": 42,
+      "timer_moves": 6,
+      "timer_share_pct": {
+        "min": 12.0,
+        "max": 13.0
+      },
+      "aref_new_ref": [
+        113208,
+        101566,
+        94817,
+        89408,
+        85080,
+        78720,
+        78086,
+        0,
+        48942
+      ],
+      "local_in_focus": []
+    },
+    "rtest": {
+      "summary": {
+        "false_trig": 0,
+        "ok": 2,
+        "of": 5,
+        "final_pct_med": 88,
+        "runs_total": 3
+      },
+      "final_pct": [
+        88,
+        95,
+        77,
+        91,
+        87
+      ],
+      "ref_s": [
+        115624,
+        94755,
+        85927,
+        76595
+      ],
+      "ref_s_monotonic_decrease": true,
+      "triggered_trials": 3,
+      "never_triggered_def": [
+        150,
+        400
+      ],
+      "trials": [
+        {
+          "defocus": 60,
+          "s_def_pct": 67,
+          "trig_ms": 1093,
+          "runs": 1,
+          "moves": 7,
+          "final_pct": 88,
+          "ok": 0,
+          "ref_s": 115624
+        },
+        {
+          "defocus": -60,
+          "s_def_pct": 43,
+          "trig_ms": 1240,
+          "runs": 1,
+          "moves": 9,
+          "final_pct": 95,
+          "ok": 1,
+          "ref_s": 94755
+        },
+        {
+          "defocus": 150,
+          "s_def_pct": 77,
+          "trig_ms": -1,
+          "runs": 0,
+          "moves": 0,
+          "final_pct": 77,
+          "ok": 0,
+          "ref_s": 94755
+        },
+        {
+          "defocus": -150,
+          "s_def_pct": 24,
+          "trig_ms": 1003,
+          "runs": 1,
+          "moves": 13,
+          "final_pct": 91,
+          "ok": 1,
+          "ref_s": 85927
+        },
+        {
+          "defocus": 400,
+          "s_def_pct": 87,
+          "trig_ms": -1,
+          "runs": 0,
+          "moves": 0,
+          "final_pct": 87,
+          "ok": 0,
+          "ref_s": 85927
+        }
+      ]
+    }
+  },
+  "post_patch_expectation": {
+    "status": "TARGET, not current",
+    "rtest": {
+      "ok_at_least": 4,
+      "of": 5,
+      "all_trials_triggered": true
+    },
+    "note": "Target after the anchored-reference fix: >=4/5 with all 5 trials triggered, and ref_s no longer eroded by re-landing (compare with the 115k -> 77k sequence in this fixture)."
+  }
+}

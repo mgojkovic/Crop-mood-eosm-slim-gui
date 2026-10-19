@@ -129,11 +129,22 @@ CONFIG_INT("crop.auto_refocus_sens", Auto_refocus_sens, 1); /* EOS M slim: 0=Low
 CONFIG_INT("crop.auto_refocus_method", Auto_refocus_method, 0); /* EOS M slim: 0=Canon AF, 1=MPU drive (not recording) */
 CONFIG_INT("crop.auto_refocus_af", Auto_refocus_af, 0); /* EOS M slim: MPU drive refocus search: 0=Local (default), 1=Full (B) */
 CONFIG_INT("crop.auto_refocus_mpu_rec", Auto_refocus_mpu_rec, 0); /* EOS M slim: MPU drive refocus while RAW recording: 0=OFF, 1=ON */
+CONFIG_INT("crop.auto_refocus_persist", Auto_refocus_persist, 1); /* patch 9: 0=Normal (patches 1-8 retries), 1=Persistent never-give-up hunt */
+CONFIG_INT("crop.auto_refocus_tol", Auto_refocus_tol, 1); /* patch 10: good-enough tolerance: 0=Strict 92 %, 1=Normal 88 %, 2=Relaxed 85 % */
 CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10, 3=AF assist */
 CONFIG_INT("crop.arrows_U_D",       Arrows_U_D, 3); /* ISO */
 CONFIG_INT("crop.more_hacks",       more_hacks, 1);
 static CONFIG_INT("crop.arrows_L_R",       Arrows_L_R, 2); /* Aperture */
 static CONFIG_INT("crop.button_map_v",     button_map_v, 0); /* remap old configs once */
+
+/* Patch 10/B: "good enough" tolerance for the Auto-refocus/hunt decisions.  Strict 92 % = the old behaviour,
+ * Normal 88 % (default, the user asked to widen the window), Relaxed 85 %.  Menu AF / bench / Refocus test
+ * keep their strict thresholds. */
+static int aref_tol_pct(void)
+{
+    static const int8_t tol[3] = { 92, 88, 85 };
+    return tol[COERCE(Auto_refocus_tol, 0, 2)];
+}
 
 enum crop_preset {
     CROP_PRESET_OFF = 0,
@@ -5998,6 +6009,30 @@ static struct menu_entry slim_info_button_menu[] = {
         .help2     = "Needs ON + REC and the MPU monitor already open (Keep open); otherwise Canon AF is used for\n"
                      "that refocus. Never opens/closes the monitor or writes the card while recording.",
     },
+    {
+        .name      = "Refocus persistence",
+        .priv      = &Auto_refocus_persist,
+        .max       = 1,
+        .choices   = CHOICES("Normal", "Persistent"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_BOOL,
+        .help      = "Normal: bounded retries (patches 1-8). Persistent: never stop retrying while the picture is blurry.",
+        .help2     = "Persistent keeps scheduling attempts (4-30 s backoff, rotating local/full/Canon strategies) until\n"
+                     "the picture is sharp or the scene/user changes. It can keep moving the lens on a scene that cannot\n"
+                     "be focused: use Normal for long unattended takes or to save battery/lens wear.",
+    },
+    {
+        .name      = "Focus tolerance",
+        .priv      = &Auto_refocus_tol,
+        .max       = 2,
+        .choices   = CHOICES("Strict 92", "Normal 88", "Relaxed 85"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_DICE,
+        .help      = "How close to the best remembered sharpness counts as 'good enough' for Auto refocus.",
+        .help2     = "Strict 92 % = the old behaviour. Normal 88 % (default) and Relaxed 85 % widen the window, so a\n"
+                     "refocus stops on a picture that is slightly softer but still good, instead of hunting for the last\n"
+                     "few percent. Applies to Auto refocus / Persistent only; menu AF, bench and the Refocus test stay strict.",
+    },
 };
 
 /* Mode UI: 0=1x1, 1=1x3, 2=3x3, 3=LV (Full-Res LiveView). */
@@ -6074,6 +6109,11 @@ enum
                           * 10 periodic decision record, 11 ineligible gates, 12 new scene - peak forgotten),
                           * w1 = current sharpness,
                           * w2 = S_ref, w3 = lv_dispsize | RECORDING << 8 | consecutive fails << 16 */
+    AFD_EV_MPUF,         /* full-payload continuation of a (9,0x17,32) @MPU record (task-12/N1 feed logging):
+                          * w0..w3 = payload bytes 12..27 (byte 12 in the low byte of w0), n = payload
+                          * bytes 28..31 (printed as w8=).  Written only immediately after its @MPU record
+                          * under the hook's cli(), and folded into that @MPU line by afdiag_flush; a line
+                          * with this event name alone means the @MPU half was lost to a ring wrap. */
 };
 
 /* Found in the EOS M 2.0.2 ROM (handler 0xFF27AC18): the MPU reports the
@@ -6223,10 +6263,12 @@ PROP_HANDLER(PROP_LV_FOCUS_DONE)
  * small moves made by the lens test). */
 static uint8_t afdiag_lvlens_raw[128];
 static volatile int afdiag_lvlens_len = 0;
+static volatile int afdiag_lvlens_count = 0;   /* every PROP_LV_LENS report (patch 8: fresh-report detector) */
 PROP_HANDLER(PROP_LV_LENS)
 {
     static uint32_t last[4];
     const uint8_t *b = (const uint8_t *)buf;
+    afdiag_lvlens_count++;
     if (len > sizeof(afdiag_lvlens_raw)) return;
     memcpy(afdiag_lvlens_raw, b, len);
     afdiag_lvlens_len = len;
@@ -6243,7 +6285,7 @@ PROP_HANDLER(PROP_LV_LENS)
  * _prop_lv_lens_request_update() does (not exported to modules): resend the
  * last received payload with its own length; the MPU replies with the
  * current lens status. */
-static void __attribute__((unused)) afdiag_request_lens_update(void)
+static void afdiag_request_lens_update(void)
 {
     if (afdiag_lvlens_len > 0)
         prop_request_change(PROP_LV_LENS, afdiag_lvlens_raw, afdiag_lvlens_len);
@@ -6317,6 +6359,7 @@ static const char *afdiag_prop_name(uint32_t code)
         case AFD_EV_REFOCUS:            return "@REFOCUS";
         case AFD_EV_LVOBJ:              return "@LVOBJ";
         case AFD_EV_MPU:                return "@MPU";
+        case AFD_EV_MPUF:               return "@MPUF";
         case AFD_EV_MPUTEST:            return "@MPUTEST";
     }
     return "?";
@@ -6324,9 +6367,11 @@ static const char *afdiag_prop_name(uint32_t code)
 
 static void afdiag_make_header(void)
 {
+    /* feed=32B: (9,0x17,32) @MPU lines carry all 32 payload bytes (w1..w3 + feed=32B w4..w8);
+     * older logs / other messages carry the first 12 bytes only.  Self-describing for new logs. */
     snprintf(afdiag_header, sizeof(afdiag_header),
         "# AFDIAG ON t=%d lens=\"%s\" lv_af_mode=%d cont_af_movie=%d manual_focus=%d "
-        "crop_preset=%d slim_mode=%d small_hacks=%d zoom=x%d\n",
+        "crop_preset=%d slim_mode=%d small_hacks=%d zoom=x%d feed=32B\n",
         get_ms_clock(), lens_info.name, lv_af_mode, continuous_af_movie,
         is_manual_focus() ? 1 : 0, crop_preset_index, slim_mode_ui,
         get_config_var("raw.small.hacks"), lv_dispsize);
@@ -6363,13 +6408,21 @@ static void afdiag_mpu_cbr(uint32_t *regs, uint32_t *stack, uint32_t pc)
         return;
     }
     afdiag_mpu_last[slot] = now ? now : 1;
-    uint32_t w[3] = { 0, 0, 0 };
+    /* Task-12 / N1 feed logging: (9,0x17,32) is the per-frame Canon-AF data feed.  Log all 32 payload
+     * bytes for it: the first 12 stay in the existing w1..w3 fields (backward compatible), the other 20 go
+     * into an AFD_EV_MPUF continuation entry that afdiag_flush folds into the same @MPU line (feed=32B
+     * w4..w8).  One extra ring entry per feed message, no new buffer/task; every other message keeps the
+     * 12-byte capture.  Both records are written under the cli() above, so the pair is always adjacent. */
+    int feed32 = (grp == 9 && op == 0x17 && len == 32);
+    uint32_t w[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
     if (data && len <= 100 && (uint32_t) data >= 0x1000)
-        for (uint32_t i = 0; i < len && i < 12; i++)
+        for (uint32_t i = 0; i < len && i < (feed32 ? 32u : 12u); i++)
             w[i / 4] |= (uint32_t) data[i] << (8 * (i % 4));
     afdiag_record(AFD_EV_MPU, 16,
                   ((grp & 0xFF) << 16) | ((op & 0xFF) << 8) | (len & 0xFF) | ((uint32_t) afdiag_mpu_drop[slot] << 24),
                   w[0], w[1], w[2]);
+    if (feed32)
+        afdiag_record(AFD_EV_MPUF, (int) w[7], w[3], w[4], w[5], w[6]);   /* payload bytes 12..27 + 28..31 */
     afdiag_mpu_drop[slot] = 0;
     sei(old);
 }
@@ -6525,12 +6578,35 @@ static void afdiag_flush(void)
     {
         struct afdiag_entry e = afdiag_ring[afdiag_tail % AFDIAG_RING];
         afdiag_tail++;
-        n += snprintf(buf + n, sizeof(buf) - n,
-            /* ML's snprintf does not support field widths on %s ("%-20s"
-             * came out literally on the camera), so keep this plain. */
-            "%08d %s n=%d w=%08x,%08x,%08x,%08x z=%d rr=%d hs=%d af=%d pos=%d dist=%d\n",
-            e.ms, afdiag_prop_name(e.code), e.len, e.w[0], e.w[1], e.w[2], e.w[3],
-            e.zoom, e.rraw, e.hs, e.af, e.pos, e.dist);
+        /* Task-12: a (9,0x17,32) @MPU record is followed by its AFD_EV_MPUF continuation (written under the
+         * same cli()), so fold the two into one line and append the remaining five payload dwords
+         * (w4..w8 = bytes 12..31) after the unchanged old fields.  The message id lives in w0 (grp<<16 |
+         * op<<8 | payload len), not in e.len.  An orphan continuation (ring wrap) is printed as its own
+         * @MPUF line by the normal branch, so nothing is silently lost. */
+        int feed32 = e.code == AFD_EV_MPU && (e.w[0] & 0xFFFFFF) == ((9u << 16) | (0x17u << 8) | 32u);
+        int have_cont = 0;
+        struct afdiag_entry cont;
+        if (feed32 && afdiag_tail != head)
+        {
+            cont = afdiag_ring[afdiag_tail % AFDIAG_RING];
+            if (cont.code == AFD_EV_MPUF) { have_cont = 1; afdiag_tail++; }
+        }
+        if (have_cont)
+            n += snprintf(buf + n, sizeof(buf) - n,
+                /* ML's snprintf does not support field widths on %s ("%-20s"
+                 * came out literally on the camera), so keep this plain. */
+                "%08d %s n=%d w=%08x,%08x,%08x,%08x z=%d rr=%d hs=%d af=%d pos=%d dist=%d "
+                "feed=32B w4=%08x,w5=%08x,w6=%08x,w7=%08x,w8=%08x\n",
+                e.ms, afdiag_prop_name(e.code), e.len, e.w[0], e.w[1], e.w[2], e.w[3],
+                e.zoom, e.rraw, e.hs, e.af, e.pos, e.dist,
+                cont.w[0], cont.w[1], cont.w[2], cont.w[3], (uint32_t) cont.len);
+        else
+            n += snprintf(buf + n, sizeof(buf) - n,
+                /* ML's snprintf does not support field widths on %s ("%-20s"
+                 * came out literally on the camera), so keep this plain. */
+                "%08d %s n=%d w=%08x,%08x,%08x,%08x z=%d rr=%d hs=%d af=%d pos=%d dist=%d\n",
+                e.ms, afdiag_prop_name(e.code), e.len, e.w[0], e.w[1], e.w[2], e.w[3],
+                e.zoom, e.rraw, e.hs, e.af, e.pos, e.dist);
         if (n > (int)sizeof(buf) - 200)
         {
             FIO_WriteFile(f, buf, n);
@@ -7383,11 +7459,14 @@ out:
     afdiag_afsearch_busy = 0;
 }
 
+/* patch 5 / SF7: defined with the other menu handlers; this one used to call task_create directly, before the
+ * not-recording precondition could run (the task itself then returned, but the creation is the hazard). */
+static void afd_menu_task_create(const char *name, void (*entry)(void *), const char *label);
 static MENU_SELECT_FUNC(afdiag_afsearch_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afsearch", 0x1e, 0x2000, afdiag_afsearch_task, (void*)0);
+    afd_menu_task_create("afdiag_afsearch", afdiag_afsearch_task, "AF search");
 }
 
 /* ---- AF drive (MPU): first contrast-detect autofocus, one-shot ------------
@@ -7483,6 +7562,18 @@ static int afd_fine = AFD_FINE_DEF;
 #define AFD_F_QUIET          1
 #define AFD_F_REC            2
 #define AFD_F_AREF           4      /* run for Auto refocus: Refocus AF = Local uses the local search */
+#define AFD_F_HUNT           8      /* patch 9: persistent hunt strategy override (afd_hunt_algo/speed/dir) */
+#define AFD_F_RT             16     /* patch 10: Refocus-test engine run: keep the strict tolerance thresholds */
+/* patch 10: 1 when the running engine pass is Auto refocus / persistent hunt: wider good-enough tolerance, fast
+ * epilogue, verify skip, learned fine step.  Menu AF / bench / Refocus test keep it 0. */
+static int afd_tol_run = 0;
+/* patch 10/C: fine step learned from the B sweep's s-curve width, per zoom + focal-length bucket */
+#define AFD_FINE_LEARN_MIN   4
+#define AFD_FINE_LEARN_MAX   80
+#define AFD_FINE_LEARN_PCT   70
+static int afd_fine_learned = 0;
+static int afd_fine_learned_zoom = 0;
+static int afd_fine_learned_mm = 0;
 #define AFD_ALGO_LOCAL       9      /* afd_algo_cur of the local search (after the bench's B07/B14/B1F) */
 #define AFP_POS_BASE         0xFFF812B8
 #define AFP_POS_WORDS        36           /* 0xFFF812B8..0xFFF81347 */
@@ -7557,6 +7648,11 @@ static int afd_speed = AFD_SPEED;         /* speed byte of the move payload */
 static int afd_unm_fast = 0;              /* 1: unmeasured moves (sample = 0) use AFD_SPEED_FAST */
 static int afd_meas_full = 0;             /* 1: afd_measure also computes s2, s4, band (sweep record), at stride 2 */
 static int afd_sw_speed = AFD_SPEED_FAST; /* B/C sweep speed ("Sweep speed" setting, or the bench's B07/B14/B1F) */
+/* Patch 9: persistent Auto-refocus hunt strategy override.  AFD_F_HUNT engine runs apply these after the normal
+ * menu/config resolution; normal runs never set them (algo/speed = -1, dir = 0).  Cleared at engine end. */
+static int afd_hunt_algo = -1;    /* -1 = menu/config, AFD_ALGO_LOCAL = local search, 1 = B */
+static int afd_hunt_speed = -1;   /* -1 = menu setting, else a speed byte (0x07 / 0x14 / 0x1F) */
+static int afd_hunt_dir = 0;      /* 0 = normal probe direction, +1 / -1 = force the B sweep direction */
 static int afdiag_afsweepspd = 0;         /* 0 07 (default), 1 14, 2 1F */
 static const uint8_t afd_algo_menu_tbl[5] = { 0, 1, 3, 4, 5 };   /* menu index -> afd_algo_cur (2 = C is kept in the code only) */
 static const uint8_t afd_sw_speed_tbl[3] = { AFD_SPEED, AFD_SPEED_MID, AFD_SPEED_FAST };
@@ -7657,12 +7753,18 @@ static int afd_es_check(int dir, int len, int pulses, int done_ms, int done_val)
 /* Running while RAW recording (AFD_F_REC): recording is no abort reason, but any
  * change of the recording state (stopping) is. */
 static int afd_rec_run = 0, afd_rec_state0 = 0;
+/* Movie Servo / continuous AF: only Auto refocus engine runs (AFD_F_AREF) abort on it.  is_continuous_af()
+ * reports the persistent MENU SETTING, not an active servo event; checking it for menu AF drive would abort
+ * every AFSTOP/AFSWEEP/bench/Refocus-test run in the normal movie-mode configuration (Movie Servo is a menu
+ * option there), so menu AF stays usable (status review R4; see doc/AF-PATCH2-FIELD-PLAN.md item E). */
+static int afd_abort_on_servo = 0;
 /* AFD_RUN_CAP_MS: the AF search (afd_run) is cut off after this long (aborted=timeout);
  * afd_deadline is 0 outside afd_run.  afd_nopeak: pass A saw no real peak. */
 #define AFD_RUN_CAP_MS       15000
 #define AFD_RUN_CAP_B_MS     18000   /* B and local -> B: full-range search (AFD_SW_MAX_CHUNKS); never ~20 s */
 #define AFD_NOPEAK_PCT       115   /* pass A max below this % of its min = no real peak */
 static int afd_deadline = 0, afd_timeout = 0, afd_nopeak = 0, afd_run_dir = 1;
+static int afd_travel_cap = 0;   /* patch 9.1 / S4: the run hit AFD_MAX_TOTAL (travel budget), published for the hunt */
 static volatile int afd_nopeak_last = 0;   /* result of the last afd_engine AF drive, for Auto refocus */
 static volatile int afd_searched_last = 0;   /* the last AF drive run really ran (moved or judged the scene) */
 static int afd_rec_state(void)
@@ -7693,6 +7795,7 @@ static int afd_must_abort(void)
     }
     else if (RECORDING || RECORDING_RAW)
         return 1;
+    if (afd_abort_on_servo && is_continuous_af()) return 1;   /* Auto refocus only: do not fight a Canon servo */
     if (afd_deadline && get_ms_clock() - afd_deadline > 0)
     {
         afd_timeout = 1;
@@ -7902,6 +8005,7 @@ static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, a
     if (n > cap) n = cap;
     if (n < -cap) n = -cap;
     r->sent = n;
+    if (afd_travel + ABS(n) > AFD_MAX_TOTAL) afd_travel_cap = 1;   /* patch 9.1 / S4 */
     if (afd_must_abort() || afd_travel + ABS(n) > AFD_MAX_TOTAL) { r->aborted = 1; afd_aborted = 1; return 0; }
 
     unsigned f0 = afd_frame_cnt, last_f = f0;
@@ -8059,6 +8163,34 @@ static void afd_luma_probe(const char *tag)
     afd_log("# luma %s t=%d luma=%d s=%d g=%d\n", tag, get_ms_clock() - afd_t0, m, (int) sv, (int) g);
 }
 
+/* ---- patch 8: zoom refresh -------------------------------------------------
+ * The MPU monitor freezes the LV_LENS focal-length property at its pre-open value (confirmed in the field:
+ * EXIF is right, lens_info.focal_len stays stale after a zoom while the monitor is open).  Resend the saved
+ * PROP_LV_LENS request and poll for a fresh report; afd_mm_cache tracks the last plausible value for the
+ * auto-detection and the run header.  This is display/cache logic only, no AF algorithm depends on it. */
+static int afd_mm_cache = 0;   /* last plausible lens_info.focal_len (0 = unknown) */
+static int afd_lens_refresh(int wait_ms, int *mm_out)
+{
+    int old_mm = (int) lens_info.focal_len;
+    int cnt0 = afdiag_lvlens_count;
+    int reply = 0;
+    afdiag_request_lens_update();
+    int t0 = get_ms_clock();
+    while (get_ms_clock() - t0 < wait_ms)
+    {
+        if (afdiag_lvlens_count != cnt0) { reply = 1; break; }
+        msleep(20);
+    }
+    int new_mm = (int) lens_info.focal_len;
+    if (new_mm >= 8 && new_mm <= 300) afd_mm_cache = new_mm;
+    /* patch 9.1 / S1: log only when the value really changed: a stale reply every second during recording used
+     * to fill the 2 KB note buffer (and the auto poll is now recording-gated as well). */
+    if (old_mm != new_mm)
+        afd_note("# zoom probe old_mm=%d new_mm=%d reply=%d t=%d\n", old_mm, new_mm, reply, get_ms_clock());
+    if (mm_out) *mm_out = new_mm;
+    return reply;
+}
+
 /* Move by n pulses (0: just sample), settle, sample (sample=0: no
  * measurement, the line shows zeros; 1: stable pair check; 2: one sample);
  * logs one line (wait = ms after FOCUS_DONE, samp = ms of the sample, q = s*1000/g). track=1: the measurement
@@ -8066,6 +8198,8 @@ static void afd_luma_probe(const char *tag)
  * or 0 after setting afd_aborted. */
 static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
 {
+    static const uint8_t stop = 0;   /* (9,3,1): the explicit stop, safe to send twice / when already stopped */
+    if (afd_travel + ABS(n) > AFD_MAX_TOTAL) afd_travel_cap = 1;   /* patch 9.1 / S4 */
     if (afd_must_abort() || afd_travel + ABS(n) > AFD_MAX_TOTAL)
     {
         afd_aborted = 1;
@@ -8109,7 +8243,17 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             }
             if (!nch) { first_done_ms = done_ms; first_done_val = done_val; }
             nch++;
-            if (done_ms < 0) { any_nodone = 1; afd_es_n = 0; afd_es_acc = 0; break; }   /* no done: do not send the rest on top of a running motor */
+            if (done_ms < 0)
+            {
+                /* NODONE: FOCUS_DONE timed out.  The remaining chunks are dropped (never send on top of a running
+                 * motor), but an explicit stop is sent too: previously the motor could still be running while the
+                 * caller sampled / sent the next command (status review R7/A5d).  Stop is a no-op when already
+                 * stopped; the move is still reported as nodone and afd_pos keeps its commanded accounting. */
+                any_nodone = 1; afd_es_n = 0; afd_es_acc = 0;
+                ((int (*)(int,int,int,const void *)) 0x38C4)(9, 3, 1, &stop);
+                afd_log("# nodone stop phase=%s n=%d t=%d\n", phase, c, get_ms_clock() - afd_t0);
+                break;
+            }
             if (afd_es_check(c > 0 ? 1 : -1, c, c, done_ms, done_val)) break;   /* end stop: do not push the rest of the move into it */
             /* FOCUS_DONE is not the motion end (at 1F it came at ~150 ms for a
              * 300-pulse chunk that moved until ~590 ms): wait the modelled
@@ -8554,13 +8698,143 @@ static uint32_t afd_run_a(uint32_t *best_out)
 #define AFD_L_CLIMB_MAX      8      /* local: climb steps; still rising after all of them = no peak nearby -> B */
 #define AFD_L_DROP_PCT       90     /* local climb stop: two steps in a row below this % of the max */
 #define AFD_L_LAND_PCT       92     /* local landing: retrace 1 threshold, % of the max */
-#define AFD_L_FAR_PCT        50     /* local: everything measured below this % of the last landed s (same zoom) -> B */
+#define AFD_L_FAR_PCT        50     /* local: everything measured below this % of the local reference (ref max, else the last landing, same zoom) -> B */
 #define AFD_L_INFOCUS_PCT    85     /* local, nothing better: after returning to the start s below this % of s0 -> short landing */
+#define AFD_L_SOFT_PCT       92     /* local, nothing better and the best probe is below this % of the local reference: the picture is
+                                     * still soft (handover 4.1: 82..92 % of the true focus peak): probe wider before "in focus" */
+#define AFD_L_WIDE_X         2      /* local wide probe distance = +-this * (2*fine) from the start = +-4*fine (was +-2*fine) */
+#define AFD_L_TRIG_DROP_PCT  90     /* local: an Auto refocus trigger below this % of its reference peak is the "drop path": never
+                                     * take the in-focus exit on it, even when the local probes look flat (handover 4.1) */
+#define AFD_REF_RESET_PCT    75     /* ref max: a verified landing this far below it is a different scene / light -> reset the max.
+                                     * Kept well below the 82..92 soft-picture band so a soft local landing cannot erode the max */
+#define AFD_SOFT_LAND_N      3      /* ref max (SF2, patch 4): this many consecutive verified landings below AFD_L_SOFT_PCT
+                                     * of the max = a persistently softer scene -> reset the max to the best of them once */
 #define AFD_F_MARGIN_MILLI   100    /* F: vertex must be this much (1/1000 step) behind the current point */
 #define AFD_F_MIN_CURV       20     /* F: parabola curvature (milli, 2a) must be below -this */
 
-static uint32_t afd_last_land_s = 0;   /* E: sharpness of the last landing, same zoom only */
+static uint32_t afd_last_land_s = 0;   /* E: sharpness of the last landing, same zoom + focal-length bucket only */
 static int afd_last_land_zoom = 0;
+static int afd_last_land_mm = 0;       /* patch 5 / MF4: focal-length bucket of the last landing */
+static int afd_last_land_track = 0;    /* 1 = the running afd_run may write the last landing: engine modes 0 and 8 (MF4) */
+/* Per-zoom running maximum of VERIFIED landing sharpness (handover 4.2, reference erosion).  afd_last_land_s
+ * is re-taken after every landing, so a locally soft landing (82..92 %) lowered the reference and the next local
+ * search compared against it, accepting the soft picture: ref_s drifted 115k -> 95k -> 86k -> 77k in one test.
+ * This max only RISES (on a verified landing), is kept per zoom (sharpness is zoom dependent), resets on a zoom
+ * change and on a detected scene change (aref luma jump, afd_ref_max_reset), and does not decay on its own.  It is
+ * used only by the local search; afd_last_land_s keeps its old meaning for A/B/C/D/E and the aref trigger.
+ * Residual risk: a gradual exposure / contrast change that stays inside the scene gate leaves the max above the
+ * achievable focus, so the local search probes wide and falls back to B more often (slower, not softer). */
+static uint32_t afd_ref_max_s = 0;
+static int afd_ref_max_zoom = 0;
+static int afd_ref_max_mm = 0;      /* focal-length bucket the max belongs to (afd_mm_bucket, patch 3/MF2) */
+static int afd_ref_max_track = 0;   /* 1 = the running afd_run may update the max: only engine mode 0 (patch 3/MF2) */
+/* SF2 / patch 4: a persistently softer scene (10..20 % inside the luma gate and above the 75 % deep-landing reset)
+ * used to keep the max high forever, so every local refocus wide-probed and fell back to B for the rest of the
+ * session.  AFD_SOFT_LAND_N consecutive verified landings below AFD_L_SOFT_PCT of the max reset it to the best
+ * of those landings (once; the counter then restarts). */
+static int afd_soft_land_n = 0;      /* consecutive verified landings below AFD_L_SOFT_PCT of the max */
+static uint32_t afd_soft_best = 0;   /* best (highest) landing of that run */
+/* Focal-length bucket for the reference keys (review MF2): lv_dispsize is only the digital zoom; sharpness
+ * depends on the lens focal length too.  Round to 10 mm.  Patch 5 / SF5: an invalid focal length (0 / bogus)
+ * keeps the last valid bucket instead of resetting everything to bucket 0, and a changed bucket is debounced
+ * (two observations) so a noisy focal_len cannot keep restarting the references.  Pending/confirmed changes
+ * are logged with afd_note (safe outside an AF run). */
+static int afd_mm_bucket(void)
+{
+    static int last = 0, seen = 0, cand = -1, cand_n = 0;
+    int mm = (int) lens_info.focal_len;
+    if (mm <= 0 || mm > 400) return last;   /* invalid: keep the last valid bucket */
+    int raw = ((mm + 5) / 10) * 10;
+    if (!seen) { seen = 1; last = raw; return last; }
+    if (raw == last) { cand = -1; cand_n = 0; return last; }
+    if (raw != cand)
+    {
+        cand = raw;
+        cand_n = 1;
+        afd_note("# focal mm change pending %d -> %d\n", last, raw);
+        return last;
+    }
+    if (++cand_n >= 2)
+    {
+        afd_note("# focal mm change confirmed %d -> %d\n", last, raw);
+        last = raw;
+        cand = -1;
+        cand_n = 0;
+    }
+    return last;
+}
+/* Scene-change reset is called from the aref sampler, outside an AF run: use the note log (afd_note), which is
+ * held in RAM and flushed with the next run's log, so the line is not lost from the engine buffer.
+ * It also clears the last landing: after a scene change the old scene's landing must not become the reference of
+ * the first local run either (review N5 / patch 3). */
+static void afd_ref_max_reset(const char *why)
+{
+    if (!afd_ref_max_s && !afd_ref_max_zoom && !afd_ref_max_mm && !afd_last_land_s && !afd_last_land_zoom && !afd_last_land_mm && !afd_soft_land_n) return;
+    afd_note("# local: ref reset why=%s s=%d zoom=%d mm=%d last_clear=%d\n", why, (int) afd_ref_max_s,
+             afd_ref_max_zoom, afd_ref_max_mm, afd_last_land_s ? 1 : 0);
+    afd_ref_max_s = 0;
+    afd_ref_max_zoom = 0;
+    afd_ref_max_mm = 0;
+    afd_last_land_s = 0;
+    afd_last_land_zoom = 0;
+    afd_last_land_mm = 0;
+    afd_soft_land_n = 0;   /* patch 4/SF2: a scene/key reset also breaks a soft-landing run */
+    afd_soft_best = 0;
+}
+static void afd_ref_max_update(uint32_t s)
+{
+    if (!s || !afd_ref_max_track) return;   /* patch 3/MF2: bench / RT-prep / speed-test landings must not feed it */
+    int zoom = lv_dispsize, mm = afd_mm_bucket();
+    if (afd_ref_max_zoom != zoom || afd_ref_max_mm != mm)
+    {
+        afd_log("# local: ref max zoom set zoom=%d mm=%d s=%d\n", zoom, mm, (int) s);
+        afd_ref_max_s = s;
+        afd_ref_max_zoom = zoom;
+        afd_ref_max_mm = mm;
+        afd_soft_land_n = 0;
+        afd_soft_best = 0;
+        return;
+    }
+    if (s > afd_ref_max_s)
+    {
+        afd_log("# local: ref max rise %d -> %d zoom=%d mm=%d\n", (int) afd_ref_max_s, (int) s, zoom, mm);
+        afd_ref_max_s = s;
+        afd_soft_land_n = 0;
+        afd_soft_best = 0;
+    }
+    else if (afd_below(s, afd_ref_max_s, AFD_REF_RESET_PCT))
+    {
+        afd_log("# local: ref max reset deep landing %d -> %d zoom=%d mm=%d\n", (int) afd_ref_max_s, (int) s, zoom, mm);
+        afd_ref_max_s = s;
+        afd_soft_land_n = 0;
+        afd_soft_best = 0;
+    }
+    else if (afd_below(s, afd_ref_max_s, AFD_L_SOFT_PCT))
+    {
+        /* below the soft band (but above the deep reset): a persistently softer scene, not erosion (SF2) */
+        afd_soft_land_n++;
+        if (s > afd_soft_best) afd_soft_best = s;
+        if (afd_soft_land_n >= AFD_SOFT_LAND_N)
+        {
+            uint32_t old = afd_ref_max_s;
+            afd_ref_max_s = afd_soft_best;   /* never below the best actual landing of the run */
+            afd_log("# local: ref max reset confirmed soft landings n=%d best=%d old=%d zoom=%d mm=%d\n",
+                    afd_soft_land_n, (int) afd_soft_best, (int) old, zoom, mm);
+            afd_soft_land_n = 0;
+            afd_soft_best = 0;
+        }
+    }
+    else
+    {
+        /* >= AFD_L_SOFT_PCT of the max: not a confirmed softer scene; break the run */
+        afd_soft_land_n = 0;
+        afd_soft_best = 0;
+    }
+}
+/* Auto refocus trigger hint for the local search: aref_mpu_arm() (aref_step and the Refocus test) sets these
+ * immediately before the AFD_F_AREF run, afd_run_local reads them.  0 = not set / no reference peak. */
+static volatile int afd_aref_trig_pct = 0;      /* sharpness at the trigger, % of the reference peak */
+static volatile int afd_aref_trig_path = 0;     /* aref trigger path: 1 = relative drop, 2 = absolute (no usable peak) */
 
 /* ln(x)*1000 for x >= 1 (integer series, no libm) */
 static int afd_ln_milli(uint32_t x)
@@ -8669,6 +8943,27 @@ struct afd_sw
     uint32_t gmax, gfirst;           /* g over the samples (sweep scale) and the first one */
 };
 
+/* Patch 10/C: learn the fine step from this sweep's s-curve: the time span where s >= 70 % of smax around the
+ * peak, converted to pulses with this move's speed model.  A high-gearing lens (EF50 + speedbooster) has a much
+ * wider peak than the focal-length table assumes, so the local probes become big enough to see a slope.  Stored
+ * per zoom + focal-length bucket; used only when the Fine step menu is Auto and the run is Auto-refocus/hunt. */
+static void afd_fine_learn_from_sw(const struct afd_sw *w, int mspp)
+{
+    if (!w->peak || w->n < 5 || w->imax <= 0 || w->imax >= w->n - 1 || !w->smax || mspp <= 0) return;
+    uint32_t thr = w->smax - w->smax * (100 - AFD_FINE_LEARN_PCT) / 100;   /* 70 % of smax */
+    int il = w->imax, ir = w->imax;
+    while (il > 0 && afd_sw_samp[il - 1].m.s1 >= thr) il--;
+    while (ir < w->n - 1 && afd_sw_samp[ir + 1].m.s1 >= thr) ir++;
+    if (il == 0 || ir == w->n - 1) return;   /* peak clipped at a sweep end: width unknown */
+    int span_ms = afd_sw_samp[ir].t_ms - afd_sw_samp[il].t_ms;
+    int pulses = COERCE(span_ms * 10 / mspp, AFD_FINE_LEARN_MIN, AFD_FINE_LEARN_MAX);
+    afd_fine_learned = pulses;
+    afd_fine_learned_zoom = lv_dispsize;
+    afd_fine_learned_mm = afd_mm_bucket();
+    afd_log("# fine learned mm=%d zoom=%d val=%d span_ms=%d mspp_x10=%d\n", afd_fine_learned_mm, afd_fine_learned_zoom,
+            afd_fine_learned, span_ms, mspp);
+}
+
 /* One tracked move of dir*len with a stop callback, then the model and the peak analysis.
  * afd_pos is corrected to the estimated end position (the move may have been stopped). */
 static void afd_sweep(const char *tag, int dir, int len, int speed, afd_stop_fn cb, struct afd_sw *w)
@@ -8754,6 +9049,7 @@ static void afd_sweep(const char *tag, int dir, int len, int speed, afd_stop_fn 
     w->over = moved - w->pos_pk;
     w->peak = n >= 3 && w->smax_ex >= AFD_MIN_S && (uint64_t) smax * 100 >= (uint64_t) w->smin * AFD_NOPEAK_PCT &&
               afd_below(afd_sw_samp[n - 1].m.s1, smax, AFD_SW_FALL_END_PCT);
+    afd_fine_learn_from_sw(w, mspp);   /* patch 10/C: fine step from the peak width (no behaviour here) */
     afd_log("# %s dir=%d len=%d spd=%x t_send=%d n=%d peak=%d imax=%d smax=%d smin=%d smax_ex=%d t_pk=%d t_stop=%d t_done=%d val=%x "
             "t_exp=%d t_stable=%d mspp_x10=%d moved=%d pos_pk=%d over=%d pos=%d\n",
             tag, dir, len, speed, t_send, n, w->peak, imax, (int) smax, (int) w->smin, (int) w->smax_ex, tpk, w->r.stop_ms,
@@ -8993,6 +9289,14 @@ static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
     int pos0 = afd_pos;
     int d = afd_probe_dir(g0, &sp, 0);
     if (!d) return 0;
+    if (afd_hunt_dir)
+    {
+        /* patch 9: the "reversed" hunt leg forces the sweep direction; do not force it into a known end stop */
+        if (afd_endstop_dir == afd_hunt_dir)
+            afd_log("# hunt forced dir refused dir=%d\n", afd_hunt_dir);
+        else
+            d = afd_hunt_dir;
+    }
     int spd = afd_sw_speed, dir = d, pk = 0;
     uint32_t ref = 0;
     int maxch = afd_sw_maxch(spd, AFD_SW_MAX_CHUNKS);
@@ -9066,9 +9370,12 @@ static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
         {
             afd_resweep_used = 1;
             afd_land_flat = 0;
-            afd_log("# land flat -> resweep\n");
+            /* Patch 10/E(ii): the old 4-chunk local re-sweep missed the focus region after a failed retrace
+             * (55 mm field: retrace hit=0 flat=1 then no peak).  A failed landing means the sweep's peak estimate
+             * was wrong, so do a full-width re-sweep from the current position (deadline/travel caps still apply). */
             spd = AFD_SPEED;   /* the re-sweep is always at 07 */
-            if (!afd_sweep_find(afd_pos, dir, spd, afd_sw_maxch(spd, AFD_SW_RESWEEP_CHUNKS), &dir, &ref, &pk))
+            afd_log("# land flat -> full resweep chunks=%d (was %d)\n", AFD_SW_MAX_CHUNKS, AFD_SW_RESWEEP_CHUNKS);
+            if (!afd_sweep_find(afd_pos, dir, spd, afd_sw_maxch(spd, AFD_SW_MAX_CHUNKS), &dir, &ref, &pk))
             {
                 *best_out = ref;
                 return 0;
@@ -9206,17 +9513,35 @@ static uint32_t afd_run_e(uint32_t *best_out)
 
 /* Local search, for Auto refocus (Refocus AF = Local): s0 (stable), +2*fine, then -4*fine (net -2*fine from the
  * start), each measured (stable pair).  Neither side better than s0 by AFD_L_IMPROVE_PCT: back to the start
- * (+2*fine), in focus after 3 moves.  Else a climb in fine steps towards the better side (no sweep through focus)
- * until s is below AFD_L_DROP_PCT of the max twice in a row, then a short feedback landing: back move of
- * AFD_RT_BACK before the max, fine steps until s >= AFD_L_LAND_PCT of the max.  Falls back to B (afd_run_sweep, from
- * where the lens is) when everything measured is below AFD_L_FAR_PCT of the last landed s, when the climb is
- * still rising after AFD_L_CLIMB_MAX steps, or when the landing fails.  afd_path_local tells which one decided. */
+ * (+2*fine), in focus after 3 moves, but ONLY when the picture is close to the local reference (the per-zoom
+ * ref max afd_ref_max_s when there is one, else the last landing).  When the best probe is below
+ * AFD_L_SOFT_PCT of it, or when the Auto refocus trigger came from the drop path, the picture is still soft
+ * (handover 4.1: 82..92 % of the true peak) and a WIDER probe (+-AFD_L_WIDE_X*2*fine = +-4*fine) is made first:
+ * near an end stop the flank is flat and +-2*fine cannot see a 5 % slope.  Still flat after that -> B.  Else a
+ * climb in fine steps towards the better side (no sweep through focus) until s is below AFD_L_DROP_PCT of the
+ * max twice in a row, then a short feedback landing: back move of AFD_RT_BACK before the max, fine steps until
+ * s >= AFD_L_LAND_PCT of the max.  Falls back to B (afd_run_sweep, from where the lens is) when everything
+ * measured is below AFD_L_FAR_PCT of the reference, when the climb is still rising after AFD_L_CLIMB_MAX steps,
+ * or when the landing fails.  afd_path_local tells which one decided. */
 static uint32_t afd_run_local(uint32_t *best_out)
 {
     uint32_t s0, g0;
     afd_path_local = 1;
     if (!afd_start(&s0, &g0)) return afd_aborted ? 0 : s0;
-    int fine = AFD_FINE, p1 = 2 * fine;
+    int fine = AFD_FINE, p1 = 2 * fine, wo = AFD_L_WIDE_X * p1;   /* wo: wide probe distance from the start = +-4*fine */
+    /* Local reference: the per-zoom ref max (handover 4.2) when there is one, else the old last-landing value
+     * (bootstrap on the first run / after a zoom change).  afd_last_land_s keeps its meaning for A/B/C/D/E and
+     * for the aref trigger; the ref max is engine bookkeeping (afd_ref_max_update, set from verified landings
+     * in afd_run) and is deliberately NOT reset by aref_peak_clear/aref_peak_update, which follow every landing. */
+    int have_last = afd_last_land_s && afd_last_land_zoom == lv_dispsize && afd_last_land_mm == afd_mm_bucket();
+    int have_ref = afd_ref_max_s && afd_ref_max_zoom == lv_dispsize && afd_ref_max_mm == afd_mm_bucket();
+    uint32_t ref = have_ref ? afd_ref_max_s : have_last ? afd_last_land_s : 0;
+    /* Drop path: the trigger fired on a picture 15..40 % below the aref reference peak (or without a usable
+     * peak).  Every relative MPU trigger qualifies (the threshold is <= 85 %), which is intended: the in-focus
+     * exit is never taken on an Auto refocus trigger (review SF1).  Snapshot both globals once (review N1). */
+    int tpath = afd_aref_trig_path, tpct = afd_aref_trig_pct;
+    int trig_pct = tpath ? tpct : 0;
+    int drop = tpath == 2 || (tpath == 1 && trig_pct > 0 && trig_pct < AFD_L_TRIG_DROP_PCT);
     uint32_t sp = afd_move_ex("w", p1, 1, 0);
     if (afd_aborted) return 0;
     uint32_t sm = afd_move_ex("w", -2 * p1, 1, 0);   /* a reversal: lens at -p1 now */
@@ -9225,15 +9550,17 @@ static uint32_t afd_run_local(uint32_t *best_out)
     int bm = (uint64_t) sm * 100 > (uint64_t) s0 * AFD_L_IMPROVE_PCT;
     int dir = (!bp && !bm) ? 0 : (bp && (!bm || sp >= sm)) ? 1 : -1;
     uint32_t smax = MAX(s0, MAX(sp, sm));
-    int zoom_ok = afd_last_land_s && afd_last_land_zoom == lv_dispsize;
-    afd_log("# local s0=%d plus=%d minus=%d dir=%d fine=%d last=%d\n", (int) s0, (int) sp, (int) sm, dir, fine, (int) afd_last_land_s);
-    if (zoom_ok && afd_below(smax, afd_last_land_s, AFD_L_FAR_PCT))
+    /* Patch 10/B: good-enough tolerance for Auto refocus / hunt only; menu AF, bench and Refocus test stay 92. */
+    int softpct = afd_tol_run ? aref_tol_pct() : AFD_L_SOFT_PCT;
+    afd_log("# local s0=%d plus=%d minus=%d dir=%d fine=%d last=%d ref=%d trig_pct=%d drop=%d tol=%d\n", (int) s0, (int) sp,
+            (int) sm, dir, fine, (int) afd_last_land_s, (int) ref, trig_pct, drop, afd_tol_run ? softpct : 0);
+    if (ref && afd_below(smax, ref, AFD_L_FAR_PCT))
     {
-        afd_log("# local: far from the last landing -> B\n");
+        afd_log("# local: far from the local reference -> B\n");
         afd_path_local = 0;
         return afd_run_sweep(best_out, 0);
     }
-    if (!dir && zoom_ok && afd_below(smax, afd_last_land_s, 70))
+    if (!dir && have_last && afd_below(smax, afd_last_land_s, 70))
     {
         /* no side is better, but we are well below the last landing: a blurry
          * plateau, not focus -> full search instead of locking onto blur */
@@ -9241,23 +9568,56 @@ static uint32_t afd_run_local(uint32_t *best_out)
         afd_path_local = 0;
         return afd_run_sweep(best_out, 0);
     }
+    int wide = 0;
+    int soft0 = ref && afd_below(smax, ref, softpct);   /* computed once: also used by the post-climb guard (MF1) */
     if (!dir)
     {
-        uint32_t se = afd_move_ex("w", p1, 1, 0);   /* back to the start */
-        if (afd_aborted) return 0;
-        if (afd_below(se, s0, AFD_L_INFOCUS_PCT))
+        if (soft0 || drop)
         {
-            afd_log("# local in focus, but s=%d after returning: landing\n", (int) se);
-            se = afd_land_steps(1, afd_pos - AFD_RT_BACK, AFD_RT_BACK, s0);
+            /* The lens is at -p1 (P-p1).  The wide points are +-wo = +-2*p1 = +-4*fine from the start:
+             * +p1 is P, p1+wo is P+wo, -2*wo goes back to P-wo (a reversal). */
+            wide = 1;
+            afd_log("# local: %s -> wide probe ref_pct=%d\n", soft0 ? "soft" : "drop path",
+                    ref ? (int) ((uint64_t) smax * 100 / ref) : 0);
+            uint32_t swp = afd_move_ex("W", p1 + wo, 1, 0);   /* P-p1 -> P+wo */
             if (afd_aborted) return 0;
+            int wpos_p = afd_pos;
+            uint32_t swm = afd_move_ex("W", -2 * wo, 1, 0);   /* P+wo -> P-wo */
+            if (afd_aborted) return 0;
+            int wpos_m = afd_pos;
+            int wp = (uint64_t) swp * 100 > (uint64_t) s0 * AFD_L_IMPROVE_PCT;
+            int wm = (uint64_t) swm * 100 > (uint64_t) s0 * AFD_L_IMPROVE_PCT;
+            /* SF4: log the sample positions (long reversals -> the nominal +-4*fine reach is unverified);
+             * N4: pick the direction from the best sample seen, not from the wide pair only. */
+            afd_log("# local wide plus=%d minus=%d s0=%d pos_plus=%d pos_minus=%d mm=%d\n", (int) swp, (int) swm,
+                    (int) s0, wpos_p, wpos_m, (int) lens_info.focal_len);
+            if (!wp && !wm)
+            {
+                afd_log("# local: wide still flat -> B\n");
+                afd_path_local = 0;
+                return afd_run_sweep(best_out, 0);
+            }
+            uint32_t wbest = s0;
+            int wdir = 0;
+            if (sp > wbest) { wbest = sp; wdir = 1; }
+            if (sm > wbest) { wbest = sm; wdir = -1; }
+            if (swp > wbest) { wbest = swp; wdir = 1; }
+            if (swm > wbest) { wbest = swm; wdir = -1; }
+            dir = wdir ? wdir : (wp ? 1 : -1);
         }
-        afd_log("# local in focus s0=%d s=%d\n", (int) s0, (int) se);
-        afd_land_s = se;
-        *best_out = MAX(s0, se);
-        return se;
     }
     uint32_t fmax = sm;
-    if (dir > 0)
+    if (wide && dir > 0)
+    {
+        fmax = afd_move_ex("w", wo + p1, 1, 0);  /* P-wo -> P+p1, the usual +probe point: climb outward from it */
+        if (afd_aborted) return 0;
+    }
+    else if (wide)
+    {
+        fmax = afd_move_ex("w", wo - p1, 1, 0);  /* P-wo -> P-p1, the usual -probe point: climb outward from it */
+        if (afd_aborted) return 0;
+    }
+    else if (dir > 0)
     {
         fmax = afd_move_ex("w", 2 * p1, 1, 0);   /* from -p1 to +p1, the better side */
         if (afd_aborted) return 0;
@@ -9280,9 +9640,17 @@ static uint32_t afd_run_local(uint32_t *best_out)
         afd_path_local = 0;
         return afd_run_sweep(best_out, 0);
     }
-    if (zoom_ok && afd_below(fmax, afd_last_land_s, AFD_L_FAR_PCT))
+    if (ref && afd_below(fmax, ref, softpct) && (drop || soft0))
     {
-        afd_log("# local: climb max far below the last landing -> B\n");
+        /* MF1 (review): a noisy narrow probe can pick a direction, skip the wide probe and the climb can stall
+         * on a shoulder at 60..92 % of the reference - the exact 82-83 % failure class.  Never let that land. */
+        afd_log("# local: climb still soft on the drop path -> B\n");
+        afd_path_local = 0;
+        return afd_run_sweep(best_out, 0);
+    }
+    if (ref && afd_below(fmax, ref, AFD_L_FAR_PCT))
+    {
+        afd_log("# local: climb max far below the local reference -> B\n");
         afd_path_local = 0;
         return afd_run_sweep(best_out, 0);
     }
@@ -9291,7 +9659,7 @@ static uint32_t afd_run_local(uint32_t *best_out)
     afd_fine_peak_pos = pmax;
     afd_run_dir = dir;
     afd_land_flat = 0;
-    afd_rt_thr1 = AFD_L_LAND_PCT;
+    afd_rt_thr1 = afd_tol_run ? aref_tol_pct() : AFD_L_LAND_PCT;
     uint32_t land = afd_land_steps(dir, pmax - dir * AFD_RT_BACK, AFD_RT_BACK, fmax);
     afd_rt_thr1 = AFD_RT_THR1;
     if (afd_aborted) return 0;
@@ -9325,30 +9693,53 @@ static uint32_t afd_run(uint32_t *best_out)
     }
     if (r && !afd_aborted && !afd_nopeak && !afd_lowcontrast && afd_algo_cur != 0 && afd_algo_cur != 5)
     {
-        /* verify the landing: 300 ms later the picture must still be sharp;
-         * if it is not (the lens was still travelling), land once more */
-        msleep(300);
-        uint32_t v = afd_ep_sample();
-        if (v && afd_below(v, r, 85) && !afd_must_abort())
+        /* Patch 10/D(ii): for Auto-refocus / hunt runs with a good landing the settle/hunt judge already checks
+         * the picture; skip the 300 ms verify + possible re-land (fixed ~0.3-0.6 s saved).  Normal runs keep it. */
+        int land_pct = *best_out ? (int) ((uint64_t) r * 100 / *best_out) : 0;
+        if (afd_tol_run && land_pct >= 90)
         {
-            int d = afd_run_dir ? afd_run_dir : 1;
-            afd_log("# landing drift land_s=%d after_300ms=%d -> re-land dir=%d\n", (int) r, (int) v, d);
-            uint32_t r2 = afd_land_steps(d, afd_pos - d * AFD_RT_BACK, AFD_RT_BACK, r);
-            if (!afd_aborted)
-            {
-                msleep(300);
-                uint32_t v2 = afd_ep_sample();
-                afd_log("# re-land s=%d after_300ms=%d\n", (int) r2, (int) v2);
-                if (v2) r = v2;
-            }
+            afd_log("# verify skipped land_pct=%d\n", land_pct);
         }
-        else if (v) r = MIN(r, MAX(v, r * 9 / 10));
+        else
+        {
+            /* verify the landing: 300 ms later the picture must still be sharp;
+             * if it is not (the lens was still travelling), land once more */
+            msleep(300);
+            uint32_t v = afd_ep_sample();
+            if (v && afd_below(v, r, 85) && !afd_must_abort())
+            {
+                int d = afd_run_dir ? afd_run_dir : 1;
+                afd_log("# landing drift land_s=%d after_300ms=%d -> re-land dir=%d\n", (int) r, (int) v, d);
+                uint32_t r2 = afd_land_steps(d, afd_pos - d * AFD_RT_BACK, AFD_RT_BACK, r);
+                if (!afd_aborted)
+                {
+                    msleep(300);
+                    uint32_t v2 = afd_ep_sample();
+                    afd_log("# re-land s=%d after_300ms=%d\n", (int) r2, (int) v2);
+                    if (v2) r = v2;
+                }
+            }
+            else if (v) r = MIN(r, MAX(v, r * 9 / 10));
+        }
     }
     if (r && !afd_aborted && !afd_nopeak && !afd_lowcontrast)
     {
+        uint32_t ref_prev = afd_ref_max_s;   /* before the update; on a zoom / focal-length change it is the old value */
         afd_land_s = r;
-        afd_last_land_s = r;
-        afd_last_land_zoom = lv_dispsize;
+        if (afd_last_land_track)
+        {
+            /* Patch 5 / MF4: only mode 0 and the Refocus test's prep (mode 8) may write the local-search fallback
+             * landing; bench / speed / reversal-cal landings must not leak across into the walk. */
+            afd_last_land_s = r;
+            afd_last_land_zoom = lv_dispsize;
+            afd_last_land_mm = afd_mm_bucket();
+        }
+        afd_ref_max_update(r);   /* local-search reference: rises only on a verified mode-0 landing (handover 4.2) */
+        /* reference observability (status review A5f): one line per verified landing, so a soft landing
+         * is visible in AFDRIVE.LOG without correlating the '# local: ref max' lines by hand.  track=0 means the
+         * landing did not feed the max (bench / RT prep / speed test, patch 3/MF2); mm= is the ref key bucket. */
+        afd_log("# refmax prev=%d land=%d now=%d zoom=%d mm=%d track=%d last_track=%d\n", (int) ref_prev, (int) r,
+                (int) afd_ref_max_s, lv_dispsize, afd_mm_bucket(), afd_ref_max_track, afd_last_land_track);
     }
     return r;
 }
@@ -9906,8 +10297,66 @@ static void afrt_prep(void)
     if (!afrt_def)
     {
         uint32_t ref = 0;
-        if (afb_land_a(&ref)) { afrt_land_s = ref; afrt_prep_ok = 1; }
-        else afw_log("# RT land failed aborted=%d nopeak=%d lowcontrast=%d\n", afd_aborted, afd_nopeak, afd_lowcontrast);
+        if (!afb_land_a(&ref))
+        {
+            /* Patch 10/E(i): a B07 reference landing often comes back nopeak on the 55 mm (deep defocus /
+             * end stop); do not abort the whole test - retry with a full B sweep, and only fail if that also
+             * fails.  The learned fine step is used when the Fine step menu is Auto. */
+            afw_log("# RT_REF fallback B07 failed nopeak=%d lowcontrast=%d aborted=%d -> full B\n", afd_nopeak,
+                    afd_lowcontrast, afd_aborted);
+            afd_aborted = 0;
+            afd_nopeak = 0;
+            afd_lowcontrast = 0;
+            afd_timeout = 0;
+            if (afdiag_finestep == 0 && afd_fine_learned && afd_fine_learned_zoom == lv_dispsize &&
+                afd_fine_learned_mm == afd_mm_bucket())
+                afd_fine = COERCE(afd_fine_learned, AFD_FINE_LEARN_MIN, AFD_FINE_LEARN_MAX);
+            int saved_b = afd_algo_cur;
+            uint32_t best_b = 0;
+            afd_algo_cur = 1;
+            uint32_t lr = afd_run(&best_b);
+            afd_algo_cur = saved_b;
+            if (!afd_aborted && lr && !afd_nopeak && !afd_lowcontrast)
+            {
+                afw_log("# RT_REF fallback full B ok ref=%d best=%d fine=%d\n", (int) lr, (int) best_b, afd_fine);
+                ref = lr;
+            }
+            else
+            {
+                afw_log("# RT_REF fallback failed aborted=%d nopeak=%d lowcontrast=%d timeout=%d\n", afd_aborted,
+                        afd_nopeak, afd_lowcontrast, afd_timeout);
+                afd_aborted = 0;
+                afd_nopeak = 0;
+                afd_lowcontrast = 0;
+                afd_timeout = 0;
+                return;
+            }
+        }
+        /* Patch 6/B: validate/refine the reference landing with one local-search pass.  A soft B07 reference
+         * (field 55 mm: land_s=34269, all five trials 30-48k => false pass) otherwise scores the whole test
+         * against a bad baseline.  Only the reference path changes; the five trials are untouched. */
+        uint32_t best = 0, local = 0;
+        int saved_algo = afd_algo_cur;
+        afd_aref_trig_pct = 0;   /* no drop-path hint for the verification pass */
+        afd_aref_trig_path = 0;
+        afd_algo_cur = AFD_ALGO_LOCAL;
+        local = afd_run(&best);
+        int va = afd_aborted, vn = afd_nopeak, vl = afd_lowcontrast, vt = afd_timeout;
+        afd_algo_cur = saved_algo;
+        afd_aborted = 0;   /* a failed verification must not fail the reference / the test */
+        afd_nopeak = 0;
+        afd_lowcontrast = 0;
+        afd_timeout = 0;
+        if (!va && local && (uint64_t) local * 100 > (uint64_t) ref * 105)
+        {
+            afw_log("# RT_REF verify local better ref=%d local=%d\n", (int) ref, (int) local);
+            ref = local;
+        }
+        else
+            afw_log("# RT_REF verify kept ref=%d local=%d aborted=%d nopeak=%d lowcontrast=%d timeout=%d\n",
+                    (int) ref, (int) local, va, vn, vl, vt);
+        afrt_land_s = ref;
+        afrt_prep_ok = 1;
         return;
     }
     int sg = afrt_def > 0 ? 1 : -1;
@@ -9924,6 +10373,75 @@ static int afw_stop_cond(int t_ms, const struct afd_samp *last, int count)
 {
     (void) last; (void) count;
     return t_ms >= afw_stop_at;
+}
+
+/* AFSTOP self-interpretation (diagnostics only, no behaviour change).  The recovered field AFSTOP logs show s
+ * still changing for 300-500 ms after t_stop (the planned stop did NOT halt the tracked (9,1) move).  To make
+ * every new run self-evident, compute the post-stop trend from the recorded s1 samples:
+ *   t_stop/s_stop : the stop time and the first sample at or after it
+ *   s_end         : the last recorded sample of the trial
+ *   delta_pct     : (s_end - s_stop) * 100 / s_stop
+ *   exc_pct       : largest signed post-stop change in the move direction, in % of s_stop
+ *   slope_pct_s   : least-squares slope over the post-stop samples, in % of s_stop per second
+ *   halted=1      : |slope_pct_s| <= AFW_STOP_HALT_SLOPE_PCT_S AND |exc_pct| <= AFW_STOP_HALT_EXC_PCT
+ *                   (i.e. no trend beyond frame noise); halted=0 otherwise, or if there are too few post-stop
+ *                   samples / no stop was sent (insufficient=1).  Real recovered logs: |slope| ~43 %/s ->
+ *                   halted=0 as expected; a working stop gives a flat s trace -> halted=1.
+ * Patch 5 / SF6: the baseline is the last sample at or before t_stop and the second test is the maximum
+ * excursion (not the end delta), matching contrib/af_test/stop_analysis.py HALT_SLOPE_PCT_S / HALT_EXCURSION_PCT.
+ * Integer math only (slope via int64_t accumulators, no floats). */
+#define AFW_STOP_HALT_SLOPE_PCT_S 2    /* post-stop |slope| at or below this = no motion (matches
+                                        * contrib/af_test/stop_analysis.py HALT_SLOPE_PCT_S=2.0; the
+                                        * real 2026-10-19 traces have |slope| 8.3..406 %/s) */
+#define AFW_STOP_HALT_EXC_PCT     1    /* ... and the max post-stop excursion within this % (matches
+                                        * stop_analysis.py HALT_EXCURSION_PCT=1.0; frame noise) */
+#define AFW_STOP_MIN_POST_SAMP    3    /* fewer usable post-stop samples: insufficient */
+static void afw_stop_check(int k, const struct afd_samp *sp, int n, const struct afd_track *r, int dir)
+{
+    int t_stop = r->stop_ms, ib = -1, i0 = -1;
+    if (t_stop >= 0)
+        for (int i = 0; i < n; i++) { if (sp[i].t_ms <= t_stop) ib = i; else break; }   /* baseline: last <= t_stop */
+    if (ib >= 0)
+    {
+        i0 = ib;
+        while (i0 < n && sp[i0].t_ms < t_stop) i0++;   /* first sample at or after t_stop */
+    }
+    int npost = i0 >= 0 ? n - i0 : 0;
+    if (t_stop < 0 || ib < 0 || i0 < 0 || npost < AFW_STOP_MIN_POST_SAMP || !sp[ib].m.s1 || !sp[i0].m.s1)
+    {
+        afw_log("# stop_check k=%d t_stop=%d s_stop=%d s_end=%d delta_pct=%d exc_pct=%d slope_pct_s=%d halted=%d npost=%d insufficient=1\n",
+                k, t_stop, ib >= 0 ? (int) sp[ib].m.s1 : 0, n > 0 ? (int) sp[n - 1].m.s1 : 0, 0, 0, 0, 0, npost);
+        return;
+    }
+    int s_stop = (int) sp[ib].m.s1, s_end = (int) sp[n - 1].m.s1;
+    int delta_pct = (int) ((int64_t) (s_end - s_stop) * 100 / s_stop);
+    /* least squares y = a + b*x over the post-stop samples, x = t_ms - t_stop, y = s1 - s_stop:
+     * b = (n*Sxy - Sx*Sy) / (n*Sxx - Sx*Sx), in s1 units per ms */
+    int64_t sx = 0, sy = 0, sxx = 0, sxy = 0;
+    int64_t ext = (dir >= 0) ? -((int64_t) 1 << 62) : ((int64_t) 1 << 62);   /* real max/min, not 0 */
+    for (int i = i0; i < n; i++)
+    {
+        int64_t x = sp[i].t_ms - t_stop;
+        int64_t y = (int64_t) sp[i].m.s1 - s_stop;
+        sx += x; sy += y; sxx += x * x; sxy += x * y;
+        /* direction-aware signed largest change (SF6): positive = still moving the commanded way.
+         * Mirror stop_analysis.py: dir>0 -> max(s1), dir<0 -> min(s1), relative to the baseline. */
+        if (dir >= 0) { if (y > ext) ext = y; }
+        else { if (y < ext) ext = y; }
+    }
+    int slope_pct_s = 0;
+    int64_t den = (int64_t) npost * sxx - sx * sx;
+    if (den)
+    {
+        int64_t num = (int64_t) npost * sxy - sx * sy;
+        int64_t bq = num * 1000 / den;      /* slope in s1 units per ms, milli */
+        slope_pct_s = (int) (bq * 100 / s_stop);   /* % of s_stop per second */
+    }
+    int exc_pct = (int) (ext * 100 / s_stop);
+    int halted = (slope_pct_s <= AFW_STOP_HALT_SLOPE_PCT_S && slope_pct_s >= -AFW_STOP_HALT_SLOPE_PCT_S &&
+                  exc_pct <= AFW_STOP_HALT_EXC_PCT && exc_pct >= -AFW_STOP_HALT_EXC_PCT);
+    afw_log("# stop_check k=%d t_stop=%d s_stop=%d s_end=%d delta_pct=%d exc_pct=%d slope_pct_s=%d halted=%d npost=%d insufficient=0\n",
+            k, t_stop, s_stop, s_end, delta_pct, exc_pct, slope_pct_s, halted, npost);
 }
 
 static void afw_run(int mode)
@@ -9998,6 +10516,7 @@ static void afw_run(int mode)
         afw_log_samples(afw_samp, n);
         afw_log("# stop k=%d t_stop=%d t_done=%d val=%x sent=%d\n", k + 1, r.stop_ms, r.done_ms, (unsigned) r.done_val, r.sent);
         afw_log("# done k=%d t=%d val=%x n=%d\n", k + 1, r.done_ms, (unsigned) r.done_val, n);
+        afw_stop_check(k + 1, afw_samp, n, &r, dir);   /* self-interpretation: did the stop halt the move? */
         if (r.aborted) { afw_log("# aborted k=%d\n", k + 1); break; }
         msleep(500);
     }
@@ -10049,6 +10568,10 @@ static int afd_engine(int mode, int flags)
     const char *name = mode == 8 ? "Refocus test" : mode == 7 ? "AF reversal cal" : mode == 6 ? "AF bench" : mode == 4 ? "AF sweep record" : mode == 5 ? "AF stop test" : speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     int ret_pct = 0;
     int nolog = 0;
+    /* Patch 7/B: the MPU monitor freezes the LV_LENS focal-length property at the pre-open value, so log the
+     * value read at engine entry and at the end of the run; a changed mm can only come from a re-open. */
+    int mm_pre = (int) lens_info.focal_len;
+    if (!afd_mm_cache && mm_pre >= 8 && mm_pre <= 300) afd_mm_cache = mm_pre;   /* patch 8/D: seed the cache */
     if (afd_log_pending)
     {
         /* the previous log is still waiting for the card; a further run while recording goes without a log
@@ -10059,6 +10582,17 @@ static int afd_engine(int mode, int flags)
     if (meas && (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())) return -1;   /* never while recording */
     if (mode >= 6 && afdiag_afdrive_mon != 2) return -1;   /* bench / reversal cal: monitor Keep open only */
     afd_rec_run = 0;
+    if (!(flags & AFD_F_HUNT))
+    {
+        /* patch 9: a non-hunt run must never inherit a hunt strategy override */
+        afd_hunt_algo = -1;
+        afd_hunt_speed = -1;
+        afd_hunt_dir = 0;
+    }
+    afd_abort_on_servo = (flags & AFD_F_AREF) ? 1 : 0;   /* only the Auto refocus engine path (see afd_must_abort) */
+    /* Patch 10: Auto-refocus / hunt pass.  The Refocus test also sets AFD_F_AREF (for its local runs) but must
+     * keep the strict thresholds, hence AFD_F_RT.  Menu AF / bench / test paths stay afd_tol_run = 0. */
+    afd_tol_run = (mode == 0 && (flags & (AFD_F_AREF | AFD_F_HUNT)) && !(flags & AFD_F_RT)) ? 1 : 0;
     if (flags & AFD_F_REC)
     {
         /* never open/close the monitor while recording (LV blackout ~2 s) */
@@ -10073,9 +10607,49 @@ static int afd_engine(int mode, int flags)
     afd_sw_max0 = 0;
     afd_algo_cur = (mode == 0) ? afd_algo_menu_tbl[COERCE(afdiag_afalgo, 0, 4)] : 0;   /* the speed test and the bench set their own */
     if (mode == 0 && (flags & AFD_F_AREF) && !Auto_refocus_af) afd_algo_cur = AFD_ALGO_LOCAL;   /* Auto refocus: Refocus AF = Local */
+    if (mode == 0 && (flags & AFD_F_HUNT))
+    {
+        /* patch 9: the persistent hunt picks the algorithm / sweep speed / direction for this attempt only */
+        if (afd_hunt_algo >= 0) afd_algo_cur = afd_hunt_algo;
+        if (afd_hunt_speed > 0) afd_sw_speed = afd_hunt_speed;
+    }
+    /* Patch 3 / MF2: only mode 0 can run the local search, so only its verified landings feed afd_ref_max_s.
+     * Patch 3 / N1: never let a stale Auto-refocus trigger hint reach a non-aref local run. */
+    afd_ref_max_track = (mode == 0) ? 1 : 0;
+    afd_last_land_track = (mode == 0 || mode == 8) ? 1 : 0;   /* patch 5 / MF4: RT prep mode 8 seeds the first trial */
+    if (!(flags & AFD_F_AREF))
+    {
+        afd_aref_trig_pct = 0;
+        afd_aref_trig_path = 0;
+    }
     afd_path_local = 0;
     afd_rt_thr1 = AFD_RT_THR1;
     afd_fine = afd_fine_eff();
+    /* Patch 10/C: the learned fine step is valid only for its zoom + focal-length bucket; drop it on a key
+     * change.  With Auto fine step and an Auto-refocus/hunt run, use the learned value (manual never overridden). */
+    if (afd_fine_learned && (afd_fine_learned_zoom != lv_dispsize || afd_fine_learned_mm != afd_mm_bucket()))
+    {
+        afd_log("# fine learned reset zoom=%d mm=%d\n", lv_dispsize, afd_mm_bucket());
+        afd_fine_learned = 0;
+    }
+    if (afdiag_finestep == 0 && afd_tol_run && afd_fine_learned &&
+        afd_fine_learned_zoom == lv_dispsize && afd_fine_learned_mm == afd_mm_bucket())
+    {
+        afd_fine = COERCE(afd_fine_learned, AFD_FINE_LEARN_MIN, AFD_FINE_LEARN_MAX);
+        afd_log("# fine learned mm=%d val=%d auto=1\n", afd_fine_learned_mm, afd_fine);
+    }
+    {
+        /* Patch 6/D: lens_info.focal_len is unreliable on this camera (evening field session: it stayed at
+         * 18-21 while the lens was at 35/55 mm and fine=20 always).  Warn once; do not add logic that depends
+         * on it. */
+        static int mm_warned = 0;
+        int mm = (int) lens_info.focal_len;
+        if (!mm_warned && (mm < 8 || mm > 300))
+        {
+            mm_warned = 1;
+            afd_note("# focal length unavailable? mm=%d\n", mm);
+        }
+    }
     afd_rt_sample = 1;
     afd_track_min_ms = 0;
     afd_speed = AFD_SPEED;
@@ -10093,6 +10667,7 @@ static int afd_engine(int mode, int flags)
     afd_lowcontrast = 0;
     afd_deadline = 0;
     afd_timeout = 0;
+    afd_travel_cap = 0;
     afd_nopeak = 0;
     afd_run_dir = 1;
     afd_travel = 0;
@@ -10135,10 +10710,12 @@ static int afd_engine(int mode, int flags)
     static const uint8_t open_s[16] = { 0x02 };
     int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
     afd_log_quiet = mode >= 6 ? 2 : (meas || nolog);
-    afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d algo=%s\n",
+    afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d algo=%s mm_pre=%d mm_cache=%d\n",
             speedt ? "AFSPEED" : probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
-            (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now, afd_algo_name());
-    afd_log("# focal_mm=%d fine=%d fine_setting=%d\n", (int) lens_info.focal_len, afd_fine, afdiag_finestep);
+            (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now, afd_algo_name(), mm_pre,
+            afd_mm_cache ? afd_mm_cache : mm_pre);
+    afd_log("# focal_mm=%d fine=%d fine_setting=%d tol=%d\n", (int) lens_info.focal_len, afd_fine, afdiag_finestep,
+            afd_tol_run ? aref_tol_pct() : 0);
     if (speedt)
         afd_log("# speeds=7,9,b,f,14,1f,3,5 moves=40,-40 after an AF search, done_timeout=%d frame=%d\n", afd_done_timeout, afd_frame_ms);
     else if (probe)
@@ -10189,7 +10766,7 @@ static int afd_engine(int mode, int flags)
             afdiag_sessclose == 1 ? "OFF" : afdiag_sessclose == 2 ? "Restore" : "ON");
 
     uint32_t best = 0, final_s = 0;
-    int pct = 0;
+    int pct = 0, search_ms = 0;
     int reopened = 0, stale_final = 0;
     afd_mon_stale = 0;
     while (1)
@@ -10207,7 +10784,11 @@ static int afd_engine(int mode, int flags)
         else if (meas) afw_run(mode);
         else
         {
+            /* timing separation (status review A3/A5f): the AF search is only part of total_ms.  The rest is
+             * the LV wait / session open / stale handling before it; the epilogue is timed separately below. */
+            int t_search = get_ms_clock();
             final_s = afd_run(&best);
+            search_ms = get_ms_clock() - t_search;
             afd_deadline = 0;
             if (!best) best = afd_best_s;
             pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
@@ -10259,27 +10840,48 @@ static int afd_engine(int mode, int flags)
     if (mode == 0) { afd_nopeak_last = afd_nopeak; afd_searched_last = afd_moves > 0 || afd_lowcontrast; }
     int total_ms = get_ms_clock() - afd_t0;
 
+    /* epilogue: timed explicitly (not total_ms - search_ms, which would also hide the LV wait / session open).
+     * total_ms keeps its old meaning (before the epilogue); wall time of a menu run = total_ms + epilogue_ms. */
+    int t_epi = get_ms_clock();
+
     /* always: stop, close the session (Session close ON / Restore), close the monitor.  Sharpness samples (RAM only)
      * around it show whether the stop or the session close moves the lens. */
     uint32_t pre_stop_s = afd_ep_sample();
-    send(9, 3, 1, &stop);
-    msleep(500);
-    uint32_t post_stop_s = afd_ep_sample();
     int sc = afdiag_sessclose;
+    /* Patch 10/D(i): fixed-cost fast epilogue for Auto-refocus / hunt runs (not with Session close = Restore,
+     * whose restore block needs the full post-close sample).  About 1.5 s saved per refocus. */
+    int fast_ep = afd_tol_run && sc != 2;
+    send(9, 3, 1, &stop);
+    msleep(fast_ep ? 150 : 500);
+    uint32_t post_stop_s = afd_ep_sample();
     if (sc != 1)
     {
         send(9, 0x25, 16, zeros);
         afd_sess_open = 0;
     }
     int t_close = get_ms_clock();
-    msleep(300);
-    uint32_t post_close_s = afd_ep_sample();
-    int rest_ms = 1000 - (get_ms_clock() - t_close);
-    if (rest_ms > 0) msleep(rest_ms);
-    uint32_t post_close2_s = afd_ep_sample();
-    afd_ep_close2 = post_close2_s;
-    afd_log("# epilogue pre_stop_s=%d post_stop_s=%d post_close_s=%d post_close2_s=%d session_close=%s\n", (int) pre_stop_s,
-            (int) post_stop_s, (int) post_close_s, (int) post_close2_s, sc == 1 ? "OFF" : sc == 2 ? "Restore" : "ON");
+    uint32_t post_close_s, post_close2_s = 0;
+    int mm_post = (int) lens_info.focal_len;   /* patch 7/B: compare with mm_pre in the run header */
+    if (fast_ep)
+    {
+        msleep(150);
+        post_close_s = afd_ep_sample();
+        post_close2_s = post_close_s;   /* no 1 s post-close wait / post_close2 sample on the fast path */
+        afd_ep_close2 = post_close2_s;
+        afd_log("# epilogue fast pre_stop_s=%d post_stop_s=%d post_close_s=%d session_close=%s mm_post=%d\n", (int) pre_stop_s,
+                (int) post_stop_s, (int) post_close_s, sc == 1 ? "OFF" : "ON", mm_post);
+    }
+    else
+    {
+        msleep(300);
+        post_close_s = afd_ep_sample();
+        int rest_ms = 1000 - (get_ms_clock() - t_close);
+        if (rest_ms > 0) msleep(rest_ms);
+        post_close2_s = afd_ep_sample();
+        afd_ep_close2 = post_close2_s;
+        afd_log("# epilogue pre_stop_s=%d post_stop_s=%d post_close_s=%d post_close2_s=%d session_close=%s mm_post=%d\n", (int) pre_stop_s,
+                (int) post_stop_s, (int) post_close_s, (int) post_close2_s, sc == 1 ? "OFF" : sc == 2 ? "Restore" : "ON", mm_post);
+    }
     if (sc == 2 && mode == 0 && !afd_rec_run && !afd_aborted && !afd_nopeak && !afd_lowcontrast && !stale_final && pre_stop_s &&
         (uint64_t) post_close_s * 100 < (uint64_t) pre_stop_s * 85 && lv && !afd_must_abort())
     {
@@ -10320,6 +10922,7 @@ static int afd_engine(int mode, int flags)
     afd_unm_fast = 0;
     afd_meas_full = 0;
     afd_done_timeout = AFD_DONE_TIMEOUT_MS;
+    int epilogue_ms = get_ms_clock() - t_epi;   /* stop + session close + monitor close + epilogue samples */
     if (mode >= 6)
         afw_log("# RESULT %s aborted=%s trials=%d total_ms=%d\n\n", mode == 8 ? "rtest_prep" : mode == 6 ? "bench" : "revcal", ab, afd_moves, total_ms);
     else if (speedt)
@@ -10336,12 +10939,16 @@ static int afd_engine(int mode, int flags)
                 afd_cal_peak_pos[0] - afd_cal_peak_pos[1],
                 afd_cal_peak_pos[2] - afd_cal_peak_pos[0], afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
     else
-        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d peak_g_pos=%d fine_peak_pos=%d final_s=%d final_best_pct=%d retraces=%d land_s=%d land_pct=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d travel=%d algo=%s\n\n",
+        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d peak_g_pos=%d fine_peak_pos=%d final_s=%d final_best_pct=%d retraces=%d land_s=%d land_pct=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d search_ms=%d epilogue_ms=%d end_pos=%d travel=%d algo=%s\n\n",
                 ab, afd_best_pos, (int) best, afd_peak_g_pos, afd_fine_peak_pos, (int) final_s, pct, afd_retraces, (int) afd_land_s, pct, afd_moves,
-                afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos, afd_travel, afd_algo_name());
+                afd_n_nodone, afd_n_err, afd_n_fast, total_ms, search_ms, epilogue_ms, afd_pos, afd_travel, afd_algo_name());
 
     afd_log_quiet = 0;
     afd_rec_run = 0;
+    afd_abort_on_servo = 0;
+    afd_hunt_algo = -1;
+    afd_hunt_speed = -1;
+    afd_hunt_dir = 0;
     if (meas) { if (mode != 8) afw_finish(); }   /* the Refocus test writes its log at its own end */
     else if (!nolog)
     {
@@ -10683,11 +11290,25 @@ static void afdiag_afrev_task(void *unused)
     afd_task_common(7);
 }
 
+/* Menu SELECT handlers used to call task_create BEFORE afd_task_common could check recording, which violates
+ * "never task_create during RAW recording" (mlv_lite owns almost all of the memory; status review R3/D16/A5a).
+ * Same precondition as afd_task_common, enforced here first: a refused action creates no task at all. */
+static void afd_menu_task_create(const char *name, void (*entry)(void *), const char *label)
+{
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())
+    {
+        NotifyBox(4000, "%s: not while recording", label);
+        afd_note("# menu task refused name=%s reason=recording t=%d\n", name, get_ms_clock());
+        return;
+    }
+    task_create(name, AFD_TASK_PRIO, 0x3000, entry, (void *) 0);
+}
+
 static MENU_SELECT_FUNC(afdiag_afbench_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afbench", AFD_TASK_PRIO, 0x3000, afdiag_afbench_task, (void*)0);
+    afd_menu_task_create("afdiag_afbench", afdiag_afbench_task, "AF bench");
 }
 
 static void aref_test_task(void *unused);   /* defined with the Auto refocus code */
@@ -10695,56 +11316,139 @@ static MENU_SELECT_FUNC(afdiag_refocus_test_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_rtest", AFD_TASK_PRIO, 0x3000, aref_test_task, (void*)0);
+    afd_menu_task_create("afdiag_rtest", aref_test_task, "Refocus test");
 }
 
 static MENU_SELECT_FUNC(afdiag_afrev_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afrev", AFD_TASK_PRIO, 0x3000, afdiag_afrev_task, (void*)0);
+    afd_menu_task_create("afdiag_afrev", afdiag_afrev_task, "AF reversal cal");
 }
 
 static MENU_SELECT_FUNC(afdiag_afsweep_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afsweep", AFD_TASK_PRIO, 0x3000, afdiag_afsweep_task, (void*)0);
+    afd_menu_task_create("afdiag_afsweep", afdiag_afsweep_task, "AF sweep record");
 }
 
 static MENU_SELECT_FUNC(afdiag_afstop_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afstop", AFD_TASK_PRIO, 0x3000, afdiag_afstop_task, (void*)0);
+    afd_menu_task_create("afdiag_afstop", afdiag_afstop_task, "AF stop test");
 }
 
 static MENU_SELECT_FUNC(afdiag_afspeed_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afspeed", AFD_TASK_PRIO, 0x3000, afdiag_afspeed_task, (void*)0);
+    afd_menu_task_create("afdiag_afspeed", afdiag_afspeed_task, "AF speed test");
 }
 
 static MENU_SELECT_FUNC(afdiag_afdrive_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afdrive", AFD_TASK_PRIO, 0x3000, afdiag_afdrive_task, (void*)0);
+    afd_menu_task_create("afdiag_afdrive", afdiag_afdrive_task, "AF drive");
+}
+
+/* Patch 8/B: manual zoom refresh.  The monitor freezes the LV_LENS focal-length property; the request path
+ * is tried first while it is open, then the proven workaround: close monitor -> 300 ms -> request/read ->
+ * reopen + wait LV.  Runs in a task because the reopen blackout is ~2 s; restores the monitor state as well
+ * as possible and never closes/opens it while recording. */
+static void afdiag_afzoom_task(void *unused)
+{
+    (void) unused;
+    if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
+    afdiag_afdrive_busy = 1;
+    int was_open = afd_mon_is_open;
+    int old_mm = (int) lens_info.focal_len;
+    int mm = old_mm, reply = 0, done = 0;
+    int is_zoom = strchr(lens_info.name, '-') != 0;
+    afd_note("# zoom refresh begin old_mm=%d monitor=%d lens=%s t=%d\n", old_mm, was_open, lens_info.name, get_ms_clock());
+    if (was_open && !(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+    {
+        reply = afd_lens_refresh(500, &mm);
+        if (reply && (mm != old_mm || !is_zoom)) done = 1;
+        else
+            afd_note("# zoom refresh: no usable fresh report reply=%d new_mm=%d zoom=%d -> close/reopen fallback\n", reply, mm, is_zoom);
+    }
+    else if (!was_open)
+    {
+        reply = afd_lens_refresh(600, &mm);   /* the property is normally live with the monitor closed */
+        done = 1;
+    }
+    if (!done)
+    {
+        if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())
+        {
+            afd_note("# zoom refresh: recording started, fallback cancelled\n");
+            NotifyBox(4000, "Zoom refresh: recording, aborted");
+            afdiag_afdrive_busy = 0;
+            return;
+        }
+        if (was_open) afd_mon_close_now("zoom refresh");
+        msleep(300);
+        afd_lens_refresh(800, &mm);
+        afd_note("# zoom refresh: monitor closed read mm=%d t=%d\n", (int) lens_info.focal_len, get_ms_clock());
+        if (was_open)
+        {
+            if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())
+                afd_note("# zoom refresh: recording started, monitor left closed\n");
+            else
+            {
+                int e = afd_mon_open_raw("zoom refresh");
+                if (!e)
+                {
+                    afd_mon_is_open = 1;
+                    afd_abort_on_servo = 0;   /* no AF run here: do not inherit a stale servo abort */
+                    int ok = afd_wait_lv(1);
+                    afd_note("# zoom refresh: monitor reopened e=%d lv_ok=%d t=%d\n", e, ok, get_ms_clock());
+                }
+                else
+                    afd_note("# zoom refresh: monitor reopen failed e=%d (left closed)\n", e);
+            }
+        }
+        mm = (int) lens_info.focal_len;
+    }
+    afd_fine = afd_fine_eff();   /* cached: the next engine run also recomputes it */
+    afd_note("# zoom refresh done old_mm=%d new_mm=%d reply=%d fine=%d monitor=%d t=%d\n", old_mm, (int) lens_info.focal_len,
+             reply, afd_fine, afd_mon_is_open, get_ms_clock());
+    NotifyBox(5000, "Zoom refresh: mm=%d fine=%d", (int) lens_info.focal_len, afd_fine);
+    afdiag_afdrive_busy = 0;
+}
+
+static MENU_SELECT_FUNC(afdiag_afzoom_select)
+{
+    (void) priv;
+    (void) delta;
+    if (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())
+    {
+        NotifyBox(4000, "Zoom refresh: not while recording");
+        return;
+    }
+    if (afdiag_afdrive_busy || afdiag_afsearch_busy)
+    {
+        NotifyBox(3000, "Zoom refresh: AF busy");
+        return;
+    }
+    afd_menu_task_create("afdiag_afzoom", afdiag_afzoom_task, "Zoom refresh");
 }
 
 static MENU_SELECT_FUNC(afdiag_afcalib_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afcalib", AFD_TASK_PRIO, 0x3000, afdiag_afcalib_task, (void*)0);
+    afd_menu_task_create("afdiag_afcalib", afdiag_afcalib_task, "AF calib");
 }
 
 static MENU_SELECT_FUNC(afdiag_afprobe_select)
 {
     (void) priv;
     (void) delta;
-    task_create("afdiag_afprobe", AFD_TASK_PRIO, 0x3000, afdiag_afprobe_task, (void*)0);
+    afd_menu_task_create("afdiag_afprobe", afdiag_afprobe_task, "AF probe");
 }
 
 /* arg: 1 = LV-off closer, 0 = menu */
@@ -10915,6 +11619,15 @@ static struct menu_entry afdiag_menu[] = {
         .select    = afdiag_afdrive_monclose_select,
         .icon_type = IT_ACTION,
         .help      = "Close the MPU monitor left open by 'AF drive monitor: Keep open'.",
+    },
+    {
+        .name      = "Zoom refresh (read lens mm)",
+        .select    = afdiag_afzoom_select,
+        .icon_type = IT_ACTION,
+        .help      = "Re-read the lens focal length after a zoom (the MPU monitor freezes it).",
+        .help2     = "Tries a PROP_LV_LENS refresh while the monitor is open; if the MPU does not answer with a new\n"
+                     "value, closes the monitor, reads again, and reopens it (~2 s LV blackout). Then NotifyBox shows\n"
+                     "the mm and the fine step that will be used. Not while recording / AF busy.",
     },
     {
         .name      = "AF drive calib",
@@ -13076,6 +13789,9 @@ static const uint8_t  aref_abs_q[3]     = { 0, 105, 95 };   /* q at/above this .
 static const uint8_t  aref_abs_em[3]    = { 0, 45, 55 };    /* ... and max edge at/below this = blurry */
 #define AREF_ABS_Q_GOOD     85    /* q below this with a strong edge (see below) re-arms the absolute path */
 #define AREF_ABS_EM_GOOD    100
+#define AREF_ABS_MAX        3     /* patch 6/A: absolute-path attempts per blur episode before it stays disabled;
+                                   * a failed path-2 run leaves the scene blurry, so without a retry the absolute
+                                   * fallback is never tried again (field: 44 qualified gate-4 decisions, path 0) */
 
 /* AREF_MPU: an MPU AF drive (afd_engine) runs in aref_mpu_task; nothing else
  * may trigger until aref_step has collected its result. */
@@ -13088,10 +13804,37 @@ static int aref_eligible = 0;
 static uint32_t aref_ref = 0;        /* effective best recent sharpness (peak memory), 0 = none */
 static int aref_ref_em = 0;          /* emax at that peak */
 static int aref_ref_zoom = 0;        /* lv_dispsize the memory belongs to */
+static int aref_ref_mm = 0;          /* focal-length bucket the memory belongs to (patch 3 / MF2, MF3) */
 static uint32_t aref_pk_v[2];        /* peak buckets: [0] current, [1] previous */
 static int aref_pk_em[2];
 static uint32_t aref_pk_g[2];        /* gradient sum at the peak sample */
 static uint32_t aref_ref_g = 0;      /* ... of the effective peak */
+/* True reference anchor (patch 3 / review MF3), see the AREF_REF_SOFT_N comment above. */
+static uint32_t aref_ref_anchor = 0;
+static int aref_ref_anchor_zoom = 0;
+static int aref_ref_anchor_mm = 0;
+static int aref_ref_anchor_em = 0;
+static uint32_t aref_ref_anchor_g = 0;
+static int aref_ref_soft_n = 0;         /* consecutive settles below AFD_L_SOFT_PCT of the anchor ... */
+static uint32_t aref_ref_soft_best = 0; /* ... and the best settled value of that streak */
+static int aref_anchor_fail_n = 0;      /* patch 5 / SF2: consecutive failed (no-focus) runs since the last settle */
+static int aref_anchor_ok(void)
+{
+    return aref_ref_anchor && aref_ref_anchor_zoom == lv_dispsize && aref_ref_anchor_mm == afd_mm_bucket();
+}
+static void aref_anchor_clear(const char *why)
+{
+    if (!aref_ref_anchor && !aref_ref_soft_n && !aref_anchor_fail_n) return;
+    afd_note("# aref ref anchor: reset why=%s was=%d t=%d\n", why, (int) aref_ref_anchor, get_ms_clock());
+    aref_ref_anchor = 0;
+    aref_ref_anchor_zoom = 0;
+    aref_ref_anchor_mm = 0;
+    aref_ref_anchor_em = 0;
+    aref_ref_anchor_g = 0;
+    aref_ref_soft_n = 0;
+    aref_ref_soft_best = 0;
+    aref_anchor_fail_n = 0;
+}
 static int aref_pk_t = 0;            /* ms: start of the current bucket, 0 = empty */
 static int aref_forget = 0;          /* clear the memory at the next (re)acquire */
 static int aref_post_check = 0;      /* judge the picture after our AF finished OK */
@@ -13105,6 +13848,7 @@ static int aref_hist_n = 0;
 static int aref_low_since = 0;       /* ms: sharpness has been low since, 0 = not low */
 static int aref_low_path = 0;        /* 1 = relative to peak, 2 = absolute */
 static int aref_abs_used = 0;        /* absolute path already spent in this blur episode */
+static int aref_abs_n = 0;           /* patch 6/A: absolute-path attempts in this blur episode (cap AREF_ABS_MAX) */
 static int aref_fails = 0;
 static int aref_paused = 0;
 static int aref_pause_t = 0;
@@ -13112,6 +13856,10 @@ static uint32_t aref_pause_ref = 0;  /* peak at the failure that paused us */
 static uint32_t aref_trig_ref = 0;
 static int aref_count0 = 0;          /* slim_af_result_count at the request */
 static int aref_dbg_t = 0;           /* ms: last periodic decision record */
+/* Patch 8/C: automatic zoom detection state (see aref_step) */
+static int aref_zoom_next = 0;       /* ms: next LV_LENS refresh poll */
+static int aref_zoom_fail = 0;       /* consecutive probes with no fresh report ... */
+static int aref_zoom_noted = 0;      /* ... logged once, then rely on the manual action */
 static volatile int aref_mpu_state = 0; /* 0 idle, 1 task running, 2 task finished (result below) */
 static volatile int aref_mpu_pct = -1;  /* afd_engine result: landing % of best, -1 = aborted */
 static volatile int aref_mpu_ms = 0;
@@ -13129,6 +13877,15 @@ static int aref_mpu_notified = 0;
 #define AREF_MPU_PEN_STEP        10
 #define AREF_MPU_PEN_MAX         25
 #define AREF_MPU_CONSEC_MS       60000 /* "consecutive": the previous MPU refocus ended within this */
+/* Reference anchor (patch 3 / review MF3): the old AREF_REF_FLOOR_PCT floor was a 95 %-per-settle ratchet
+ * (0.95^k) and the floored value was rotated out of the two 12..24 s peak buckets, so the trigger reference still
+ * eroded.  The anchor is a true reference: per zoom + focal-length bucket, raised only by a genuinely sharper
+ * settled picture, clamped into the effective reference (aref_peak_update) and lowered only by the
+ * confirmed-soft-scene escape below.  A scene / zoom / mm / RAW-rec change or the Auto-refocus toggle clears it. */
+#define AREF_REF_SOFT_N          3     /* consecutive settles below AFD_L_SOFT_PCT of the anchor = confirmed soft scene:
+                                        * the anchor was stale -> reset it to the best of those settles */
+#define AREF_ANCHOR_FAIL_N       2     /* Patch 5 / SF2: consecutive no-focus runs (nopeak/lowtexture) that clear the
+                                        * stale anchor + ref max (`# aref ref anchor: reset why=failed runs`) */
 /* MPU method only (the Canon method is unchanged).  Field log (card14): triggers while the camera was moved between
  * subjects, runs started before the scene settled, repeated 20 s searches on a texture-less scene, landings followed
  * at once by a big sharpness change.  Three more gates, each with its own gate code in the decision record:
@@ -13172,8 +13929,95 @@ static int aref_fs_luma = 0;
 static uint32_t aref_fs_g = 0, aref_fs_s = 0;
 static int aref_fs_noted = 0;
 /* the last decision, for the log / the Refocus test */
-static struct { uint32_t cur, peak; int path, gate, q, g, luma, settled, pct; } aref_dec;
+static struct { uint32_t cur, peak; int path, gate, q, g, luma, settled, pct, emax; } aref_dec;
 static int aref_rec_fb_noted = 0;    /* the fallback to Canon AF while recording was noted (once per recording) */
+
+/* ---- Patch 9: persistent never-give-up Auto-refocus hunt ----
+ * Design: doc/AF-HUNT-FOREVER.md (task-22).  Persistent mode (Auto_refocus_persist = 1, the default) layers a
+ * scheduler on top of the existing gates: every failure schedules the next attempt (jittered backoff 4..30 s,
+ * capped at 36 s), the strategy rotates local -> full B -> Canon x10 -> Canon in-place -> full B alt/reverse, and
+ * only a verifiably sharp picture or an explicit reset ends the episode.  The old give-up throttles (failure
+ * pause gate 6, failed-scene memory gate 11, MPU hold gate 7, absolute-path cap) still run and still gate the
+ * NORMAL path, so Normal mode (Auto_refocus_persist = 0) is exactly patches 1-8.  The hunt never creates a task,
+ * never opens/closes the monitor and never writes the card; all text goes through afd_note (RAM, flushed after
+ * recording).  Integer-only (private LCG jitter, no floats). */
+enum
+{
+    HUNT_IDLE = 0,
+    HUNT_ARM,        /* episode active, waiting for next_at */
+    HUNT_ATTEMPT,    /* exactly one attempt in flight (MPU worker or Canon request) */
+    HUNT_JUDGE       /* attempt finished, waiting for the settle to judge it */
+};
+#define HUNT_S_N             5
+#define HUNT_S_LOCAL         0
+#define HUNT_S_FULL_B        1
+#define HUNT_S_CANON_X10     2
+#define HUNT_S_CANON_INPLACE 3
+#define HUNT_S_FULL_B_ALT    4
+#define HUNT_BACKOFF_N       6
+#define HUNT_COLD_START_MS   8000   /* no usable reference this long after eligibility -> cold-start episode */
+#define HUNT_SHARP_PCT       92     /* legacy strict value; patch 10/B: the judge uses aref_tol_pct() */
+#define HUNT_SHARP_COOLDOWN_MS 6000 /* patch 10/A: after a sharp close, no new episode for this long */
+#define HUNT_IMPROVE_PCT     10     /* ... or this much better than before the attempt, with an absolute sanity check */
+#define HUNT_BESTEFFORT_N    6      /* consecutive no-improvement fails -> cheap Canon-only best effort (still retries) */
+#define HUNT_DARK_LUMA       40     /* heuristic: prefer Canon strategies on a very dark scene (log/strategy only) */
+#define HUNT_REC_MIN_GAP_MS  10000  /* minimum attempt spacing while recording */
+#define HUNT_ATTEMPT_TIMEOUT_MS 30000 /* completion watchdog (engine caps are 15/18 s, Canon 4 s) */
+#define HUNT_JITTER_PCT      20
+#define HUNT_MIN_DELAY_MS    3000
+#define HUNT_MAX_DELAY_MS    36000
+/* taxonomy: what the last attempt says about the scene / failure (only used to reorder the portfolio) */
+#define HUNT_TX_NONE      0
+#define HUNT_TX_NOPEAK    1
+#define HUNT_TX_LOWTEXTURE 2
+#define HUNT_TX_SOFT      3
+#define HUNT_TX_DEEP      4
+#define HUNT_TX_ENDSTOP   5
+#define HUNT_TX_DARK      6
+#define HUNT_TX_CANON     7
+#define HUNT_TX_ABORT     8
+#define HUNT_TX_MOVING    9
+static const uint16_t aref_hunt_backoff_tbl[HUNT_BACKOFF_N] = { 4000, 6000, 10000, 15000, 20000, 30000 };
+static int aref_hunt_state = HUNT_IDLE;
+static int aref_hunt_n = 0;              /* attempts in this episode */
+static int aref_hunt_k = 0;              /* portfolio cursor 0..HUNT_S_N-1 */
+static int aref_hunt_next_at = 0;
+static int aref_hunt_started = 0;
+static int aref_hunt_judge_at = 0;
+static int aref_hunt_attempt_t = 0;
+static int aref_hunt_pre_s = 0;          /* sharpness before the attempt in flight (patch 10/A: cleared between
+                                          * episodes - a stale value made cold episodes close as "sharp") */
+static int aref_hunt_cold_until = 0;     /* patch 10/A: no new episode before this time (after a sharp close) */
+static int aref_hunt_coolnoted_t = 0;    /* ... rate limit for the "# hunt skip why=cooldown" line */
+static int aref_hunt_base_ref = 0;       /* trusted reference FROZEN at episode start: the sharp judge must not
+                                          * accept a reference that the episode itself (re)learned from a soft picture */
+static int aref_hunt_attempt = -1;       /* strategy of the attempt in flight */
+static int aref_hunt_attempt_mpu = 0;    /* 1 = MPU engine run, 0 = Canon request */
+static int aref_hunt_attempt_active = 0;
+static int aref_hunt_att_pct = -1;
+static int aref_hunt_att_land = 0;
+static int aref_hunt_last_dir = 0;       /* direction of the last B attempt (for the "reversed" strategy) */
+static int aref_hunt_besteffort = 0;
+static int aref_hunt_noimpr = 0;
+static int aref_hunt_ok = 0;
+static int aref_hunt_fails = 0;
+static int aref_hunt_travel = 0;
+static uint32_t aref_hunt_mask = 0;      /* strategies tried in this episode */
+static uint32_t aref_hunt_max_backoff = 0;
+static uint32_t aref_hunt_rng = 0;
+static int aref_hunt_rec = 0;
+static int aref_hunt_cold_t = 0;         /* when eligibility was (re)acquired */
+static int aref_hunt_last_tax = HUNT_TX_NONE;
+static int aref_hunt_last_delay = 0;     /* backoff used to arm the current attempt */
+static int aref_hunt_last_strategy = -1; /* last launched/skipped strategy, for skip-log rate limiting */
+static int aref_hunt_logged_strategy = -1; /* rate limit while recording */
+static int aref_hunt_pause_blk = -1;      /* patch 9.1 / S6: last logged eligibility gate mask */
+static int aref_hunt_sharp_skip_t = 0;    /* patch 9.1 / S2: rate limit for "# hunt skip why=sharp" */
+static int aref_hunt_mon_noted = 0;       /* patch 9.1 / S3: "# hunt skip why=monitor_mode" once */
+/* forward declarations (used by aref_mpu_settle / aref_sw_push / aref_test_task, defined before aref_step) */
+static void aref_hunt_reset(const char *why);
+static void aref_hunt_pause(int now, int blk);
+static void aref_hunt_settle(int now, uint32_t med);
 
 /* Persistent AF worker: ONE task for all Auto refocus MPU runs.  A task_create fails while RAW recording
  * (mlv_lite holds the memory), so the task is created once at module init (afd_worker_ensure, retried from
@@ -13188,6 +14032,13 @@ static volatile int afd_wk_flags = 0;
 static volatile int afd_wk_ok = 0;      /* the task exists */
 static volatile int aref_mpu_moves = 0;
 static volatile uint32_t aref_mpu_ep2 = 0;    /* last run: epilogue sharpness 1 s after the session close (afd_ep_close2) */
+/* Patch 9: last MPU attempt facts for the persistent hunt taxonomy (published by aref_mpu_exec). */
+static volatile int aref_mpu_esdir = 0;       /* end-stop direction seen by the run (0 = none) */
+static volatile int aref_mpu_nopeak = 0;      /* the run found no real peak */
+static volatile int aref_mpu_lowc = 0;        /* the run found no texture */
+static volatile int aref_mpu_travel = 0;      /* pulses travelled by the run (bounded per attempt) */
+static volatile int aref_mpu_dir = 0;         /* B sweep direction of the run (for the reversed strategy) */
+static volatile int aref_mpu_timeout = 0;     /* patch 9.1 / S4: the run hit its own cap (timeout/travel abort) */
 
 /* One Auto refocus MPU run, as the worker does it (the Refocus test calls it directly): resets and publishes the
  * result variables, runs afd_engine.  The caller owns afdiag_afdrive_busy. */
@@ -13197,6 +14048,7 @@ static void aref_mpu_exec(int fl)
     int pct = -1;
     afd_nopeak_last = 0;   /* a skipped/refused run must not count as "no peak" */
     afd_searched_last = 0;
+    afd_lowcontrast = 0;   /* patch 5 / SF2: ... nor may a skipped run carry a stale lowtexture into the fail streak */
     aref_mpu_path = 0;
     aref_mpu_land = 0;
     aref_mpu_ep2 = 0;
@@ -13206,6 +14058,10 @@ static void aref_mpu_exec(int fl)
         aref_mpu_notified = 1;
         NotifyBox(3000, "MPU AF: opening monitor");
     }
+    /* Patch 8/C: refresh the frozen lens property before the run so afd_fine_eff() inside the engine sees
+     * the current zoom (unless the MPU has already proven that it does not answer while the monitor is open). */
+    if (!(fl & AFD_F_REC) && afdiag_afdrive_mon == 2 && afd_mon_is_open && !aref_zoom_noted)
+        afd_lens_refresh(150, 0);
     /* the engine re-checks these itself and aborts, this only skips a pointless start */
     if (lv && !is_manual_focus() && !gui_menu_shown() && ((fl & AFD_F_REC) ? RECORDING_RAW : !RECORDING))
         pct = afd_engine(0, fl);
@@ -13215,6 +14071,13 @@ static void aref_mpu_exec(int fl)
     aref_mpu_path = afd_path_local;
     aref_mpu_land = afd_land_s;
     aref_mpu_ep2 = afd_ep_close2;
+    /* Patch 9: publish the last-attempt facts for the persistent hunt taxonomy (before the next run resets them). */
+    aref_mpu_esdir = afd_endstop_dir;
+    aref_mpu_nopeak = afd_nopeak_last;
+    aref_mpu_lowc = afd_lowcontrast;
+    aref_mpu_travel = afd_travel;
+    aref_mpu_dir = afd_run_dir;
+    aref_mpu_timeout = afd_timeout || afd_travel_cap;
     if (fl & AFD_F_REC)
         afd_note("# aref rec pct=%d ms=%d moves=%d\n", pct, aref_mpu_ms, aref_mpu_moves);
 }
@@ -13319,6 +14182,19 @@ static void aref_peak_update(int now, uint32_t v, int em, uint32_t g)
     aref_ref = aref_pk_v[b];
     aref_ref_em = aref_pk_em[b];
     aref_ref_g = aref_pk_g[b];
+    /* Patch 3 / MF3: the 12..24 s bucket rotation must not erode the trigger reference below the verified anchor.
+     * Restore the anchor's texture metrics with it, so the AREF_PEAK_EMAX_MIN / AREF_MIN_G gates still pass.
+     * Patch 5 / SF1: only on the MPU Auto-refocus method (a Canon-method run must keep the peak-clearing escapes)
+     * and only with non-zero metrics (MF2: a zero-metric anchor would force gate 4 and self-lock the trigger). */
+    if (Auto_refocus_method == 1 && aref_anchor_ok() && aref_ref < aref_ref_anchor)
+    {
+        aref_ref = aref_ref_anchor;
+        if (aref_ref_anchor_em > 0)
+        {
+            aref_ref_em = aref_ref_anchor_em;
+            aref_ref_g = aref_ref_anchor_g;
+        }
+    }
 }
 
 static uint32_t aref_med3(const uint32_t *h)
@@ -13331,29 +14207,133 @@ static uint32_t aref_med3(const uint32_t *h)
 
 static void aref_mpu_done_note(uint32_t new_ref)
 {
-    afd_note("# aref done pct=%d land_s=%d new_ref=%d ms=%d path=%s mm=%d fine=%d post_close2_s=%d\n", aref_mpu_pct,
-             (int) aref_mpu_land, (int) new_ref, aref_mpu_ms, aref_mpu_path ? "local" : "full", (int) lens_info.focal_len, afd_fine,
-             (int) aref_mpu_ep2);
+    /* Reference observability (status review A5f): absolute per-zoom+mm ref max and the landing as a % of it, so
+     * a soft landing (82..92 %) is visible in the AFDRIVE note without post-processing '# refmax' lines.
+     * ref_max=0 / land_vs_ref=0 = no valid ref max for this zoom/mm (first run / after a key change).
+     * anchor= is the true reference anchor (patch 3 / MF3): it must not staircase down. */
+    int ref_max_ok = afd_ref_max_s && afd_ref_max_zoom == lv_dispsize && afd_ref_max_mm == afd_mm_bucket();
+    int land_vs_ref = (ref_max_ok && aref_mpu_land) ? (int) ((uint64_t) aref_mpu_land * 100 / afd_ref_max_s) : 0;
+    afd_note("# aref done pct=%d land_s=%d new_ref=%d ms=%d path=%s mm=%d fine=%d post_close2_s=%d ref_max=%d land_vs_ref=%d anchor=%d\n",
+             aref_mpu_pct, (int) aref_mpu_land, (int) new_ref, aref_mpu_ms, aref_mpu_path ? "local" : "full",
+             (int) lens_info.focal_len, afd_fine, (int) aref_mpu_ep2, ref_max_ok ? (int) afd_ref_max_s : 0, land_vs_ref,
+             aref_anchor_ok() ? (int) aref_ref_anchor : 0);
     aref_mpu_newref = 0;
 }
 
 /* first settled sample after an MPU landing: it becomes the reference.  The old peak (from before the defocus)
  * is dropped.  Hold / penalty: two refocuses in a row that land at the same sharpness without improving on the
- * pre-trigger value mean the scene was in focus all along (a false trigger): pause and require a deeper drop. */
+ * pre-trigger value mean the scene was in focus all along (a false trigger): pause and require a deeper drop.
+ * Reference anchor (patch 3 / MF3): the settled picture, the pre-trigger peak and the engine ref max SEED a
+ * true anchor; once seeded, only a genuinely sharper settled picture raises it and a landing softer than the
+ * anchor does not lower it (patch 5 / MF1).  After AREF_REF_SOFT_N consecutive settles below
+ * AFD_L_SOFT_PCT of the anchor the scene is confirmed soft and the anchor resets to the best of them. */
 static void aref_mpu_settle(int now, uint32_t med, int emax, uint32_t g)
 {
     uint32_t pre = aref_mpu_pre;
-    aref_peak_clear();
+    int zoom = lv_dispsize, mm = afd_mm_bucket();
+    /* saved before aref_peak_clear(): the old peak and the engine ref max can seed the anchor */
+    uint32_t old_ref = aref_ref;
+    int old_em = aref_ref_em;
+    uint32_t old_g = aref_ref_g;
+    int aok = aref_anchor_ok();
+    if (!aok)
+    {
+        /* Patch 5 / MF1: the possibly-stale pre-defocus references may only SEED a missing anchor.  Once a
+         * valid anchor exists it is raised only by a genuinely sharper settled med (below); otherwise a stale
+         * afd_ref_max_s would raise the anchor straight back on the settle after every confirmed-soft reset. */
+        int refmax_ok = afd_ref_max_s && afd_ref_max_zoom == zoom && afd_ref_max_mm == mm;
+        uint32_t seed = 0;
+        if (old_ref && aref_ref_zoom == zoom && aref_ref_mm == mm && old_ref > seed) seed = old_ref;
+        if (refmax_ok && afd_ref_max_s > seed) seed = afd_ref_max_s;
+        if (seed)
+        {
+            /* seed the anchor: the pre-defocus reference / the engine ref max at this zoom + focal-length bucket */
+            aref_ref_anchor = seed;
+            aref_ref_anchor_zoom = zoom;
+            aref_ref_anchor_mm = mm;
+            /* Patch 5 / MF2: also seed from THIS settle's sample; old_em can be 0 (peak already cleared), and
+             * a zero anchor_em would later make the clamp restore em=0 and force gate 4 (self-locking). */
+            aref_ref_anchor_em = MAX(old_em, emax);
+            aref_ref_anchor_g = MAX(old_g, g);
+            aref_ref_soft_n = 0;
+            aref_ref_soft_best = 0;
+            aok = 1;
+            afd_note("# aref ref anchor: seed zoom=%d mm=%d ref=%d pre=%d t=%d\n", zoom, mm, (int) seed, (int) pre, now);
+        }
+    }
+    uint32_t raw = med;
     if (aref_mpu_land && afd_below(med, aref_mpu_land, 70))
     {
         /* the picture settled far below what the landing measured: do not
          * adopt a blurry reference (then real blur would never trigger) */
         afd_note("# aref settled far below landing med=%d land=%d: landing kept as reference\n", (int) med, (int) aref_mpu_land);
-        aref_peak_update(now, aref_mpu_land, emax, g);
+        raw = aref_mpu_land;
     }
-    else
-        aref_peak_update(now, med, emax, g);
+    uint32_t adopt = raw;
+    int em_use = emax;
+    uint32_t g_use = g;
+    aref_peak_clear();
+    if (aok)
+    {
+        if (raw > aref_ref_anchor)
+        {
+            /* genuinely sharper settled picture: raise the anchor (never lower it here) */
+            aref_ref_anchor = raw;
+            aref_ref_anchor_em = emax;
+            aref_ref_anchor_g = g;
+            aref_ref_soft_n = 0;
+            aref_ref_soft_best = 0;
+            afd_note("# aref ref anchor: raise ref=%d zoom=%d mm=%d t=%d\n", (int) aref_ref_anchor, zoom, mm, now);
+        }
+        else
+        {
+            /* floor wins: adopt the anchor, not a percentage of it (review MF3) */
+            adopt = aref_ref_anchor;
+            if (afd_below(raw, aref_ref_anchor, AFD_L_SOFT_PCT))
+            {
+                aref_ref_soft_n++;
+                if (raw > aref_ref_soft_best) aref_ref_soft_best = raw;
+                afd_note("# aref ref anchor: soft anchor=%d raw=%d n=%d t=%d\n", (int) aref_ref_anchor, (int) raw,
+                         aref_ref_soft_n, now);
+                if (aref_ref_soft_n >= AREF_REF_SOFT_N)
+                {
+                    /* confirmed soft scene: the anchor was stale; the best soft settle becomes the new anchor */
+                    aref_ref_anchor = aref_ref_soft_best ? aref_ref_soft_best : raw;
+                    aref_ref_anchor_em = emax;
+                    aref_ref_anchor_g = g;
+                    adopt = aref_ref_anchor;
+                    /* Patch 5 / MF1: lower the local-search ref max with the anchor.  In this scenario it is
+                     * stale in the 75..92 % band (the deep reset does not fire), and if it survives, the next
+                     * seed raises the anchor straight back and the local search logs "climb still soft -> B"
+                     * on every trigger for the rest of the session. */
+                    if (afd_ref_max_s && afd_ref_max_zoom == zoom && afd_ref_max_mm == mm && afd_ref_max_s > aref_ref_anchor)
+                    {
+                        uint32_t old_max = afd_ref_max_s;
+                        afd_ref_max_s = aref_ref_anchor;
+                        afd_soft_land_n = 0;
+                        afd_soft_best = 0;
+                        afd_note("# local: ref max reset confirmed soft old=%d new=%d t=%d\n", (int) old_max,
+                                 (int) aref_ref_anchor, now);
+                    }
+                    afd_note("# aref ref anchor: confirmed soft scene -> reset ref=%d n=%d t=%d\n", (int) aref_ref_anchor,
+                             aref_ref_soft_n, now);
+                    aref_ref_soft_n = 0;
+                    aref_ref_soft_best = 0;
+                }
+            }
+            else
+            {
+                aref_ref_soft_n = 0;
+                aref_ref_soft_best = 0;
+            }
+        }
+        /* the anchor's texture metrics are the best known for the reference: keep them with a floored value */
+        if (aref_ref_anchor_em > em_use) em_use = aref_ref_anchor_em;
+        if (aref_ref_anchor_g > g_use) g_use = aref_ref_anchor_g;
+    }
+    aref_peak_update(now, adopt, em_use, g_use);
     aref_fails = 0;
+    aref_anchor_fail_n = 0;   /* patch 5 / SF2: a real settle ends the failed-run streak */
     aref_log(14, med);
     int impr = !pre || (uint64_t) med * 100 > (uint64_t) pre * (100 + AREF_MPU_IMPROVE_PCT);
     int same = aref_mpu_prev_new && (uint64_t) med * 100 >= (uint64_t) aref_mpu_prev_new * (100 - AREF_MPU_SAME_PCT) &&
@@ -13371,7 +14351,8 @@ static void aref_mpu_settle(int now, uint32_t med, int emax, uint32_t g)
     aref_mpu_prev_new = med;
     aref_mpu_prev_t = now;
     aref_mpu_prev_impr = impr;
-    aref_mpu_done_note(med);
+    aref_mpu_done_note(adopt);   /* the reference actually adopted (the anchor may have kept/raised it) */
+    aref_hunt_settle(now, med);  /* patch 9: a persistent hunt attempt is judged on the settled picture */
 }
 
 /* ---- scene-settled window (MPU method) ---- */
@@ -13383,6 +14364,9 @@ static void aref_sw_push(int now, uint32_t s, int luma, int mpu_m)
         /* another scene (pan, light change): the remembered peak belongs to the old one */
         aref_peak_clear();
         aref_sw_n = 0;
+        afd_ref_max_reset("scene");   /* the local-search ref max + last landing belong to the old scene (handover 4.2) */
+        aref_anchor_clear("scene");   /* ... and so does the Auto-refocus reference anchor (patch 3 / MF3) */
+        aref_hunt_reset("scene");     /* patch 9: a new scene ends any persistent episode */
     }
     for (int i = AREF_SW_N - 1; i > 0; i--)
     {
@@ -13482,6 +14466,7 @@ static int aref_eval(int now, int sens, int mpu_m)
 
     int settled = mpu_m ? aref_settled_ms() : 0;
     aref_dec.cur = cur; aref_dec.peak = aref_ref; aref_dec.path = 0; aref_dec.gate = 12;
+    aref_dec.emax = emax;   /* patch 9: absolute-sharp sanity for the hunt judge */
     aref_dec.q = q; aref_dec.g = (int) gsum; aref_dec.luma = mean; aref_dec.settled = settled;
     aref_dec.pct = aref_ref ? (int) ((uint64_t) cur * 100 / aref_ref) : 0;
 
@@ -13497,9 +14482,12 @@ static int aref_eval(int now, int sens, int mpu_m)
     }
     if (aref_mpu_newref && now - aref_mpu_newref_t > 5000)
     {
-        /* never got a settled sample (menu, LV off, scene never stopped moving): no reference at all */
+        /* never got a settled sample (menu, LV off, scene never stopped moving): no reference at all.
+         * Patch 5 / SF1: the anchor must not defeat this clear (the clamp would restore it on the next sample). */
         aref_mpu_done_note(0);
         aref_peak_clear();
+        aref_anchor_clear("timeout");
+        afd_ref_max_reset("timeout");
     }
 
     /* failed-scene memory: the same picture as when the last run found nothing */
@@ -13510,7 +14498,12 @@ static int aref_eval(int now, int sens, int mpu_m)
         else if (ABS(mean - aref_fs_luma) * 100 <= aref_fs_luma * AREF_FAIL_LUMA_PCT &&
                  (uint64_t) (gsum > aref_fs_g ? gsum - aref_fs_g : aref_fs_g - gsum) * 100 <= (uint64_t) aref_fs_g * AREF_FAIL_G_PCT)
             fs_same = 1;
-        else aref_fs_t = 0;   /* the scene (or the focus) changed: a new chance */
+        else
+        {
+            aref_fs_t = 0;   /* the scene (or the focus) changed: a new chance */
+            aref_abs_used = 0;   /* patch 6/A: a genuinely new scene gets its own absolute attempts */
+            aref_abs_n = 0;
+        }
     }
 
     /* Feed the peak with the median of the last 3 samples, so a one-sample
@@ -13544,8 +14537,12 @@ static int aref_eval(int now, int sens, int mpu_m)
     }
     int gate = 0;
 
-    /* Re-arm the absolute path once a sharp picture has been seen again. */
-    if (q < AREF_ABS_Q_GOOD && emax >= AREF_ABS_EM_GOOD) aref_abs_used = 0;
+    /* Re-arm the absolute path once a sharp picture has been seen again (patch 6/A: new blur episode). */
+    if (q < AREF_ABS_Q_GOOD && emax >= AREF_ABS_EM_GOOD)
+    {
+        aref_abs_used = 0;
+        aref_abs_n = 0;
+    }
 
     if (aref_post_check && now - aref_post_t > 2000)
         aref_post_check = 0;  /* a menu or half-press intervened: different picture, don't judge it */
@@ -13561,6 +14558,10 @@ static int aref_eval(int now, int sens, int mpu_m)
             aref_post_prev = 0;
             aref_fails = 0;
             aref_peak_clear();
+            /* Patch 5 / SF1: a new scene is a new scene: do not let the anchor / ref max clamp the cleared peak
+             * back on the next sample. */
+            aref_anchor_clear("newscene");
+            afd_ref_max_reset("newscene");
             aref_log(12, cur);
             return 0; /* decide again on the next sample, from the cleared state */
         }
@@ -13593,6 +14594,8 @@ static int aref_eval(int now, int sens, int mpu_m)
         {
             aref_paused = 0;
             aref_fails = 0;
+            aref_abs_used = 0;   /* patch 6/A: a new attempt episode after a pause */
+            aref_abs_n = 0;
             aref_drop_ref(now, 0, 0);
             aref_log(6, cur);
         }
@@ -13601,6 +14604,7 @@ static int aref_eval(int now, int sens, int mpu_m)
             aref_paused = 0;
             aref_fails = AREF_MAX_FAILS - 1;
             aref_abs_used = 0;
+            aref_abs_n = 0;
             aref_drop_ref(now, 0, 0);
             aref_log(6, cur);
         }
@@ -13698,9 +14702,17 @@ static void aref_mpu_arm(int now, int path)
     uint32_t peak = aref_dec.peak, cur = aref_dec.cur;
     aref_trig_ref = peak;
     aref_low_since = 0;
-    if (path == 2) aref_abs_used = 1;
+    if (path == 2)
+    {
+        aref_abs_used = 1;
+        aref_abs_n++;   /* patch 6/A: count absolute attempts in this blur episode */
+    }
     if (aref_mpu_newref) aref_mpu_done_note(0);
     aref_mpu_pre = aref_hist_n >= 3 ? aref_med3(aref_hist) : cur;
+    /* Trigger hint for the local search (afd_run_local): the drop path means the picture was 15..40 % below
+     * the aref reference, so a flat local probe must not be accepted as "in focus" (handover 4.1). */
+    afd_aref_trig_pct = peak ? (int) ((uint64_t) cur * 100 / peak) : 0;
+    afd_aref_trig_path = path;
     afd_note("# aref trig cur=%d ref=%d pct=%d t=%d mm=%d settled_ms=%d\n", (int) cur, (int) peak,
              peak ? (int) ((uint64_t) cur * 100 / peak) : 0, now, (int) lens_info.focal_len, aref_dec.settled);
 }
@@ -13722,6 +14734,21 @@ static void aref_mpu_finish(int now)
             aref_log(5, 0);
         }
     }
+    /* Patch 5 / SF2: a nopeak/lowtexture run never settles, so the confirmed-soft escape cannot run and the
+     * clamp would keep a stale anchor high forever (periodic failed-refocus loop).  Two consecutive no-focus
+     * runs clear the anchor and the engine ref max; a successful run resets the streak. */
+    if (aref_mpu_pct < 0 && (afd_nopeak_last || afd_lowcontrast))
+    {
+        aref_anchor_fail_n++;
+        if (aref_anchor_fail_n >= AREF_ANCHOR_FAIL_N)
+        {
+            aref_anchor_clear("failed runs");
+            afd_ref_max_reset("failed runs");
+            aref_anchor_fail_n = 0;
+        }
+    }
+    else if (aref_mpu_pct >= 0)
+        aref_anchor_fail_n = 0;
     aref_drop_ref(now, AREF_SETTLE_MS, 0);
     if (aref_mpu_pct < 0 && afd_searched_last)
     {
@@ -13741,6 +14768,15 @@ static void aref_mpu_finish(int now)
     }
     else
         aref_fs_t = 0;
+    /* Patch 6/A: a failed absolute-path run leaves the scene blurry (the peak memory is rebuilt from the blurred
+     * picture with em < 70), so the one-shot absolute path would stay disabled and the camera would never try
+     * again.  Re-arm it up to AREF_ABS_MAX attempts per blur episode; the cooldown / failed-scene memory /
+     * pause still bound the hunting. */
+    if (aref_mpu_pct < 0 && afd_searched_last && aref_abs_n > 0 && aref_abs_n < AREF_ABS_MAX)
+    {
+        aref_abs_used = 0;
+        afd_note("# aref abs re-arm after failed run n=%d max=%d t=%d\n", aref_abs_n, AREF_ABS_MAX, now);
+    }
     if (aref_mpu_pct >= 0)
     {
         /* no post-check against the old peak: the first settled sample becomes the reference (aref_mpu_settle) */
@@ -13757,6 +14793,528 @@ static void aref_mpu_finish(int now)
                   lv_dispsize | (RECORDING ? 0x100 : 0) | (aref_fails << 16));
 }
 
+/* ---- Patch 9: persistent hunt helpers (definitions; forward declarations above) ---- */
+
+static const char *aref_hunt_strat_name(int s)
+{
+    switch (s)
+    {
+        case HUNT_S_LOCAL:         return "local";
+        case HUNT_S_FULL_B:        return "full_b";
+        case HUNT_S_CANON_X10:     return "canon_x10";
+        case HUNT_S_CANON_INPLACE: return "canon_x5";
+        case HUNT_S_FULL_B_ALT:    return "full_b_alt";
+    }
+    return "?";
+}
+
+static const char *aref_hunt_tx_name(int t)
+{
+    switch (t)
+    {
+        case HUNT_TX_NOPEAK:     return "nopeak";
+        case HUNT_TX_LOWTEXTURE: return "lowtexture";
+        case HUNT_TX_SOFT:       return "soft";
+        case HUNT_TX_DEEP:       return "deep";
+        case HUNT_TX_ENDSTOP:    return "endstop";
+        case HUNT_TX_DARK:       return "dark";
+        case HUNT_TX_CANON:      return "canon_fail";
+        case HUNT_TX_ABORT:      return "abort";
+        case HUNT_TX_MOVING:     return "moving";
+    }
+    return "none";
+}
+
+/* The best reference the camera currently TRUSTS: anchor, the per-zoom/mm engine ref max, and the last verified
+ * landing.  The decaying aref peak memory is deliberately NOT trusted here (it can be learned from a blurry
+ * picture): a soft episode must not become its own success bar. */
+static int aref_hunt_ref(void)
+{
+    uint32_t ref = 0;
+    if (aref_anchor_ok() && aref_ref_anchor > ref) ref = aref_ref_anchor;
+    if (afd_ref_max_s && afd_ref_max_zoom == lv_dispsize && afd_ref_max_mm == aref_ref_mm && afd_ref_max_s > ref)
+        ref = afd_ref_max_s;
+    if (afd_last_land_s && afd_last_land_zoom == lv_dispsize && afd_last_land_mm == aref_ref_mm && afd_last_land_s > ref)
+        ref = afd_last_land_s;
+    return (int) ref;
+}
+
+static int aref_hunt_abs_sharp(int q, int emax)
+{
+    return q < AREF_ABS_Q_GOOD && emax >= AREF_ABS_EM_GOOD;
+}
+
+/* 92 % of the reference that was trusted at EPISODE START, or absolute sharp, or a clear +10 % improvement over
+ * the pre-attempt value with real texture.  The reference is deliberately frozen at episode start: a soft
+ * landing that seeds/raises the anchor or ref max during the episode must never become its own success bar.
+ * With no trusted baseline (cold start / camera booted on a blurry scene) only absolute evidence or a clear
+ * improvement counts, so the hunt keeps trying instead of accepting the picture it just learned. */
+static int aref_hunt_is_sharp(int med)
+{
+    int ref = aref_hunt_base_ref;
+    if (ref)
+    {
+        if ((uint64_t) med * 100 >= (uint64_t) ref * aref_tol_pct()) return 1;
+        if (aref_hunt_abs_sharp(aref_dec.q, aref_dec.emax)) return 1;
+        if (aref_hunt_pre_s && (uint64_t) med * 100 >= (uint64_t) aref_hunt_pre_s * (100 + HUNT_IMPROVE_PCT) &&
+            aref_dec.emax >= AREF_PEAK_EMAX_MIN) return 1;
+        return 0;
+    }
+    if (aref_hunt_abs_sharp(aref_dec.q, aref_dec.emax)) return 1;
+    if (aref_hunt_pre_s && (uint64_t) med * 100 >= (uint64_t) aref_hunt_pre_s * (100 + HUNT_IMPROVE_PCT) &&
+        aref_dec.emax >= AREF_PEAK_EMAX_MIN) return 1;
+    return 0;
+}
+
+static int aref_hunt_med(void)
+{
+    return aref_hist_n >= 3 ? (int) aref_med3(aref_hist) : (int) aref_dec.cur;
+}
+
+/* Jittered, capped backoff: table 4/6/10/15/20/30 s, +/-HUNT_JITTER_PCT % from a private LCG, clamped
+ * HUNT_MIN_DELAY_MS..HUNT_MAX_DELAY_MS.  Never shorter than HUNT_REC_MIN_GAP_MS while recording. */
+static int aref_hunt_delay(void)
+{
+    int i = aref_hunt_n > 0 ? MIN(aref_hunt_n - 1, HUNT_BACKOFF_N - 1) : 0;
+    int base = aref_hunt_backoff_tbl[i];
+    if (aref_hunt_besteffort) base = aref_hunt_backoff_tbl[HUNT_BACKOFF_N - 1];
+    aref_hunt_rng = aref_hunt_rng * 1664525u + 1013904223u;
+    {
+        int pct = 100 - HUNT_JITTER_PCT + (int) ((aref_hunt_rng >> 16) % (2 * HUNT_JITTER_PCT + 1));
+        int d = base * pct / 100;
+        if (d < HUNT_MIN_DELAY_MS) d = HUNT_MIN_DELAY_MS;
+        if (d > HUNT_MAX_DELAY_MS) d = HUNT_MAX_DELAY_MS;
+        if (aref_hunt_rec && d < HUNT_REC_MIN_GAP_MS) d = HUNT_REC_MIN_GAP_MS;
+        if ((uint32_t) d > aref_hunt_max_backoff) aref_hunt_max_backoff = (uint32_t) d;
+        return d;
+    }
+}
+
+/* MPU strategies need the MPU monitor; while recording they need ON + REC, the already-open Keep-open
+ * monitor and the pre-created worker (never a task_create and never a monitor open here). */
+static int aref_hunt_mpu_ok(void)
+{
+    /* patch 9.1 / S3: only "Keep open".  With monitor ON the engine opens/closes it around every attempt
+     * (~2 s LV blackout per attempt, forever on a hopeless scene), so Persistent uses the Canon legs instead. */
+    if (Auto_refocus_method != 1 || afdiag_afdrive_mon != 2) return 0;
+    if (RECORDING)
+    {
+        if (Auto_refocus != 2 || !Auto_refocus_mpu_rec) return 0;
+        if (!RECORDING_RAW || afdiag_afdrive_mon != 2 || !afd_mon_is_open) return 0;
+        return afd_wk_ok ? 1 : 0;
+    }
+    return afd_worker_ensure();
+}
+
+static int aref_hunt_available(int s)
+{
+    if (s == HUNT_S_CANON_X10) return !RECORDING && slim_af_can_start();
+    if (s == HUNT_S_CANON_INPLACE) return slim_af_can_start_inplace();
+    return aref_hunt_mpu_ok();
+}
+
+/* Rotating portfolio order, reordered once by the last taxonomy.  The normal order is the design order:
+ * local -> full B 07 -> Canon x10 -> Canon in-place -> full B alternate speed + opposite direction. */
+static int aref_hunt_order(int k)
+{
+    static const uint8_t def[HUNT_S_N] = { HUNT_S_LOCAL, HUNT_S_FULL_B, HUNT_S_CANON_X10, HUNT_S_CANON_INPLACE, HUNT_S_FULL_B_ALT };
+    static const uint8_t low[HUNT_S_N] = { HUNT_S_CANON_X10, HUNT_S_CANON_INPLACE, HUNT_S_LOCAL, HUNT_S_FULL_B, HUNT_S_FULL_B_ALT };
+    static const uint8_t es[HUNT_S_N]  = { HUNT_S_FULL_B_ALT, HUNT_S_CANON_INPLACE, HUNT_S_CANON_X10, HUNT_S_LOCAL, HUNT_S_FULL_B };
+    static const uint8_t cf[HUNT_S_N]  = { HUNT_S_LOCAL, HUNT_S_FULL_B, HUNT_S_FULL_B_ALT, HUNT_S_CANON_X10, HUNT_S_CANON_INPLACE };
+    static const uint8_t np[HUNT_S_N]  = { HUNT_S_FULL_B, HUNT_S_FULL_B_ALT, HUNT_S_LOCAL, HUNT_S_CANON_X10, HUNT_S_CANON_INPLACE };
+    const uint8_t *t = def;
+    switch (aref_hunt_last_tax)
+    {
+        case HUNT_TX_LOWTEXTURE:
+        case HUNT_TX_DARK:       t = low; break;
+        case HUNT_TX_ENDSTOP:    t = es; break;
+        case HUNT_TX_CANON:      t = cf; break;
+        case HUNT_TX_NOPEAK:
+        case HUNT_TX_DEEP:       t = np; break;
+    }
+    return (int) t[COERCE(k, 0, HUNT_S_N - 1)];
+}
+
+/* Next usable strategy from the cursor: skip the unavailable ones; after HUNT_BESTEFFORT_N no-improvement
+ * failures prefer the cheap Canon strategies, but if they are not available fall back to the MPU ones so the
+ * episode never stalls. */
+static int aref_hunt_pick(int k0)
+{
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < HUNT_S_N; i++)
+        {
+            int s = aref_hunt_order((k0 + i) % HUNT_S_N);
+            if (aref_hunt_besteffort)
+            {
+                int cheap = (s == HUNT_S_CANON_X10 || s == HUNT_S_CANON_INPLACE);
+                if ((pass == 0 && !cheap) || (pass == 1 && cheap)) continue;
+            }
+            else if (pass) continue;
+            if (aref_hunt_available(s)) return s;
+        }
+    return -1;
+}
+
+/* One text log line per event; while recording only when the strategy changes, so the 2 KB afd_note buffer
+ * and the card cannot flood during a long take. */
+static int aref_hunt_log_allowed(int s)
+{
+    if (!RECORDING) return 1;
+    if (s != aref_hunt_logged_strategy) { aref_hunt_logged_strategy = s; return 1; }
+    return 0;
+}
+
+/* End the episode: log reset + one-line summary and clear every counter.  Never called unless an episode is
+ * active.  This is the ONLY path out of the state machine besides a new episode. */
+static void aref_hunt_close(int now, const char *why, int sharp)
+{
+    int dur = aref_hunt_started ? now - aref_hunt_started : 0;
+    afd_note("# hunt reset why=%s attempts=%d ok=%d strategies=%x max_backoff_ms=%d travel=%d duration_ms=%d sharp=%d t=%d\n",
+             why, aref_hunt_n, aref_hunt_ok, aref_hunt_mask, (int) aref_hunt_max_backoff, aref_hunt_travel, dur, sharp, now);
+    afd_note("# hunt summary attempts=%d ok=%d fails=%d strategies=%x max_backoff_ms=%d duration_ms=%d travel=%d end=%s rec=%d\n",
+             aref_hunt_n, aref_hunt_ok, aref_hunt_fails, aref_hunt_mask, (int) aref_hunt_max_backoff, dur, aref_hunt_travel,
+             why, aref_hunt_rec);
+    if (sharp)
+    {
+        /* patch 9.1 / S2: a verifiably sharp picture is not a blur episode: clear the legacy failure/pause
+         * state and put a normal MPU cooldown on the next trigger, so a new episode cannot immediately
+         * re-begin (and re-launch) on the same in-focus scene. */
+        aref_paused = 0;
+        aref_fails = 0;
+        aref_next_at = now + AREF_MPU_MIN_GAP_MS;
+        aref_hunt_cold_until = now + HUNT_SHARP_COOLDOWN_MS;   /* patch 10/A: no instant re-begin on the same scene */
+        afd_note("# hunt cooldown ms=%d t=%d\n", HUNT_SHARP_COOLDOWN_MS, now);
+    }
+    aref_hunt_state = HUNT_IDLE;
+    aref_hunt_pre_s = 0;   /* patch 10/A: never let a stale pre-attempt value judge the next episode */
+    aref_hunt_n = 0;
+    aref_hunt_k = 0;
+    aref_hunt_started = 0;
+    aref_hunt_next_at = 0;
+    aref_hunt_ok = 0;
+    aref_hunt_fails = 0;
+    aref_hunt_travel = 0;
+    aref_hunt_mask = 0;
+    aref_hunt_max_backoff = 0;
+    aref_hunt_noimpr = 0;
+    aref_hunt_besteffort = 0;
+    aref_hunt_attempt = -1;
+    aref_hunt_attempt_mpu = 0;
+    aref_hunt_attempt_active = 0;
+    aref_hunt_last_tax = HUNT_TX_NONE;
+    aref_hunt_last_dir = 0;
+    aref_hunt_last_delay = 0;
+    aref_hunt_last_strategy = -1;
+    aref_hunt_logged_strategy = -1;
+    aref_hunt_base_ref = 0;
+    aref_hunt_pause_blk = -1;
+}
+
+static void aref_hunt_reset(const char *why)
+{
+    if (aref_hunt_state != HUNT_IDLE) aref_hunt_close(get_ms_clock(), why, 0);
+}
+
+/* Legitimate ineligibility (menu / MF / Movie Servo / half-press / LV transition / AF busy / recording
+ * restrictions): pause, never end the episode, never consume the backoff. */
+static void aref_hunt_pause(int now, int blk)
+{
+    /* patch 9.1 / S6: one line per gate change, not every 2 s (a long ineligible period must not flood the
+     * 2 KB note buffer). */
+    if (aref_hunt_state == HUNT_IDLE) return;
+    if (blk == aref_hunt_pause_blk) return;
+    aref_hunt_pause_blk = blk;
+    afd_note("# hunt pause gate=%x t=%d\n", blk, now);
+}
+
+static void aref_hunt_begin(int now, const char *why, int path)
+{
+    aref_hunt_state = HUNT_ARM;
+    aref_hunt_pre_s = 0;   /* patch 10/A: a previous episode's pre-attempt value must never judge this one */
+    aref_hunt_n = 0;
+    aref_hunt_k = 0;
+    aref_hunt_started = now;
+    aref_hunt_next_at = now;
+    aref_hunt_ok = 0;
+    aref_hunt_fails = 0;
+    aref_hunt_travel = 0;
+    aref_hunt_mask = 0;
+    aref_hunt_max_backoff = 0;
+    aref_hunt_noimpr = 0;
+    aref_hunt_besteffort = 0;
+    aref_hunt_attempt = -1;
+    aref_hunt_attempt_mpu = 0;
+    aref_hunt_attempt_active = 0;
+    aref_hunt_rec = RECORDING ? 1 : 0;
+    aref_hunt_base_ref = aref_hunt_ref();   /* frozen for the whole episode */
+    aref_hunt_rng = (uint32_t) now * 2654435761u + (uint32_t) aref_dec.luma * 40503u + (uint32_t) afd_frame_cnt;
+    aref_hunt_last_tax = HUNT_TX_NONE;
+    aref_hunt_last_dir = 0;
+    aref_hunt_last_delay = 0;
+    aref_hunt_last_strategy = -1;
+    aref_hunt_logged_strategy = -1;
+    aref_hunt_pause_blk = -1;
+    afd_note("# hunt begin why=%s gate=%d path=%d ref=%d base=%d anchor=%d rec=%d tol=%d t=%d\n", why, aref_dec.gate, path,
+             (int) aref_dec.peak, aref_hunt_base_ref, aref_anchor_ok() ? (int) aref_ref_anchor : 0, aref_hunt_rec,
+             aref_tol_pct(), now);
+}
+
+/* Launch exactly one attempt.  MPU strategies post to the pre-created worker with the AFD_F_HUNT override;
+ * Canon strategies use the existing slim_af_request paths (1 = x10 one-shot, 2 = in-place x5). */
+static void aref_hunt_launch(int now, int s)
+{
+    aref_hunt_attempt = s;
+    aref_hunt_mask |= (1u << s);
+    aref_hunt_pre_s = (int) aref_dec.cur;
+    aref_hunt_attempt_t = now;
+    aref_hunt_attempt_active = 1;
+    aref_hunt_state = HUNT_ATTEMPT;
+    aref_hunt_att_pct = -1;
+    aref_hunt_att_land = 0;
+    aref_hunt_rec = RECORDING ? 1 : 0;
+    if (aref_hunt_log_allowed(s))
+        afd_note("# hunt attempt n=%d k=%d strategy=%s pre=%d ref=%d anchor=%d backoff_ms=%d t=%d\n", aref_hunt_n + 1,
+                 aref_hunt_k, aref_hunt_strat_name(s), aref_hunt_pre_s, (int) aref_dec.peak,
+                 aref_anchor_ok() ? (int) aref_ref_anchor : 0, aref_hunt_last_delay, now);
+    /* compact @REFOCUS kind 17: sharpness values need 32 bits each, so metadata stays in the kind word */
+    afdiag_record(AFD_EV_REFOCUS, 16,
+                  17 | (s << 8) | ((aref_hunt_n & 0xFF) << 16) | ((aref_anchor_ok() ? 1 : 0) << 24),
+                  aref_dec.cur, (uint32_t) aref_hunt_med(), (uint32_t) aref_hunt_base_ref);
+    if (s == HUNT_S_CANON_X10 || s == HUNT_S_CANON_INPLACE)
+    {
+        aref_hunt_attempt_mpu = 0;
+        aref_trig_ref = aref_dec.peak;
+        aref_count0 = slim_af_result_count;
+        aref_low_since = 0;
+        if (s == HUNT_S_CANON_X10) aref_abs_used = 0;
+        aref_phase = AREF_REQUESTED;
+        slim_af_request = (s == HUNT_S_CANON_X10) ? 1 : 2;
+        aref_log(1, aref_dec.cur);
+        aref_log_affr();
+        return;
+    }
+    aref_hunt_attempt_mpu = 1;
+    /* strategy 0 = the user's configured Refocus AF (Local by default); the other legs force B */
+    afd_hunt_algo = (s == HUNT_S_LOCAL) ? (Auto_refocus_af ? 1 : AFD_ALGO_LOCAL) : 1;
+    if (s == HUNT_S_FULL_B)
+    {
+        afd_hunt_speed = AFD_SPEED;
+        afd_hunt_dir = 0;
+    }
+    else if (s == HUNT_S_FULL_B_ALT)
+    {
+        /* the "other speed / reversed" leg: 14 or 1F, opposite to the previous B direction */
+        afd_hunt_speed = (aref_hunt_n & 1) ? AFD_SPEED_MID : AFD_SPEED_FAST;
+        afd_hunt_dir = aref_hunt_last_dir ? -aref_hunt_last_dir : 1;
+    }
+    else
+    {
+        afd_hunt_speed = -1;
+        afd_hunt_dir = 0;
+    }
+    {
+        int min_s = (int) aref_peak_min[COERCE(Auto_refocus_sens, 0, 2)];
+        int path = (aref_dec.peak && (int) aref_dec.peak >= min_s) ? 1 : 2;
+        aref_mpu_arm(now, path);
+    }
+    aref_mpu_state = 1;
+    aref_mpu_pct = -1;
+    afdiag_afdrive_busy = 1;
+    aref_phase = AREF_MPU;
+    aref_log(1, aref_dec.cur);
+    aref_log_affr();
+    afd_wk_flags = (RECORDING ? (AFD_F_REC | AFD_F_QUIET) : AFD_F_QUIET) | AFD_F_AREF | AFD_F_HUNT;
+    afd_wk_t_post = now;
+    afd_wk_req = 1;
+}
+
+/* A failed attempt: count it, advance the rotation, schedule the next attempt.  No attempt-count cap: the
+ * episode only ends via aref_hunt_close (sharp / explicit reset). */
+static void aref_hunt_schedule(int now, int tx)
+{
+    aref_hunt_attempt_active = 0;
+    aref_hunt_fails++;
+    aref_hunt_n++;
+    aref_hunt_last_tax = tx;
+    if (aref_hunt_pre_s && (uint64_t) aref_hunt_med() * 100 >= (uint64_t) aref_hunt_pre_s * (100 + HUNT_IMPROVE_PCT))
+        aref_hunt_noimpr = 0;
+    else
+        aref_hunt_noimpr++;
+    if (aref_hunt_noimpr >= HUNT_BESTEFFORT_N && !aref_hunt_besteffort)
+    {
+        aref_hunt_besteffort = 1;
+        afd_note("# hunt besteffort attempts=%d t=%d\n", aref_hunt_n, now);
+    }
+    aref_hunt_last_delay = aref_hunt_delay();
+    aref_hunt_next_at = now + aref_hunt_last_delay;
+    aref_hunt_state = HUNT_ARM;
+    aref_hunt_k = (aref_hunt_k + 1) % HUNT_S_N;
+}
+
+static void aref_hunt_fail(int now, int tx)
+{
+    if (!aref_hunt_attempt_active)
+    {
+        aref_hunt_schedule(now, tx);
+        return;
+    }
+    if (aref_hunt_log_allowed(aref_hunt_attempt))
+        afd_note("# hunt outcome n=%d k=%d strategy=%s pct=%d land=%d med=%d sharp=0 why=%s t=%d\n", aref_hunt_n,
+                 aref_hunt_k, aref_hunt_strat_name(aref_hunt_attempt), aref_hunt_att_pct, aref_hunt_att_land,
+                 aref_hunt_med(), aref_hunt_tx_name(tx), now);
+    aref_hunt_schedule(now, tx);
+}
+
+/* Shared judge: med is the settled median (settle hook) or the current median (fallback timer). */
+static void aref_hunt_finish_attempt(int now, int med)
+{
+    int sharp = aref_hunt_is_sharp(med);
+    /* patch 9.1 / S7: do not inherit the previous failure's taxonomy; a soft judge is SOFT, unless THIS
+     * attempt (an MPU run) itself saw an end stop. */
+    int tx = (aref_hunt_attempt_mpu && aref_mpu_esdir) ? HUNT_TX_ENDSTOP : HUNT_TX_SOFT;
+    aref_hunt_attempt_active = 0;
+    if (aref_hunt_log_allowed(aref_hunt_attempt))
+        afd_note("# hunt outcome n=%d k=%d strategy=%s pct=%d land=%d med=%d sharp=%d why=%s t=%d\n", aref_hunt_n,
+                 aref_hunt_k, aref_hunt_strat_name(aref_hunt_attempt), aref_hunt_att_pct, aref_hunt_att_land, med, sharp,
+                 sharp ? "ok" : aref_hunt_tx_name(tx), now);
+    if (sharp)
+    {
+        aref_hunt_ok++;
+        aref_hunt_close(now, "sharp", 1);
+        return;
+    }
+    aref_hunt_schedule(now, tx);
+}
+
+/* Called from aref_mpu_settle() when the first settled sample after a successful MPU run is adopted. */
+static void aref_hunt_settle(int now, uint32_t med)
+{
+    if (aref_hunt_state != HUNT_JUDGE || !aref_hunt_attempt_active || !aref_hunt_attempt_mpu) return;
+    aref_hunt_finish_attempt(now, (int) med);
+}
+
+static void aref_hunt_judge(int now)
+{
+    if (aref_hunt_state != HUNT_JUDGE || !aref_hunt_attempt_active) return;
+    aref_hunt_finish_attempt(now, aref_hunt_med());
+}
+
+/* One call per aref_step poll (Persistent mode only).  Entry conditions, sharp reset, timers, launch. */
+static void aref_hunt_step(int now, int path, int mpu_m)
+{
+    (void) mpu_m;
+    aref_hunt_rec = RECORDING ? 1 : 0;
+    /* patch 9.1 / S3: Persistent with monitor "ON" uses the Canon legs only (no per-attempt LV blackout); say so
+     * once, and re-arm the note if the user later switches back to Keep open. */
+    if (Auto_refocus_method == 1 && afdiag_afdrive_mon == 2) aref_hunt_mon_noted = 0;
+    else if (Auto_refocus_method == 1 && afdiag_afdrive_mon == 1 && !aref_hunt_mon_noted)
+    {
+        aref_hunt_mon_noted = 1;
+        afd_note("# hunt skip why=monitor_mode t=%d\n", now);
+    }
+
+    /* a sharp frame ends an active episode even between attempts */
+    if (aref_hunt_state != HUNT_IDLE && aref_hunt_state != HUNT_ATTEMPT &&
+        aref_hunt_is_sharp(aref_hunt_med()))
+    {
+        aref_hunt_close(now, "sharp", 1);
+        return;
+    }
+    if (aref_hunt_state == HUNT_JUDGE)
+    {
+        if (now >= aref_hunt_judge_at) aref_hunt_judge(now);
+        return;
+    }
+    if (aref_hunt_state == HUNT_ATTEMPT)
+    {
+        /* completion watchdog: never touch the engine internals, just stop waiting and schedule again */
+        if (now - aref_hunt_attempt_t > HUNT_ATTEMPT_TIMEOUT_MS)
+        {
+            aref_hunt_attempt_active = 0;
+            aref_hunt_fails++;
+            aref_hunt_n++;
+            aref_hunt_last_tax = HUNT_TX_ABORT;
+            aref_hunt_last_delay = aref_hunt_delay();
+            aref_hunt_next_at = now + aref_hunt_last_delay;
+            aref_hunt_state = HUNT_ARM;
+            aref_hunt_k = (aref_hunt_k + 1) % HUNT_S_N;
+            if (aref_hunt_log_allowed(aref_hunt_attempt))   /* patch 9.1 / S6 */
+                afd_note("# hunt outcome n=%d k=%d strategy=%s pct=%d land=%d med=%d sharp=0 why=timeout t=%d\n", aref_hunt_n,
+                         aref_hunt_k, aref_hunt_strat_name(aref_hunt_attempt), aref_hunt_att_pct, aref_hunt_att_land,
+                         aref_hunt_med(), now);
+        }
+        return;
+    }
+    if (aref_hunt_state == HUNT_IDLE)
+    {
+        const char *why = 0;
+        if (path) why = "blur";
+        else if (aref_dec.gate == 6 || aref_dec.gate == 7 || aref_dec.gate == 11) why = "gate";
+        else if (aref_dec.gate == 4 && aref_dec.peak >= aref_peak_min[COERCE(Auto_refocus_sens, 0, 2)]) why = "gate4";
+        else if (aref_hunt_cold_t && now - aref_hunt_cold_t >= HUNT_COLD_START_MS && !aref_hunt_ref() &&
+                 (aref_dec.peak < aref_peak_min[COERCE(Auto_refocus_sens, 0, 2)] ||
+                  (aref_dec.q >= AREF_ABS_Q_GOOD && aref_dec.emax < AREF_ABS_EM_GOOD)))
+            why = "cold";
+        if (!why) return;
+        if (now < aref_hunt_cold_until)
+        {
+            /* patch 10/A: after a sharp close, do not begin the next episode on the same in-focus scene at once */
+            if (now - aref_hunt_coolnoted_t >= 10000 || !aref_hunt_coolnoted_t)
+            {
+                aref_hunt_coolnoted_t = now;
+                afd_note("# hunt skip why=cooldown remain_ms=%d t=%d\n", aref_hunt_cold_until - now, now);
+            }
+            return;
+        }
+        {
+            int cand = aref_hunt_ref();
+            int med0 = aref_hunt_med();
+            if (cand > 0 && med0 > 0 && (uint64_t) med0 * 100 >= (uint64_t) cand * aref_tol_pct())
+            {
+                /* patch 9.1 / S2: already sharp against the trusted reference — no episode (log rate-limited) */
+                if (now - aref_hunt_sharp_skip_t >= 10000)
+                {
+                    aref_hunt_sharp_skip_t = now;
+                    afd_note("# hunt skip why=sharp ref=%d med=%d t=%d\n", cand, med0, now);
+                }
+                return;
+            }
+        }
+        aref_hunt_begin(now, why, path);
+    }
+    /* HUNT_ARM */
+    if (now < aref_hunt_next_at) return;
+    if (aref_hunt_attempt_active) return;
+    if (mpu_m && aref_dec.settled < AREF_SETTLED_MS)
+    {
+        /* scene still moving/fading (pan, exposure step): waiting is not a failure and does not consume the
+         * backoff; MPU sampling and moves during motion are meaningless.  Canon method has no settled value. */
+        aref_hunt_next_at = now + 500;
+        return;
+    }
+    if (aref_phase != AREF_MON || afdiag_afdrive_busy || afd_wk_req ||
+        slim_af_state != SLIM_AF_IDLE || slim_af_request)
+    {
+        aref_hunt_next_at = now + 500;   /* AF machinery busy: look again shortly */
+        return;
+    }
+    {
+        int s = aref_hunt_pick(aref_hunt_k);
+        if (s < 0)
+        {
+            if (aref_hunt_last_strategy != -2)
+            {
+                aref_hunt_last_strategy = -2;
+                afd_note("# hunt skip n=%d reason=no_strategy t=%d\n", aref_hunt_n, now);
+            }
+            aref_hunt_next_at = now + 1000;
+            return;
+        }
+        aref_hunt_last_strategy = s;
+        aref_hunt_launch(now, s);
+    }
+}
+
 static void aref_step(void)
 {
     int now = get_ms_clock();
@@ -13764,6 +15322,13 @@ static void aref_step(void)
     int sens = Auto_refocus_sens;
     if (sens < 0) sens = 0;
     if (sens > 2) sens = 2;
+
+    /* Patch 9: switching the persistence setting to Normal ends any active episode; the hunt is never entered
+     * unless Persistent is selected (Normal = patches 1-8 exactly). */
+    if (!Auto_refocus_persist) aref_hunt_reset("off");
+    /* Patch 9: a menu AF diagnostic run (bench/speed/sweep/stop/reversal/Refocus test) owns the lens; no hunt
+     * episode may survive into or out of it.  Our own MPU attempt is also "busy", but it is an active attempt. */
+    if (afdiag_afdrive_busy && aref_hunt_state != HUNT_IDLE && !aref_hunt_attempt_active) aref_hunt_reset("diag");
 
     /* Setting toggled: forget everything, including a pause. */
     if (Auto_refocus != aref_prev_mode)
@@ -13774,6 +15339,19 @@ static void aref_step(void)
         aref_eligible = 0;
         aref_forget = 1;
         aref_abs_used = 0;
+        aref_abs_n = 0;
+        afd_ref_max_reset("toggle");   /* patch 3 / MF2: the engine ref max belongs to the old mode / scene */
+        aref_anchor_clear("toggle");   /* patch 3 / MF3 */
+        aref_hunt_reset("toggle");     /* patch 9 */
+    }
+
+    /* Patch 5 / SF1: a Refocus-method change makes a leftover MPU anchor meaningless (the clamp is MPU-scoped and
+     * the Canon method must keep its peak-clearing escapes): clear it on a real method switch. */
+    static int aref_prev_method = -1;
+    if (Auto_refocus_method != aref_prev_method)
+    {
+        if (aref_prev_method != -1) { aref_anchor_clear("method"); aref_hunt_reset("method"); }
+        aref_prev_method = Auto_refocus_method;
     }
 
     /* RAW recording starts / stops: the preview may change (crop, resolution, exposure), so the peak memory
@@ -13784,7 +15362,48 @@ static void aref_step(void)
         aref_raw_prev = RECORDING_RAW ? 1 : 0;
         aref_drop_ref(now, AREF_SETTLE_MS, 1);
         aref_mpu_prev_t = 0;
+        afd_ref_max_reset("rawrec");   /* patch 3 / MF2: the preview scale changed, both references restart */
+        aref_anchor_clear("rawrec");   /* patch 3 / MF3 */
+        aref_hunt_reset("rawrec");     /* patch 9 */
         afd_note("# aref peak memory reset: raw rec %s t=%d\n", aref_raw_prev ? "start" : "stop", now);
+    }
+
+    /* Patch 8/C: automatic zoom detection.  While Auto refocus is ON with the MPU monitor Keep open, poll the
+     * (normally frozen) LV_LENS property about once a second.  If the MPU answers and the focal length changed
+     * by >10 %, reset the zoom-dependent state so the next decision runs on the new framing.  If it never
+     * answers, log once and leave it to the manual "Zoom refresh" action - never close/reopen the monitor here
+     * (2 s LV blackout). */
+    if (Auto_refocus && Auto_refocus_method == 1 && afdiag_afdrive_mon == 2 && afd_mon_is_open &&
+        !afdiag_afdrive_busy && aref_phase == AREF_MON && now >= aref_zoom_next && !aref_zoom_noted &&
+        !RECORDING && !RECORDING_RAW && !mlv_raw_rec_busy())   /* patch 9.1 / S1: never during recording */
+    {
+        aref_zoom_next = now + 1000;
+        int old_mm = afd_mm_cache;
+        int mm = 0;
+        int reply = afd_lens_refresh(250, &mm);
+        if (!reply)
+        {
+            if (++aref_zoom_fail >= 3 && !aref_zoom_noted)
+            {
+                aref_zoom_noted = 1;
+                aref_zoom_next = now + 3600000;   /* patch 9.1 / S1: really stop polling, not just set the flag */
+                afd_note("# zoom auto: no fresh report (monitor open)\n");
+            }
+        }
+        else
+        {
+            aref_zoom_fail = 0;
+            if (old_mm >= 8 && mm >= 8 && mm <= 300 && (uint64_t) ABS(mm - old_mm) * 10 > (uint64_t) old_mm)
+            {
+                afd_note("# zoom auto old_mm=%d new_mm=%d fine=%d\n", old_mm, mm, afd_fine_eff());
+                afd_ref_max_reset("zoom");
+                aref_anchor_clear("zoom");
+                aref_hunt_reset("zoom");     /* patch 9: new framing ends the episode */
+                aref_drop_ref(now, AREF_SETTLE_MS, 1);   /* new framing: drop and re-learn the aref reference */
+                aref_abs_used = 0;
+                aref_abs_n = 0;
+            }
+        }
     }
 
     /* MPU drive running or just finished.  Same follow-up as a Canon AF: cooldown,
@@ -13803,12 +15422,56 @@ static void aref_step(void)
             aref_phase = AREF_MON;
             aref_next_at = now + AREF_FAIL_BACKOFF_MS;
             afd_note("# aref worker not responding: request dropped t=%d\n", now);
+            if (aref_hunt_attempt_active && aref_hunt_attempt_mpu)
+            {
+                /* patch 9: the worker died; not a scene failure — retry shortly (the hunt never stops) */
+                aref_hunt_attempt_active = 0;
+                aref_hunt_state = HUNT_ARM;
+                aref_hunt_next_at = now + AREF_FAIL_BACKOFF_MS;
+                afd_note("# hunt pause n=%d reason=worker t=%d\n", aref_hunt_n, now);
+            }
             return;
         }
         if (aref_mpu_state != 2) return;
         aref_mpu_state = 0;
         aref_phase = AREF_MON;
         aref_mpu_finish(now);
+        if (aref_hunt_attempt_active && aref_hunt_attempt_mpu)
+        {
+            aref_hunt_att_pct = aref_mpu_pct;
+            aref_hunt_att_land = (int) aref_mpu_land;
+            aref_hunt_travel += aref_mpu_travel;
+            aref_hunt_last_dir = aref_mpu_dir;
+            if (aref_mpu_pct >= 0)
+            {
+                /* the run found a peak: judge after the settle (aref_hunt_settle) or the fallback timer */
+                aref_hunt_state = HUNT_JUDGE;
+                aref_hunt_judge_at = now + AREF_SETTLE_MS + 1500;
+            }
+            else if (aref_mpu_nopeak || aref_mpu_lowc)
+            {
+                int tx = aref_mpu_esdir ? HUNT_TX_ENDSTOP : (aref_mpu_lowc ? HUNT_TX_LOWTEXTURE : HUNT_TX_NOPEAK);
+                if (tx == HUNT_TX_NOPEAK && aref_dec.g >= AREF_MIN_G) tx = HUNT_TX_DEEP;
+                if (aref_dec.luma < HUNT_DARK_LUMA) tx = HUNT_TX_DARK;
+                aref_hunt_fail(now, tx);
+            }
+            else if (aref_mpu_timeout)
+            {
+                /* patch 9.1 / S4: the engine hit AFD_RUN_CAP_* / AFD_MAX_TOTAL.  That is a real failure, not a
+                 * user/menu pause: advance the backoff, otherwise a scene that reliably hits the cap retries every
+                 * 2 s with full lens travel (~90 % duty). */
+                aref_hunt_fail(now, HUNT_TX_ABORT);
+            }
+            else
+            {
+                /* aborted by a menu / MF / LV / recording change: not a failure, retry after settle */
+                aref_hunt_attempt_active = 0;
+                aref_hunt_state = HUNT_ARM;
+                aref_hunt_next_at = now + 2000;
+                afd_note("# hunt pause n=%d strategy=%s reason=abort t=%d\n", aref_hunt_n,
+                         aref_hunt_strat_name(aref_hunt_attempt), now);
+            }
+        }
         return;
     }
 
@@ -13825,6 +15488,15 @@ static void aref_step(void)
             aref_phase = AREF_MON;
             aref_next_at = now + AREF_COOLDOWN_MS;
             aref_log(4, 0);
+            if (aref_hunt_attempt_active && !aref_hunt_attempt_mpu)
+            {
+                /* patch 9: not a scene failure — retry after the settle (the hunt never stops) */
+                aref_hunt_attempt_active = 0;
+                aref_hunt_state = HUNT_ARM;
+                aref_hunt_next_at = now + 2000;
+                afd_note("# hunt pause n=%d strategy=%s reason=request_dropped t=%d\n", aref_hunt_n,
+                         aref_hunt_strat_name(aref_hunt_attempt), now);
+            }
         }
         return;
     }
@@ -13837,6 +15509,10 @@ static void aref_step(void)
             aref_next_at = now + AREF_COOLDOWN_MS;
             aref_drop_ref(now, AREF_SETTLE_MS, 1);
             aref_abs_used = 0;
+            aref_abs_n = 0;
+            afd_ref_max_reset("foreign");   /* patch 3 / MF2: a user AF landing is a new picture */
+            aref_anchor_clear("foreign");   /* patch 3 / MF3 */
+            aref_hunt_reset("user_af");     /* patch 9: never fight the user */
         }
         else if (!failed)
         {
@@ -13874,6 +15550,22 @@ static void aref_step(void)
             }
             aref_log(3, 0);
         }
+        if (aref_hunt_attempt_active && !aref_hunt_attempt_mpu && aref_phase == AREF_OURS)
+        {
+            /* patch 9: a Canon hunt attempt finished; judge it on the settled picture */
+            aref_hunt_att_pct = failed ? -1 : 0;
+            aref_hunt_att_land = 0;
+            if (failed)
+            {
+                int tx = (aref_dec.luma < HUNT_DARK_LUMA) ? HUNT_TX_DARK : HUNT_TX_CANON;
+                aref_hunt_fail(now, tx);
+            }
+            else
+            {
+                aref_hunt_state = HUNT_JUDGE;
+                aref_hunt_judge_at = now + AREF_SETTLE_MS + 1500;
+            }
+        }
         aref_phase = AREF_MON;
         return;
     }
@@ -13893,6 +15585,7 @@ static void aref_step(void)
     if (blk)
     {
         aref_eligible = 0;
+        aref_hunt_pause(now, blk);   /* patch 9: legitimate ineligibility pauses, never ends the episode */
         if (afdiag_log && Auto_refocus && now - aref_dbg_t >= 2000)
         {
             aref_dbg_t = now;
@@ -13900,14 +15593,22 @@ static void aref_step(void)
         }
         return;
     }
-    if (!aref_eligible || lv_dispsize != aref_ref_zoom)
+    aref_hunt_pause_blk = -1;   /* patch 9.1 / S6: eligibility is back; the next pause logs again */
+    if (!aref_eligible || lv_dispsize != aref_ref_zoom || afd_mm_bucket() != aref_ref_mm)
     {
-        /* newly eligible or zoom changed: keep the peak memory over a short
+        /* newly eligible, zoom or focal-length changed: keep the peak memory over a short
          * ineligible spell (menu, half-press, recording start), but not
-         * across a zoom change (sharpness is zoom dependent). */
-        if (lv_dispsize != aref_ref_zoom) aref_forget = 1;
+         * across a zoom / focal-length change (sharpness is zoom and focal-length dependent). */
+        if (lv_dispsize != aref_ref_zoom || afd_mm_bucket() != aref_ref_mm)
+        {
+            aref_forget = 1;
+            aref_anchor_clear("zoom");   /* patch 3 / MF3: the anchor is zoom / focal-length dependent too */
+            aref_hunt_reset("zoom");     /* patch 9 */
+        }
         aref_eligible = 1;
+        aref_hunt_cold_t = now;          /* patch 9: cold-start / no-reference timer starts here */
         aref_ref_zoom = lv_dispsize;
+        aref_ref_mm = afd_mm_bucket();
         aref_drop_ref(now, AREF_SETTLE_MS, 0);
         aref_last_t = 0;
         return;
@@ -13915,6 +15616,12 @@ static void aref_step(void)
 
     int mpu_m = Auto_refocus_method == 1 && afdiag_afdrive_mon;
     int path = aref_eval(now, sens, mpu_m);
+    if (Auto_refocus_persist)
+    {
+        /* patch 9: the persistent scheduler owns all launches; Normal mode falls through to the legacy path */
+        aref_hunt_step(now, path, mpu_m);
+        return;
+    }
     if (!path) return;
     uint32_t cur = aref_dec.cur;
 
@@ -13996,6 +15703,21 @@ static void aref_step(void)
 #define AFRT_WATCH_MS    5000    /* no trigger this long after a landing = settled */
 #define AFRT_MAX_RUNS    3       /* more AF runs than this in one trial: hunting, the trial ends unsettled */
 #define AFRT_OK_PCT      90      /* final sharpness >= this % of ref_s */
+/* Patch 7/A: a no-trigger trial at a small defocus is a stimulus problem on high-gearing/adapted lenses
+ * (50 mm + speedbooster: +-60 pulses gave only a 4-6 % sharpness drop).  Retry with the defocus doubled, up to
+ * AFRT_RETRY_MAX retries and AFRT_DEF_CAP pulses; the first attempt and the HOLD phases are unchanged. */
+#define AFRT_RETRY_MAX   2
+#define AFRT_DEF_CAP     2000
+/* Refocus-test reference anchor (status review 4.2 / A2): a re-reference (after a failed trial) used to replace
+ * ref_s unconditionally, so a soft re-land could lower the baseline and later trials "pass" against it.  Keep the
+ * session-start reference unless the fresh measurement is at least this % of it (a genuinely sharper scene raises
+ * it).  0 disables anchoring (old behaviour); 100 keeps the first reference forever. */
+#define AFRT_REF_FLOOR_PCT 95
+/* ... but a genuine light/contrast change must not be turned into 5 unexplained failures (review SF3): if the
+ * luma at the fresh reference moved by more than this % from the anchored reference's luma, the scene changed and
+ * the fresh reference is accepted (logged). */
+#define AFRT_REF_LUMA_PCT  15
+static int afrt_ref_luma = 0;   /* luma at the anchored reference (0 = not set yet) */
 static const int afrt_defs[AFRT_NTRIAL] = { 60, -60, 150, -150, 400 };
 
 static int afrt_abort(void)
@@ -14005,22 +15727,23 @@ static int afrt_abort(void)
 }
 
 /* median of 5 samples 100 ms apart (the same scale as aref's samples) */
-static uint32_t afrt_sample(uint32_t *g_out, int *luma_out)
+static uint32_t afrt_sample(uint32_t *g_out, int *luma_out, int *emax_out)
 {
     uint32_t v[5], g = 0;
-    int l = 0;
+    int l = 0, e = 0;
     for (int i = 0; i < 5; i++)
     {
         int m = 0, n = 0, x = 0;
         uint32_t gg = 0;
         v[i] = afdiag_sharpness_ex(&m, &n, &x, &gg);
-        g = gg; l = m;
+        g = gg; l = m; e = x;
         msleep(100);
     }
     for (int i = 1; i < 5; i++)
         for (int j = i; j > 0 && v[j] < v[j - 1]; j--) { uint32_t t = v[j]; v[j] = v[j - 1]; v[j - 1] = t; }
     *g_out = g;
     *luma_out = l;
+    if (emax_out) *emax_out = e;
     return v[2];
 }
 
@@ -14039,6 +15762,7 @@ static void afrt_state_reset(int now, int newref)
     aref_fails = 0;
     aref_paused = 0;
     aref_abs_used = 0;
+    aref_abs_n = 0;
     aref_post_check = 0;
     aref_mpu_prev_t = 0;
     aref_mpu_prev_new = 0;
@@ -14049,6 +15773,7 @@ static void afrt_state_reset(int now, int newref)
     aref_next_at = 0;
     aref_last_t = 0;
     aref_ref_zoom = lv_dispsize;
+    aref_ref_mm = afd_mm_bucket();
     aref_mpu_pre = 0;
     aref_mpu_pct = 100;
     aref_mpu_newref = newref;
@@ -14094,19 +15819,44 @@ static int afrt_hold(const char *ph, int ms, int *ntrig, int count)
     return 0;
 }
 
-/* B07 landing (engine mode 8), stable sample = ref_s, fresh aref state.  1 = ok */
+/* B07 landing (engine mode 8), stable sample = ref_s, fresh aref state.  1 = ok.
+ * ref_s is in/out: the first call sets it, a re-reference keeps the old value when the new one is
+ * below AFRT_REF_FLOOR_PCT of it (anchored Refocus-test reference, status review A2) unless the luma shows a
+ * genuine scene/light change (review SF3).  The log carries both the fresh measurement (meas=) and the adopted
+ * reference (ref_s=), so contrib/af_test/corpus.py keeps reading the meaning it documents. */
 static int afrt_reference(uint32_t *ref_s, const char *why)
 {
     afrt_def = 0;
     int r = afd_engine(8, AFD_F_QUIET);
     if (r < 0 || !afrt_prep_ok || afrt_abort()) return 0;
     uint32_t g = 0;
-    int l = 0;
-    uint32_t s = afrt_sample(&g, &l);
-    *ref_s = s;
-    afw_log("# RT_REF why=%s t=%d land_s=%d ref_s=%d g=%d luma=%d\n", why, get_ms_clock(), (int) afrt_land_s, (int) s, (int) g, l);
+    int l = 0, emax = 0;
+    uint32_t s = afrt_sample(&g, &l, &emax);
+    /* Patch 6/B: the verified/refined reference landing is a floor for the measured reference (the post-engine
+     * stable sample can only be lower if the lens drifted after the reference landing). */
+    if (afrt_land_s > s) s = afrt_land_s;
+    uint32_t old = *ref_s;
+    int adopted = (int) s;
+    if (AFRT_REF_FLOOR_PCT > 0 && old && (uint64_t) s * 100 < (uint64_t) old * AFRT_REF_FLOOR_PCT)
+    {
+        if (afrt_ref_luma > 0 && ABS(l - afrt_ref_luma) * 100 > afrt_ref_luma * AFRT_REF_LUMA_PCT)
+        {
+            /* the scene / light changed: anchoring to the old reference would fail every later trial for no
+             * AF reason; accept the fresh reference and say so (review SF3). */
+            afw_log("# RT_REF scene changed old=%d new=%d luma=%d anchor_luma=%d\n", (int) old, (int) s, l, afrt_ref_luma);
+        }
+        else
+        {
+            afw_log("# RT_REF anchor kept old=%d new=%d\n", (int) old, (int) s);
+            adopted = (int) old;
+        }
+    }
+    if (!old || adopted == (int) s) afrt_ref_luma = l;   /* the anchor luma is the adopted measurement's */
+    *ref_s = adopted;
+    afw_log("# RT_REF why=%s t=%d land_s=%d meas=%d ref_s=%d g=%d luma=%d emax=%d\n", why, get_ms_clock(), (int) afrt_land_s,
+            (int) s, adopted, (int) g, l, emax);
     afrt_state_reset(get_ms_clock(), 1);
-    return s > 0;
+    return adopted > 0;
 }
 
 static void aref_test_run(void)
@@ -14124,6 +15874,10 @@ static void aref_test_run(void)
             AFRT_HOLD2_MS, AFRT_TRIG_MS, AFRT_WATCH_MS, AFRT_OK_PCT);
 
     int false_trig = 0, pre_trig = 0, ok = 0, runs_total = 0, ntr = 0, aborted = 0, ntrig_ms = 0, nfin = 0, need_ref = 0, f1 = 0;
+    /* Trial integrity (status review 4.2/D18): a trial that never triggered is invalid, not a pass; a
+     * "pass" on a no-trigger trial (the picture never defocused) is a false pass and is not scored. */
+    int notrig = 0, nvalid = 0, nfalse_pass = 0;
+    int retries_total = 0;   /* patch 7/A: no-trigger trials retried with a doubled defocus */
     int trig_v[AFRT_NTRIAL], fin_v[AFRT_NTRIAL];
     uint32_t ref_s = 0;
     afw_log("# RT_PHASE reference\n");
@@ -14137,7 +15891,9 @@ static void aref_test_run(void)
 
     for (int k = 0; k < AFRT_NTRIAL; k++)
     {
-        int def = afrt_defs[k];
+        int def0 = afrt_defs[k];
+        int def = def0;
+        int attempt = 1;
         if (need_ref)
         {
             if (!afrt_reference(&ref_s, "reland")) { aborted = 1; goto done; }
@@ -14145,61 +15901,89 @@ static void aref_test_run(void)
             need_ref = 0;
         }
         ntr++;
-        NotifyBox(4000, "Refocus test: defocus %d (%d/%d)", def, k + 1, AFRT_NTRIAL);
-        afrt_def = def;
-        int r = afd_engine(8, AFD_F_QUIET);
-        if (r < 0 || !afrt_prep_ok || afrt_abort())
-        {
-            afw_log("# RT_TRIAL def=%d prep failed ret=%d\n", def, r);
-            aborted = 1;
-            goto done;
-        }
-        int s_def = (int) afrt_land_s;
-        int s_def_pct = (int) ((uint64_t) s_def * 100 / ref_s);
-        int t_def = get_ms_clock(), last_line = 0;
-        int runs = 0, trig_ms = -1, land_t = 0, settled = 1, run_ms = 0, last_pct = 0, last_land = 0, last_moves = 0;
-        afw_log("# RT_PHASE trial def=%d s_def=%d s_def_pct=%d ref_s=%d\n", def, s_def, s_def_pct, (int) ref_s);
+        int s_def = 0, s_def_pct = 0;
+        int runs = 0, trig_ms = -1, settled = 1, run_ms = 0, last_pct = 0, last_land = 0, last_moves = 0;
+        uint32_t fin = 0;
+        int fin_pct = 0, no_trigger = 0;
+        /* Patch 7/A: attempt 1 uses the nominal defocus; a no-trigger trial at a small defocus is a stimulus
+         * problem on high-gearing/adapted lenses (50 mm + speedbooster: +-60 pulses gave only a 4-6 % sharpness
+         * drop), so retry with the defocus doubled up to AFRT_RETRY_MAX times / AFRT_DEF_CAP pulses. */
         while (1)
         {
-            if (afrt_abort()) { aborted = 1; break; }
-            int now = get_ms_clock();
-            int path = afrt_poll("trial", t_def, &last_line);
-            if (path)
+            NotifyBox(4000, "Refocus test: defocus %d (%d/%d)", def, k + 1, AFRT_NTRIAL);
+            afrt_def = def;
+            int r = afd_engine(8, AFD_F_QUIET);
+            if (r < 0 || !afrt_prep_ok || afrt_abort())
             {
-                if (trig_ms < 0) trig_ms = now - t_def;
-                if (runs >= AFRT_MAX_RUNS) { settled = 0; break; }
-                afw_log("# RT_TRIG def=%d run=%d t_ms=%d cur=%d ref=%d pct=%d path=%d q=%d g=%d luma=%d settled_ms=%d\n", def, runs + 1,
-                        now - t_def, (int) aref_dec.cur, (int) aref_dec.peak, aref_dec.pct, path, aref_dec.q, aref_dec.g,
-                        aref_dec.luma, aref_dec.settled);
-                aref_mpu_arm(now, path);
-                aref_mpu_exec(AFD_F_QUIET | AFD_F_AREF);
-                aref_mpu_finish(get_ms_clock());
-                runs++;
-                runs_total++;
-                run_ms = aref_mpu_ms; last_pct = aref_mpu_pct; last_land = (int) aref_mpu_land; last_moves = aref_mpu_moves;
-                afw_log("# RT_RUN def=%d run=%d pct=%d ms=%d land_s=%d moves=%d path=%s nopeak=%d close2_s=%d\n", def, runs, aref_mpu_pct,
-                        aref_mpu_ms, (int) aref_mpu_land, aref_mpu_moves, aref_mpu_path ? "local" : "full", afd_nopeak_last,
-                        (int) aref_mpu_ep2);
-                land_t = get_ms_clock();
-                last_line = 0;
-                continue;
+                afw_log("# RT_TRIAL def=%d prep failed ret=%d\n", def, r);
+                aborted = 1;
+                goto done;
             }
-            if (!runs && now - t_def >= AFRT_TRIG_MS) break;          /* never triggered */
-            if (runs && now - land_t >= AFRT_WATCH_MS) break;         /* quiet after the landing: settled */
-            msleep(50);
+            s_def = (int) afrt_land_s;
+            s_def_pct = (int) ((uint64_t) s_def * 100 / ref_s);
+            int t_def = get_ms_clock(), last_line = 0;
+            int land_t = 0;
+            runs = 0; trig_ms = -1; settled = 1; run_ms = 0; last_pct = 0; last_land = 0; last_moves = 0;
+            afw_log("# RT_PHASE trial def=%d s_def=%d s_def_pct=%d ref_s=%d\n", def, s_def, s_def_pct, (int) ref_s);
+            while (1)
+            {
+                if (afrt_abort()) { aborted = 1; break; }
+                int now = get_ms_clock();
+                int path = afrt_poll("trial", t_def, &last_line);
+                if (path)
+                {
+                    if (trig_ms < 0) trig_ms = now - t_def;
+                    if (runs >= AFRT_MAX_RUNS) { settled = 0; break; }
+                    afw_log("# RT_TRIG def=%d run=%d t_ms=%d cur=%d ref=%d pct=%d path=%d q=%d g=%d luma=%d settled_ms=%d\n", def, runs + 1,
+                            now - t_def, (int) aref_dec.cur, (int) aref_dec.peak, aref_dec.pct, path, aref_dec.q, aref_dec.g,
+                            aref_dec.luma, aref_dec.settled);
+                    aref_mpu_arm(now, path);
+                    aref_mpu_exec(AFD_F_QUIET | AFD_F_AREF | AFD_F_RT);   /* patch 10: strict thresholds in the test */
+                    aref_mpu_finish(get_ms_clock());
+                    runs++;
+                    runs_total++;
+                    run_ms = aref_mpu_ms; last_pct = aref_mpu_pct; last_land = (int) aref_mpu_land; last_moves = aref_mpu_moves;
+                    afw_log("# RT_RUN def=%d run=%d pct=%d ms=%d land_s=%d moves=%d path=%s nopeak=%d close2_s=%d\n", def, runs, aref_mpu_pct,
+                            aref_mpu_ms, (int) aref_mpu_land, aref_mpu_moves, aref_mpu_path ? "local" : "full", afd_nopeak_last,
+                            (int) aref_mpu_ep2);
+                    land_t = get_ms_clock();
+                    last_line = 0;
+                    continue;
+                }
+                if (!runs && now - t_def >= AFRT_TRIG_MS) break;          /* never triggered */
+                if (runs && now - land_t >= AFRT_WATCH_MS) break;         /* quiet after the landing: settled */
+                msleep(50);
+            }
+            if (aborted) { afw_log("# RT_TRIAL def=%d aborted\n", def); goto done; }
+            uint32_t g = 0;
+            int l = 0;
+            fin = afrt_sample(&g, &l, 0);
+            fin_pct = (int) ((uint64_t) fin * 100 / ref_s);
+            no_trigger = runs == 0;
+            if (!no_trigger || attempt > AFRT_RETRY_MAX) break;
+            long nd = (long) def * 2;
+            if (!def || ABS(nd) > AFRT_DEF_CAP) break;
+            def = (int) nd;
+            attempt++;
+            retries_total++;
+            afw_log("# RT_RETRY def0=%d def=%d attempt=%d\n", def0, def, attempt);
         }
-        if (aborted) { afw_log("# RT_TRIAL def=%d aborted\n", def); goto done; }
-        uint32_t g = 0;
-        int l = 0;
-        uint32_t fin = afrt_sample(&g, &l);
-        int fin_pct = (int) ((uint64_t) fin * 100 / ref_s);
-        int tok = fin_pct >= AFRT_OK_PCT && settled;
+        /* Integrity: a trial that never triggered on any attempt is INVALID, not a pass.  If it still reads
+         * >= AFRT_OK_PCT it is a false pass.  Trial defocus values / AFRT_OK_PCT unchanged. */
+        int valid = no_trigger ? 0 : 1;
+        int false_pass = no_trigger && fin_pct >= AFRT_OK_PCT;
+        int tok = valid && fin_pct >= AFRT_OK_PCT && settled;
         ok += tok;
+        notrig += no_trigger;
+        nvalid += valid;
+        nfalse_pass += false_pass;
         if (trig_ms >= 0) trig_v[ntrig_ms++] = trig_ms;
         fin_v[nfin++] = fin_pct;
-        afw_log("# RT_TRIAL def=%d s_def=%d s_def_pct=%d trig_ms=%d runs=%d run_ms=%d eng_pct=%d land_s=%d moves=%d final_s=%d final_pct=%d "
-                "settled=%d ok=%d ref_s=%d\n", def, s_def, s_def_pct, trig_ms, runs, run_ms, last_pct, last_land, last_moves, (int) fin,
-                fin_pct, settled, tok, (int) ref_s);
+        afw_log("# RT_TRIAL def=%d def0=%d attempt=%d s_def=%d s_def_pct=%d trig_ms=%d runs=%d run_ms=%d eng_pct=%d land_s=%d moves=%d "
+                "final_s=%d final_pct=%d settled=%d ok=%d ref_s=%d no_trigger=%d valid=%d false_pass=%d\n", def, def0, attempt, s_def, s_def_pct,
+                trig_ms, runs, run_ms, last_pct, last_land, last_moves, (int) fin, fin_pct, settled, tok, (int) ref_s, no_trigger, valid,
+                false_pass);
+        if (no_trigger) afw_log("# RT_TRIAL_INVALID def=%d reason=no_trigger valid=0 ok=0 false_pass=%d\n", def, false_pass);
         if (fin_pct < AFRT_OK_PCT) need_ref = 1;
     }
 
@@ -14219,11 +16003,15 @@ static void aref_test_run(void)
 done:;
     int trig_med = afrt_med(trig_v, ntrig_ms);
     int fin_med = afrt_med(fin_v, nfin);
-    afw_log("# RTEST false_trig=%d trig_ms_med=%d ok=%d/%d final_pct_med=%d runs_total=%d\n", false_trig, trig_med, ok, AFRT_NTRIAL,
-            fin_med, runs_total);
+    /* ok=x/5 is kept for compatibility with earlier logs, but ok counts VALID trials only; notrig/valid/
+     * false_pass make the integrity visible (valid = 5 - notrig unless the test aborted early);
+     * retries= (patch 7/A) is the number of no-trigger trials re-run with a doubled defocus. */
+    afw_log("# RTEST false_trig=%d trig_ms_med=%d ok=%d/%d final_pct_med=%d runs_total=%d notrig=%d valid=%d false_pass=%d retries=%d\n", false_trig,
+            trig_med, ok, AFRT_NTRIAL, fin_med, runs_total, notrig, nvalid, nfalse_pass, retries_total);
     afw_log("# RTEST_END aborted=%d pre_trig=%d trials=%d total_ms=%d\n\n", aborted, pre_trig, ntr, get_ms_clock() - t_start);
     afw_finish();
-    NotifyBox(8000, "Refocus test%s: ok %d/%d, false trig %d, median %d ms", aborted ? " ABORTED" : "", ok, AFRT_NTRIAL, false_trig, trig_med);
+    NotifyBox(8000, "Refocus test%s: ok %d/%d, %d no-trigger, %d retries, false trig %d, median %d ms", aborted ? " ABORTED" : "", ok,
+              AFRT_NTRIAL, notrig, retries_total, false_trig, trig_med);
 }
 
 static void aref_test_task(void *unused)
@@ -14256,10 +16044,18 @@ static void aref_test_task(void *unused)
         NotifyBox(5000, "Refocus test: needs x5 movie LV, AF idle (blk=%d)", blk);
         goto out;
     }
+    /* Patch 5 / MF3: do not inherit the pre-test scene's anchor / ref max into the test (HOLD1 false triggers on
+     * a different subject), and leave no test-scene reference for normal Auto refocus afterwards. */
+    afd_ref_max_reset("rtest");
+    aref_anchor_clear("rtest");
+    aref_hunt_reset("rtest");   /* patch 9: no hunt state may leak into or out of the test */
     aref_test_run();
     afrt_state_reset(get_ms_clock(), 0);   /* leave a clean state for the real Auto refocus */
     aref_forget = 1;
     aref_eligible = 0;
+    afd_ref_max_reset("rtest");
+    aref_anchor_clear("rtest");
+    aref_hunt_reset("rtest");
     if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
         afd_worker_ensure();
 out:
@@ -15704,6 +17500,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(Auto_refocus_method)
     MODULE_CONFIG(Auto_refocus_af)
     MODULE_CONFIG(Auto_refocus_mpu_rec)
+    MODULE_CONFIG(Auto_refocus_persist)
     MODULE_CONFIG(tapdisp)
     MODULE_CONFIG(Arrows_L_R)
     MODULE_CONFIG(Arrows_U_D)

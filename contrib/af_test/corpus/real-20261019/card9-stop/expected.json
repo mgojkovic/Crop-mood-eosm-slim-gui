@@ -1,0 +1,197 @@
+{
+  "name": "real-20261019-card9-stop",
+  "historical_fixture": true,
+  "session": "2026-10-19",
+  "notes": "AF stop test on card9: one run of four planned stops (80/80/160/160 ms), 4 trials.  Early stops (80/160 ms) show the largest post-stop change (68-171 % delta); 0/4 classified halted, all 4 continue in the move direction. s2/s4/band are zero in every full-format sample (trimmed build); s1 is the sharpness metric used here.  See stop_analysis.py for the thresholds.",
+  "provenance": {
+    "source_dir": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card9",
+    "source_file": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card9/AFSTOP.LOG",
+    "copied": "2026-10-19",
+    "build": "AF stop test build, 2026-10-19 (pre-task-6 tree), meas_us=3 ms / stride 4",
+    "files": {
+      "AFSTOP.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card9/AFSTOP.LOG",
+        "bytes": 2783,
+        "sha256": "662dc161f3e6340e2bb69d64629780449cf35b2cd6d106dfff9a7d6e080a669c"
+      }
+    }
+  },
+  "facts": {
+    "stop": {
+      "files": 1,
+      "sessions": 1,
+      "trials": 4,
+      "planned_stop_ms": [
+        80,
+        160
+      ],
+      "halted_trials": 0,
+      "continued_trials": 4,
+      "changed_trials": 0,
+      "incomplete_trials": 0,
+      "median_abs_slope_pct_s": {
+        "min": 90.2,
+        "max": 167.4
+      },
+      "median_abs_delta_pct": {
+        "min": 34.31,
+        "max": 63.71
+      },
+      "zero_columns": [
+        "band",
+        "s2",
+        "s4"
+      ],
+      "rows": [
+        {
+          "card": "card9",
+          "session": 1,
+          "k": 1,
+          "at": 80,
+          "dir": 1,
+          "t_stop": {
+            "min": 71,
+            "max": 111
+          },
+          "t_done": {
+            "min": 446,
+            "max": 566
+          },
+          "s_at_stop": {
+            "min": 5302,
+            "max": 7174
+          },
+          "s_end": {
+            "min": 14385,
+            "max": 19461
+          },
+          "delta_pct": {
+            "min": 128.47,
+            "max": 214.11
+          },
+          "post_stop_slope_pct_s": {
+            "min": 304.6,
+            "max": 507.6
+          },
+          "max_excursion_pct": {
+            "min": 128.47,
+            "max": 214.11
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card9",
+          "session": 1,
+          "k": 2,
+          "at": 80,
+          "dir": -1,
+          "t_stop": {
+            "min": 106,
+            "max": 146
+          },
+          "t_done": {
+            "min": 442,
+            "max": 562
+          },
+          "s_at_stop": {
+            "min": 8585,
+            "max": 11615
+          },
+          "s_end": {
+            "min": 6812,
+            "max": 9216
+          },
+          "delta_pct": {
+            "min": -25.81,
+            "max": -15.49
+          },
+          "post_stop_slope_pct_s": {
+            "min": -142.0,
+            "max": -85.2
+          },
+          "max_excursion_pct": {
+            "min": -26.39,
+            "max": -15.83
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card9",
+          "session": 1,
+          "k": 3,
+          "at": 160,
+          "dir": 1,
+          "t_stop": {
+            "min": 180,
+            "max": 220
+          },
+          "t_done": {
+            "min": 444,
+            "max": 564
+          },
+          "s_at_stop": {
+            "min": 6350,
+            "max": 8592
+          },
+          "s_end": {
+            "min": 10730,
+            "max": 14518
+          },
+          "delta_pct": {
+            "min": 51.73,
+            "max": 86.21
+          },
+          "post_stop_slope_pct_s": {
+            "min": 65.3,
+            "max": 108.9
+          },
+          "max_excursion_pct": {
+            "min": 86.14,
+            "max": 143.57
+          },
+          "halted": false,
+          "continued": true
+        },
+        {
+          "card": "card9",
+          "session": 1,
+          "k": 4,
+          "at": 160,
+          "dir": -1,
+          "t_stop": {
+            "min": 141,
+            "max": 181
+          },
+          "t_done": {
+            "min": 447,
+            "max": 567
+          },
+          "s_at_stop": {
+            "min": 9896,
+            "max": 13388
+          },
+          "s_end": {
+            "min": 7021,
+            "max": 9499
+          },
+          "delta_pct": {
+            "min": -36.31,
+            "max": -21.79
+          },
+          "post_stop_slope_pct_s": {
+            "min": -180.0,
+            "max": -108.0
+          },
+          "max_excursion_pct": {
+            "min": -38.44,
+            "max": -23.06
+          },
+          "halted": false,
+          "continued": true
+        }
+      ]
+    }
+  }
+}

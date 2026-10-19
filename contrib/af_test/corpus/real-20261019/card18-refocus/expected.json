@@ -1,0 +1,176 @@
+{
+  "name": "real-20261019-card18-refocus",
+  "historical_fixture": true,
+  "session": "2026-10-19",
+  "notes": "Latest 2026-10-19 Refocus test (the 3/5 baseline in the handover). Historical fixture of the OLD build: trial 5 (def=400) never triggered yet counted ok via final_pct=98 against the eroded reference (69712/70812); the +60 trial accepted s0=82352 = 80.8% of the previous landing as in focus. post_patch_expectation records the target after the anchored-reference fix, not current behaviour.",
+  "provenance": {
+    "captured_from": "Claude scratchpad copy of the EOS M card",
+    "source_dir": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card18/20261019-144447/ML/LOGS",
+    "copied": "2026-10-19",
+    "build": "pre-task-6 AF build (old Re-focus reference, before the anchored RT reference / AFRT_REF_FLOOR_PCT=95)",
+    "files": {
+      "AFDRIVE.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card18/20261019-144447/ML/LOGS/AFDRIVE.LOG",
+        "bytes": 26906,
+        "sha256": "f32e8bcf9d7dfb9334c284125c56e012fff40ca9af04fcc3c0472953fc83c974"
+      },
+      "AFRTEST.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card18/20261019-144447/ML/LOGS/AFRTEST.LOG",
+        "bytes": 25052,
+        "sha256": "fa8ca733eeb2a1a20a76b93583ac743ef160c28c385358f99e543390c44a89ef"
+      }
+    }
+  },
+  "verdicts": {
+    "must_contain": [
+      "AF drive NOT OK",
+      "Refocus test: only 3/5 ok"
+    ],
+    "must_not_contain": [
+      "CRASH",
+      "HUNTING"
+    ]
+  },
+  "afdrive": {
+    "min_runs": 7,
+    "min_success_pct": 100,
+    "max_median_ms": 5900
+  },
+  "rtest": {
+    "ok_at_least": 3,
+    "of": 5,
+    "false_trig_max": 0
+  },
+  "replay": {
+    "min_runs": 7,
+    "min_moves": 67,
+    "min_series": 1
+  },
+  "facts": {
+    "drive": {
+      "results": 7,
+      "aborted_total": 0,
+      "fast_moves": 51,
+      "timer_moves": 6,
+      "timer_share_pct": {
+        "min": 10.0,
+        "max": 11.0,
+        "note": "FOCUS_DONE bit 0x0400 share; the rest is fast mode"
+      },
+      "aref_new_ref": [
+        101420,
+        78001,
+        79418,
+        80285,
+        72947,
+        72466,
+        73361,
+        16564,
+        17718
+      ],
+      "local_in_focus": [
+        {
+          "s0": 82352,
+          "s": 83863,
+          "last_landing": 101880,
+          "pct_of_last_s0": 80.8,
+          "pct_of_last_s": 82.3
+        },
+        {
+          "s0": 67915,
+          "s": 67625,
+          "last_landing": 82455,
+          "pct_of_last_s0": 82.4,
+          "pct_of_last_s": 82.0
+        }
+      ]
+    },
+    "rtest": {
+      "summary": {
+        "false_trig": 0,
+        "ok": 3,
+        "of": 5,
+        "final_pct_med": 92,
+        "runs_total": 4
+      },
+      "final_pct": [
+        82,
+        92,
+        83,
+        96,
+        98
+      ],
+      "ref_s": [
+        97338,
+        84320,
+        70812
+      ],
+      "ref_s_monotonic_decrease": true,
+      "triggered_trials": 4,
+      "never_triggered_def": [
+        400
+      ],
+      "trials": [
+        {
+          "defocus": 60,
+          "s_def_pct": 82,
+          "trig_ms": 1269,
+          "runs": 1,
+          "moves": 3,
+          "final_pct": 82,
+          "ok": 0,
+          "ref_s": 97338
+        },
+        {
+          "defocus": -60,
+          "s_def_pct": 37,
+          "trig_ms": 1244,
+          "runs": 1,
+          "moves": 12,
+          "final_pct": 92,
+          "ok": 1,
+          "ref_s": 84320
+        },
+        {
+          "defocus": 150,
+          "s_def_pct": 83,
+          "trig_ms": 12515,
+          "runs": 1,
+          "moves": 3,
+          "final_pct": 83,
+          "ok": 0,
+          "ref_s": 84320
+        },
+        {
+          "defocus": -150,
+          "s_def_pct": 29,
+          "trig_ms": 1210,
+          "runs": 1,
+          "moves": 16,
+          "final_pct": 96,
+          "ok": 1,
+          "ref_s": 70812
+        },
+        {
+          "defocus": 400,
+          "s_def_pct": 91,
+          "trig_ms": -1,
+          "runs": 0,
+          "moves": 0,
+          "final_pct": 98,
+          "ok": 1,
+          "ref_s": 70812
+        }
+      ]
+    }
+  },
+  "post_patch_expectation": {
+    "status": "TARGET, not current",
+    "rtest": {
+      "ok_at_least": 4,
+      "of": 5,
+      "all_trials_triggered": true
+    },
+    "note": "With the anchored reference (AFRT_REF_FLOOR_PCT=95, task-6) this session becomes 2/5: trial 5 is 69712/97338 = 71.6% and should trigger and fail. After the fix, both refocus cases must reach >=4/5 with all 5 trials triggered; add a post-patch session as a new case."
+  }
+}

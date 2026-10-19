@@ -1,0 +1,387 @@
+# AFDRIVE t=18740 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=65535 monitor=KEEP opened_now=1 algo=B
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=B sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=3564 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=47 luma=127 s=48672 g=123216
+# luma post_session_open t=54 luma=127 s=46145 g=121529
+# luma post_session_open_300ms t=359 luma=7 s=19358 g=21848
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=14 luma=7
+# lv_recover ms=1523 luma_pre=128 luma=133 timeout=0
+1899 i 0 0 23006 74578 132 0 - -1 ret0 dist=65535 t=1 wait=0 samp=10 q=308
+# s0=25202 g=80989 luma=129
+2594 p 100 100 32718 100808 131 c1000 err 133 ret0 dist=65535 t=1 wait=110 samp=6 q=324
+# probe dir=1
+3066 o -160 -60 0 0 0 e0000 - 220 ret0 dist=65535 t=0 wait=82 samp=0 q=0
+# sweep dir=1 len=100 spd=7 t_send=3066 n=14 peak=0 imax=11 smax=29237 smin=6922 smax_ex=123941 t_pk=483 t_stop=-1 t_done=517 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=40
+S 0 7044 22740 132
+S 40 6922 22856 132
+S 98 7206 22988 132
+S 124 8317 25403 131
+S 163 9175 27003 130
+S 227 11148 29490 129
+S 246 13158 31528 129
+S 290 16075 34023 128
+S 358 24650 39044 126
+S 373 24650 39044 126
+S 416 28233 41041 126
+S 517 29237 42037 126
+S 540 23931 39397 127
+S 598 27244 41424 127
+# sweep dir=1 len=100 spd=7 t_send=3669 n=11 peak=1 imax=0 smax=26246 smin=7381 smax_ex=111262 t_pk=0 t_stop=191 t_done=400 val=4e1000 t_exp=410 t_stable=-1 mspp_x10=29 moved=38 pos_pk=0 over=38 pos=78
+S 0 26246 41138 127
+S 21 24302 39440 127
+S 62 21973 37931 128
+S 126 18910 35160 129
+S 144 14784 32648 129
+S 188 11994 30006 130
+S 247 12240 30626 130
+S 272 8721 25635 130
+S 312 7881 23879 131
+S 400 7428 22804 131
+S 438 7381 22771 131
+# sweep peak dir=1 chunks_max=12 spd=7 pk=40 ref=123941 pos=78 coarse=0
+4485 o -118 -40 0 0 0 4e0000 - 189 ret0 dist=65535 t=0 wait=45 samp=0 q=0
+4749 r 20 -20 91441 152379 125 4e0000 - 192 ret0 dist=65535 t=1 wait=45 samp=14 q=600
+4999 r 20 0 121886 169818 124 4e0000 - 170 ret0 dist=65535 t=1 wait=53 samp=15 q=717
+# retrace k=1 thr_pct=90 hit=1 s=121886
+5249 t 10 10 114948 166176 124 4e0000 - 93 ret0 dist=65535 t=1 wait=46 samp=18 q=691
+5483 t -10 0 120909 169763 123 4e0000 - 93 ret0 dist=65535 t=1 wait=44 samp=14 q=712
+# land top: stepped back, best=121886 now=120909
+# land top: best=121886 final=120909 half=10
+# epilogue pre_stop_s=122656 post_stop_s=121385 post_close_s=120577 post_close2_s=110015 session_close=ON
+# RESULT aborted=0 best_pos=40 best_s=123941 peak_g_pos=0 fine_peak_pos=40 final_s=120909 final_best_pct=97 retraces=1 land_s=120909 land_pct=97 moves=9 n_nodone=0 n_err=1 n_fast=0 total_ms=5864 end_pos=0 travel=638 algo=B
+
+# monitor open why=run e=0 t=18740
+# AFDRIVE t=68780 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=65535 monitor=KEEP opened_now=0 algo=L
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=L sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=9818 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=101 luma=102 s=81699 g=137111
+# luma post_session_open t=107 luma=102 s=81699 g=137111
+# luma post_session_open_300ms t=466 luma=101 s=79831 g=139537
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=-1 luma=0
+# lv_recover ms=347 luma_pre=102 luma=101 timeout=0
+884 i 0 0 82231 137619 101 0 - -1 ret0 dist=65535 t=1 wait=0 samp=6 q=597
+# s0=82352 g=137672 luma=101
+1373 w 40 40 36539 103404 102 4e1000 err 240 ret0 dist=65535 t=1 wait=70 samp=115 q=353
+2005 w -80 -40 86291 140566 99 4e0000 - 440 ret0 dist=65535 t=1 wait=73 samp=109 q=613
+# local s0=82352 plus=36539 minus=86291 dir=0 fine=20 last=101880
+2389 w 40 0 83863 139163 101 4e0000 - 244 ret0 dist=65535 t=1 wait=46 samp=87 q=602
+# local in focus s0=82352 s=83863
+# epilogue pre_stop_s=81372 post_stop_s=84950 post_close_s=82994 post_close2_s=81413 session_close=ON
+# RESULT aborted=0 best_pos=0 best_s=83863 peak_g_pos=0 fine_peak_pos=0 final_s=82408 final_best_pct=98 retraces=0 land_s=82408 land_pct=98 moves=3 n_nodone=0 n_err=1 n_fast=0 total_ms=2755 end_pos=0 travel=160 algo=L
+
+# AFDRIVE t=92798 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=65535 monitor=KEEP opened_now=0 algo=L
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=L sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=3821 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=50 luma=91 s=33196 g=89040
+# luma post_session_open t=60 luma=91 s=33196 g=89040
+# luma post_session_open_300ms t=379 luma=91 s=32115 g=89609
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=-1 luma=0
+# lv_recover ms=164 luma_pre=91 luma=92 timeout=0
+562 i 0 0 32711 89991 92 0 - -1 ret0 dist=65535 t=1 wait=0 samp=5 q=363
+# s0=32705 g=90023 luma=92
+1167 w 40 40 63025 114561 89 4e0000 - 287 ret0 dist=65535 t=1 wait=47 samp=76 q=550
+1911 w -80 -40 25094 75308 94 4e0000 - 519 ret0 dist=65535 t=1 wait=54 samp=116 q=333
+# local s0=32705 plus=63025 minus=25094 dir=1 fine=20 last=88277
+2542 w 80 40 62004 114391 89 4e0000 - 442 ret0 dist=65535 t=1 wait=67 samp=115 q=542
+2801 f 20 60 81423 126979 89 4e0000 - 144 ret0 dist=65535 t=1 wait=64 samp=6 q=641
+3049 f 20 80 83644 127460 90 4e0000 - 148 ret0 dist=65535 t=1 wait=63 samp=6 q=656
+3308 f 20 100 65247 115733 91 4e0000 - 152 ret0 dist=65535 t=1 wait=65 samp=12 q=563
+3553 f 20 120 41608 99468 92 4e0000 - 143 ret0 dist=65535 t=1 wait=50 samp=7 q=418
+# local climb dir=1 max_s=83644 since=2 steps=4
+3977 o -100 20 0 0 0 4e0000 - 151 ret0 dist=65535 t=0 wait=53 samp=0 q=0
+4300 r 20 40 62697 116447 91 4e0000 - 139 ret0 dist=65535 t=1 wait=54 samp=8 q=538
+4552 r 20 60 80210 128442 90 4e0000 - 150 ret0 dist=65535 t=1 wait=65 samp=6 q=624
+# retrace k=1 thr_pct=92 hit=1 s=80210
+4802 t 10 70 83805 129363 90 4e0000 - 124 ret0 dist=65535 t=1 wait=85 samp=6 q=647
+5051 t 10 80 83124 126738 90 4e0000 - 115 ret0 dist=65535 t=1 wait=84 samp=6 q=655
+# land top: best=83805 final=83124 half=10
+# epilogue pre_stop_s=82407 post_stop_s=82069 post_close_s=82249 post_close2_s=82318 session_close=ON
+# RESULT aborted=0 best_pos=80 best_s=83644 peak_g_pos=0 fine_peak_pos=80 final_s=82455 final_best_pct=98 retraces=1 land_s=82455 land_pct=98 moves=12 n_nodone=0 n_err=0 n_fast=0 total_ms=5430 end_pos=80 travel=440 algo=L
+
+# AFDRIVE t=121640 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=65535 monitor=KEEP opened_now=0 algo=L
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=L sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=9796 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=94 luma=78 s=67934 g=107224
+# luma post_session_open t=101 luma=78 s=68038 g=107174
+# luma post_session_open_300ms t=406 luma=78 s=68019 g=106975
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=-1 luma=0
+# lv_recover ms=190 luma_pre=79 luma=78 timeout=0
+612 i 0 0 67676 106858 78 0 - -1 ret0 dist=65535 t=1 wait=0 samp=9 q=633
+# s0=67915 g=106822 luma=78
+1156 w 40 40 33754 83506 79 4e1000 err 249 ret0 dist=65535 t=1 wait=56 samp=66 q=404
+1724 w -80 -40 59132 99913 78 4e0000 - 437 ret0 dist=65535 t=1 wait=54 samp=68 q=591
+# local s0=67915 plus=33754 minus=59132 dir=0 fine=20 last=82455
+2169 w 40 0 67625 107531 80 4e0000 - 264 ret0 dist=65535 t=1 wait=44 samp=71 q=628
+# local in focus s0=67915 s=67625
+# epilogue pre_stop_s=70541 post_stop_s=72717 post_close_s=70711 post_close2_s=69660 session_close=ON
+# RESULT aborted=0 best_pos=0 best_s=67915 peak_g_pos=0 fine_peak_pos=0 final_s=67625 final_best_pct=99 retraces=0 land_s=67625 land_pct=99 moves=3 n_nodone=0 n_err=1 n_fast=0 total_ms=2593 end_pos=0 travel=160 algo=L
+
+# AFDRIVE t=145668 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=65535 monitor=KEEP opened_now=0 algo=L
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=L sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=9139 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=92 luma=91 s=21508 g=59070
+# luma post_session_open t=104 luma=91 s=21508 g=59070
+# luma post_session_open_300ms t=457 luma=91 s=21083 g=58869
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=-1 luma=0
+# lv_recover ms=343 luma_pre=91 luma=91 timeout=0
+815 i 0 0 21068 58844 91 0 - -1 ret0 dist=65535 t=1 wait=0 samp=5 q=358
+# s0=21130 g=58849 luma=91
+1300 w 40 40 23925 67405 90 4e0000 - 241 ret0 dist=65535 t=1 wait=42 samp=87 q=354
+1925 w -80 -40 19713 52020 93 4e0000 - 498 ret0 dist=65535 t=1 wait=49 samp=69 q=378
+# local s0=21130 plus=23925 minus=19713 dir=1 fine=20 last=69925
+# local: far from the last landing -> B
+1953 i 0 -40 19548 52046 93 0 - -1 ret0 dist=65535 t=1 wait=0 samp=14 q=375
+# s0=19560 g=52043 luma=93
+2689 p 100 60 26261 72653 91 4e0400 - 505 ret0 dist=65535 t=1 wait=85 samp=9 q=361
+# probe dir=1
+3171 o -160 -100 0 0 0 4e1000 err 179 ret0 dist=65535 t=0 wait=90 samp=0 q=0
+# sweep dir=1 len=100 spd=7 t_send=3171 n=14 peak=0 imax=11 smax=5003 smin=4260 smax_ex=21208 t_pk=508 t_stop=-1 t_done=503 val=4e0400 t_exp=410 t_stable=431 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=0
+S 0 4260 11568 93
+S 15 4260 11568 93
+S 58 4281 11703 93
+S 119 4399 11835 93
+S 144 4573 12237 93
+S 181 4465 12403 92
+S 251 4635 12977 92
+S 264 4635 12977 92
+S 309 4783 13219 92
+S 396 4747 13849 91
+S 431 4972 14172 91
+S 503 5003 14917 91
+S 514 5003 14917 91
+S 559 4975 15065 91
+# sweep dir=1 len=100 spd=7 t_send=3744 n=14 peak=0 imax=13 smax=15306 smin=4917 smax_ex=64885 t_pk=570 t_stop=-1 t_done=547 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=100
+S 0 4917 14619 91
+S 45 5045 15091 91
+S 71 5133 15447 90
+S 107 5450 15904 90
+S 184 5969 17293 90
+S 191 5969 17293 90
+S 235 6514 18116 89
+S 320 7776 20230 89
+S 358 9041 21419 88
+S 426 11997 23627 87
+S 440 11997 23627 87
+S 485 13938 24810 87
+S 547 13532 25306 87
+S 570 15306 26302 87
+# sweep dir=1 len=100 spd=7 t_send=4318 n=11 peak=1 imax=4 smax=16955 smin=7465 smax_ex=71875 t_pk=137 t_stop=377 t_done=405 val=4e1000 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=5 over=95 pos=200
+S 0 15306 26302 87
+S 26 15368 26218 87
+S 98 16652 27292 87
+S 109 16652 27292 87
+S 154 16955 27109 87
+S 238 14478 24970 88
+S 276 12099 23241 88
+S 343 9822 22002 89
+S 360 8493 20315 89
+S 405 7465 19249 89
+S 464 7898 19756 89
+# sweep peak dir=1 chunks_max=12 spd=7 pk=105 ref=71875 pos=200 coarse=0
+5232 o -175 25 0 0 0 4e0000 - 275 ret0 dist=65535 t=0 wait=55 samp=0 q=0
+5486 r 20 45 25316 71064 91 4e0000 - 141 ret0 dist=65535 t=1 wait=44 samp=13 q=356
+5735 r 20 65 28810 78060 90 4e0000 - 185 ret0 dist=65535 t=1 wait=46 samp=12 q=369
+5986 r 20 85 34686 87390 89 4e0000 - 185 ret0 dist=65535 t=1 wait=47 samp=13 q=396
+6245 r 20 105 50270 98400 87 4e0000 - 186 ret0 dist=65535 t=1 wait=47 samp=20 q=510
+6486 r 20 125 69393 111035 86 4e0000 - 178 ret0 dist=65535 t=1 wait=44 samp=13 q=624
+# retrace k=1 thr_pct=90 hit=1 s=69393
+6736 t 10 135 72656 113510 86 4e0000 - 92 ret0 dist=65535 t=1 wait=45 samp=13 q=640
+6986 t 10 145 73736 113060 86 4e0000 - 93 ret0 dist=65535 t=1 wait=47 samp=13 q=652
+7236 t 10 155 72675 111007 86 4e0000 - 97 ret0 dist=65535 t=1 wait=46 samp=13 q=654
+# land top: best=73736 final=72675 half=10
+# epilogue pre_stop_s=73689 post_stop_s=73413 post_close_s=73695 post_close2_s=72042 session_close=ON
+# RESULT aborted=0 best_pos=105 best_s=71875 peak_g_pos=0 fine_peak_pos=105 final_s=72675 final_best_pct=101 retraces=1 land_s=72675 land_pct=101 moves=16 n_nodone=0 n_err=1 n_fast=0 total_ms=7676 end_pos=155 travel=985 algo=L
+
+# aref done pct=100 land_s=0 new_ref=101420 ms=0 path=full mm=20 fine=20 post_close2_s=0
+# aref trig cur=82388 ref=104418 pct=78 t=68764 mm=20 settled_ms=1269
+# aref done pct=98 land_s=82408 new_ref=78001 ms=4517 path=local mm=20 fine=20 post_close2_s=81413
+# aref done pct=100 land_s=82408 new_ref=79418 ms=4517 path=local mm=20 fine=20 post_close2_s=81413
+# aref trig cur=32968 ref=84389 pct=39 t=92783 mm=20 settled_ms=1244
+# aref done pct=98 land_s=82455 new_ref=80285 ms=7241 path=local mm=20 fine=20 post_close2_s=82318
+# aref trig cur=67167 ref=81760 pct=82 t=121618 mm=20 settled_ms=1768
+# aref done pct=99 land_s=67625 new_ref=72947 ms=4348 path=local mm=20 fine=20 post_close2_s=69660
+# aref done pct=100 land_s=67625 new_ref=72466 ms=4348 path=local mm=20 fine=20 post_close2_s=69660
+# aref trig cur=21296 ref=80121 pct=26 t=145638 mm=20 settled_ms=1210
+# aref done pct=101 land_s=72675 new_ref=73361 ms=9429 path=full mm=20 fine=20 post_close2_s=72042
+# AFDRIVE t=218173 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=65535 monitor=KEEP opened_now=0 algo=L
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=L sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=3235 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=43 luma=127 s=14527 g=13201
+# luma post_session_open t=53 luma=127 s=14589 g=12853
+# luma post_session_open_300ms t=385 luma=129 s=14519 g=12611
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=-1 luma=0
+# lv_recover ms=159 luma_pre=127 luma=129 timeout=0
+563 i 0 0 14582 12664 129 0 - -1 ret0 dist=65535 t=1 wait=0 samp=9 q=1151
+# s0=14555 g=12664 luma=129
+1128 w 40 40 14376 12043 130 4e0000 - 323 ret0 dist=65535 t=1 wait=41 samp=83 q=1193
+1811 w -80 -40 14738 13588 131 4e0400 - 509 ret0 dist=65535 t=1 wait=50 samp=78 q=1084
+# local s0=14555 plus=14376 minus=14738 dir=0 fine=20 last=72675
+# local: far from the last landing -> B
+1876 i 0 -40 14896 13602 131 0 - -1 ret0 dist=65535 t=1 wait=0 samp=60 q=1095
+# s0=14736 g=13611 luma=131
+2524 p 100 60 14467 12019 130 4e0400 - 509 ret0 dist=65535 t=1 wait=60 samp=9 q=1203
+# probe dir=-1
+2873 o -40 20 0 0 0 4e0000 - 99 ret0 dist=65535 t=0 wait=80 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=2873 n=14 peak=0 imax=2 smax=3446 smin=3221 smax_ex=14608 t_pk=62 t_stop=-1 t_done=502 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=-80
+S 0 3319 2967 131
+S 22 3331 2931 131
+S 63 3446 2996 131
+S 127 3317 3043 131
+S 144 3289 3017 131
+S 189 3336 3100 131
+S 248 3251 3037 131
+S 273 3291 3145 131
+S 312 3360 3276 131
+S 396 3283 3405 131
+S 439 3221 3559 131
+S 498 3305 3543 131
+S 522 3434 3838 132
+S 562 3305 4051 132
+# sweep dir=-1 len=100 spd=7 t_send=3439 n=13 peak=0 imax=11 smax=10940 smin=3305 smax_ex=46376 t_pk=492 t_stop=-1 t_done=94 val=4e0000 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=-180
+S 0 3305 4051 132
+S 60 3379 4333 132
+S 78 3430 4570 132
+S 123 3454 4670 132
+S 182 3643 4935 132
+S 207 3889 5723 132
+S 246 4242 6354 132
+S 329 5913 8291 132
+S 373 7364 9594 132
+S 432 7154 9324 132
+S 457 10099 11833 132
+S 496 10940 12408 132
+S 561 9662 11238 132
+# sweep dir=-1 len=100 spd=7 t_send=4004 n=15 peak=1 imax=1 smax=10374 smin=3294 smax_ex=43977 t_pk=10 t_stop=-1 t_done=176 val=4e0000 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=-280
+S 0 10018 11326 132
+S 14 10374 11508 132
+S 58 8868 10426 132
+S 111 9579 10859 132
+S 141 5881 8051 132
+S 181 5013 7277 132
+S 268 4362 6216 132
+S 308 4000 5592 132
+S 354 3830 5262 132
+S 391 3627 4777 132
+S 431 3477 4435 132
+S 495 3551 4431 132
+S 514 3362 3976 132
+S 558 3312 3754 132
+S 619 3294 3934 132
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=-180 ref=46376 pos=-280 coarse=0
+5065 o 180 -100 0 0 0 4e0000 - 291 ret0 dist=65535 t=0 wait=53 samp=0 q=0
+5381 r -20 -120 15359 19853 130 4e0000 - 210 ret0 dist=65535 t=1 wait=42 samp=6 q=773
+5637 r -20 -140 18972 27152 130 4e0000 - 173 ret0 dist=65535 t=1 wait=48 samp=6 q=698
+5884 r -20 -160 31549 39929 130 4e0000 - 178 ret0 dist=65535 t=1 wait=45 samp=7 q=790
+6140 r -20 -180 47763 51581 129 4e0000 - 165 ret0 dist=65535 t=1 wait=60 samp=7 q=925
+# retrace k=1 thr_pct=90 hit=1 s=47763
+6388 t -10 -190 45662 50528 129 4e0000 - 136 ret0 dist=65535 t=1 wait=87 samp=6 q=903
+6642 t 10 -180 48423 52583 129 4e0000 - 113 ret0 dist=65535 t=1 wait=91 samp=7 q=920
+# land top: stepped back, best=47763 now=48423
+# land top: best=47763 final=48423 half=10
+# epilogue pre_stop_s=47964 post_stop_s=47571 post_close_s=18329 post_close2_s=20350 session_close=ON
+# RESULT aborted=0 best_pos=-180 best_s=46376 peak_g_pos=0 fine_peak_pos=-180 final_s=47563 final_best_pct=102 retraces=1 land_s=47563 land_pct=102 moves=14 n_nodone=0 n_err=0 n_fast=0 total_ms=7007 end_pos=-180 travel=840 algo=L
+
+# aref trig cur=14804 ref=14668 pct=100 t=218148 mm=20 settled_ms=1751
+# aref settled far below landing med=16564 land=47563: landing kept as reference
+# aref done pct=102 land_s=47563 new_ref=16564 ms=9017 path=full mm=20 fine=20 post_close2_s=20350
+# AFDRIVE t=249074 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 dist0=35 monitor=KEEP opened_now=0 algo=L
+# focal_mm=20 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 approach=120 probe_pct=95 coarse_stop_pct=80 coarse_drop_pct=90 coarse_drop_n=2 flat_pct=3 flat_n=3 max_travel=1500 max_total=9000 max_coarse=25 fine_back=0 fine_max=16 fine_drop_pct=70 fine_drop_n=2 fine_well_pct=130 rt_back=60 rt_back2=140 rt_thr=90/80 rt_extra=40 rt_slack=4 rt_fall_pct=80 done_timeout=800 wait=frame(42) fast=1 settle=90 stable_pct=5 stable_tries=3
+# algo=L sw_chunks=12 sw_pre=60 sw_fall_pct=60 sw_fall_n=2 sw_mspp_x10=29 sw_lat_ms=120 sw_track_pad_ms=150 sw_stable_pct=2 sw_stable_n=3 sw_coast_ms=40 sw_margin=80 sw_err=100 sw_speed=7 chunk_07=100 chunk_fast=300 c_len=200 c_stop_pct=90 c_ok_pct=85 sigma=21 d_step=40 d_b_pct=85 d_before=60 d_rev_extra=40 d_disagree=80 d_max_ahead=450 d_behind=300 d_spread_pct=108 e_step=40 e_improve_pct=110 e_focus_pct=85 e_climb_max=12 e_drop_pct=80/92 f_margin_milli=100 f_min_curv=20
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed=7 poll_ms=10 task_prio=1f meas_us=3147 meas_stride=4
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# luma pre_monopen_or_session t=40 luma=123 s=15250 g=15522
+# luma post_session_open t=56 luma=123 s=15345 g=15471
+# luma post_session_open_300ms t=379 luma=122 s=14984 g=15748
+# session_open ret=0 was_open=0 session_close=ON
+# lv_dark ms=-1 luma=0
+# lv_recover ms=164 luma_pre=123 luma=122 timeout=0
+562 i 0 0 15059 15759 122 0 - -1 ret0 dist=35 t=1 wait=0 samp=6 q=955
+# s0=15139 g=15777 luma=121
+1310 w 40 40 15179 13508 119 4e0000 - 471 ret0 dist=35 t=1 wait=41 samp=109 q=1123
+1947 w -80 -40 15829 19473 119 4e0400 - 514 ret0 dist=35 t=1 wait=46 samp=69 q=812
+# local s0=15139 plus=15179 minus=15829 dir=0 fine=20 last=47563
+# local: far from the last landing -> B
+2015 i 0 -40 16132 21484 119 0 - -1 ret0 dist=35 t=1 wait=0 samp=61 q=750
+# s0=16869 g=23278 luma=119
+2770 p 100 60 15304 14284 119 4e0400 - 510 ret0 dist=35 t=1 wait=84 samp=11 q=1071
+# probe dir=-1
+3310 o -40 20 0 0 0 4e0000 - 392 ret0 dist=35 t=0 wait=45 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=3310 n=14 peak=0 imax=13 smax=4257 smin=3428 smax_ex=18046 t_pk=584 t_stop=-1 t_done=512 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=-80
+S 0 3456 3404 119
+S 60 3461 3369 119
+S 78 3490 3438 119
+S 121 3428 3486 119
+S 188 3446 3644 120
+S 205 3475 3685 120
+S 248 3503 3817 120
+S 332 3585 4077 120
+S 371 3440 4390 120
+S 439 3515 4817 120
+S 454 3515 4817 120
+S 498 3683 5295 120
+S 559 4049 5741 120
+S 584 4257 6321 120
+# sweep dir=-1 len=100 spd=7 t_send=3898 n=14 peak=1 imax=6 smax=12197 smin=3683 smax_ex=51705 t_pk=308 t_stop=-1 t_done=359 val=4e0000 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=64 over=36 pos=-180
+S 0 3683 5295 120
+S 26 4736 6990 120
+S 93 6407 8931 120
+S 109 6376 8954 120
+S 153 7699 10259 120
+S 240 10905 12509 120
+S 276 12197 13275 120
+S 347 12158 13190 120
+S 359 12158 13190 120
+S 403 11849 12821 120
+S 465 9389 11079 120
+S 488 8363 10593 120
+S 525 6978 9422 120
+S 595 4915 7325 120
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=-144 ref=51705 pos=-180 coarse=0
+5199 o 116 -64 0 0 0 4e0400 - 503 ret0 dist=35 t=0 wait=51 samp=0 q=0
+5566 r -20 -84 49565 52905 118 4e0000 - 303 ret0 dist=35 t=1 wait=45 samp=13 q=936
+# retrace k=1 thr_pct=90 hit=1 s=49565
+5816 t -10 -94 33107 42519 118 4e0000 - 137 ret0 dist=35 t=1 wait=46 samp=13 q=778
+6122 t 10 -84 45812 50616 118 4e0000 - 54 ret0 dist=35 t=1 wait=49 samp=68 q=905
+# land top: stepped back, best=49565 now=45812
+# land top: best=49565 final=45812 half=10
+# epilogue pre_stop_s=45190 post_stop_s=45319 post_close_s=18150 post_close2_s=17243 session_close=ON
+# RESULT aborted=0 best_pos=-144 best_s=51705 peak_g_pos=0 fine_peak_pos=-144 final_s=45457 final_best_pct=87 retraces=1 land_s=45457 land_pct=87 moves=10 n_nodone=0 n_err=0 n_fast=0 total_ms=6506 end_pos=-84 travel=616 algo=L
+
+# aref trig cur=15315 ref=15294 pct=100 t=249060 mm=20 settled_ms=1751
+# aref settled far below landing med=17718 land=45457: landing kept as reference
+# aref done pct=87 land_s=45457 new_ref=17718 ms=8395 path=full mm=20 fine=20 post_close2_s=17243
+# aref peak memory reset: raw rec start t=294394
+# lv off t=317165
+# aref peak memory reset: raw rec stop t=317165
+# lv on after off_ms=456 t=317621
+# lv off t=319701
+# lv on after off_ms=18722 t=338423
+# monitor closed why=wake t=339916
+# monitor open why=wake e=0 t=339916
+# monitor reopened on wake lv_off_ms=18722 t=339916
+# lv off t=345676

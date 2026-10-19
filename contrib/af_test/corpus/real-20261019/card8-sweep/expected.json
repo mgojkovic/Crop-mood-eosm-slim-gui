@@ -1,0 +1,108 @@
+{
+  "name": "real-20261019-card8-sweep",
+  "historical_fixture": true,
+  "session": "2026-10-19",
+  "notes": "The only real AFSWEEP.LOG (card8, 2026-10-19). 4 chunks per test run, 4 runs appended: 16 chunks, 183 samples, 6/16 completed in the 0x0400 timer mode; fitted s width 13-432 pulses, i.e. the time->position map is still the weak link for sweep geometry. Historical fixture.",
+  "provenance": {
+    "captured_from": "Claude scratchpad copy of the EOS M card",
+    "source_dir": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card8",
+    "copied": "2026-10-19",
+    "build": "pre-task-6 AF build (old Re-focus reference, before the anchored RT reference / AFRT_REF_FLOOR_PCT=95)",
+    "files": {
+      "AFSWEEP.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card8/AFSWEEP.LOG",
+        "bytes": 9823,
+        "sha256": "4c7e8e5f89eb9f1d78e346e71d858e55f9d6eba54a209d997a9667922b908e61"
+      }
+    }
+  },
+  "verdicts": {
+    "must_not_contain": [
+      "CRASH",
+      "HUNTING"
+    ]
+  },
+  "replay": {
+    "min_sweeps": 16,
+    "min_sweep_samples": 183,
+    "min_series": 8,
+    "min_curve_fits": 6
+  },
+  "facts": {
+    "sweep": {
+      "sweeps": 16,
+      "total_samples": 183,
+      "samples": [
+        4,
+        16,
+        13,
+        13,
+        14,
+        10,
+        15,
+        8,
+        11,
+        16,
+        7,
+        10,
+        15,
+        12,
+        8,
+        11
+      ],
+      "cmd": [
+        600,
+        -600,
+        600,
+        -600,
+        600,
+        -600,
+        600,
+        -600,
+        600,
+        -600,
+        600,
+        -600,
+        600,
+        -600,
+        600,
+        -600
+      ],
+      "speed": [
+        "7",
+        "7",
+        "1f",
+        "1f",
+        "7",
+        "7",
+        "1f",
+        "1f",
+        "7",
+        "7",
+        "1f",
+        "1f",
+        "7",
+        "7",
+        "1f",
+        "1f"
+      ],
+      "timer_mode_sweeps": 6,
+      "fitted_sweeps": {
+        "min": 8,
+        "max": 16
+      },
+      "sigma_s_min": {
+        "min": 20.0,
+        "max": 60.0
+      },
+      "sigma_s_max": {
+        "min": 200.0,
+        "max": 350.0
+      },
+      "sigma_s_median": {
+        "min": 60.0,
+        "max": 200.0
+      }
+    }
+  }
+}

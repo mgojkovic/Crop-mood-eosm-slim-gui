@@ -47,3 +47,7 @@ Thumbs.db
 *.flv
 *.mov
 *.wmv
+
+# AF field data: curated real logs and samples are intentionally tracked
+!contrib/af_test/corpus/**/*.LOG
+!contrib/af_novel/samples/*.LOG

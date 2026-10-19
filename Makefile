@@ -112,6 +112,11 @@ clean:
 docs:
 	cd $(PLATFORM_PATH)/all; $(MAKE) docs
 
+# offline autofocus test suite (Python 3, no camera/card needed):
+# parsers + curve fit + lens simulator + algorithms A-F + af_report verdicts
+af-test:
+	python3 contrib/af_test/run_all.py
+
 docq:
 	cd $(PLATFORM_PATH)/all; $(MAKE) docq
 

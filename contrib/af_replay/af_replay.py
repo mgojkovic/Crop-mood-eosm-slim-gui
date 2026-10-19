@@ -152,7 +152,8 @@ def parse_mpudrive_sweeps(path, lag_ms=42.0):
 # ---- AFSWEEP (format arrives later; supported now) ---------------------------------------
 # # AFSWEEP t=.. lens=".." zoom=x5 frame=42 ...
 # # sweep k=1 cmd=600 speed=7 dir=1 [t=<ms of the send>]
-# S <t_ms> <frame> <s1> <s2> <s4> <g> <q> <band> <luma>
+# S <t_ms> <frame> <s1> <s2> <s4> <g> <q> <band> <luma>      (documented future format)
+# S <t_ms> <s1> <g> <luma>                                   (shipped crop_rec.c format)
 # # done k=1 t=<ms of FOCUS_DONE> val=<hex> n=<samples>
 # t_ms is on one clock.  t_start = the sweep header's t= if present, else the first S line's t.
 # pos(t) = cmd * (t - t_start - lag) / (t_done - t_start).   cmd is made signed by dir.
@@ -162,7 +163,11 @@ def _kv(line):
 
 
 def parse_afsweep(path_or_text, text=False):
-    lines = path_or_text.splitlines() if text else open(path_or_text, errors='replace').read().splitlines()
+    if text:
+        lines = path_or_text.splitlines()
+    else:
+        with open(path_or_text, errors='replace') as f:
+            lines = f.read().splitlines()
     head, sweeps, cur = {}, [], None
     for line in lines:
         if line.startswith('# AFSWEEP'):
@@ -176,8 +181,14 @@ def parse_afsweep(path_or_text, text=False):
             sweeps.append(cur)
         elif line.startswith('S ') and cur is not None:
             p = line.split()
-            cur['samples'].append(dict(t=float(p[1]), frame=int(p[2]), s1=float(p[3]), s2=float(p[4]), s4=float(p[5]),
-                                       g=float(p[6]), q=float(p[7]), band=p[8], luma=float(p[9])))
+            if len(p) >= 10:
+                # documented future/full format: S t frame s1 s2 s4 g q band luma
+                cur['samples'].append(dict(t=float(p[1]), frame=int(p[2]), s1=float(p[3]), s2=float(p[4]), s4=float(p[5]),
+                                           g=float(p[6]), q=float(p[7]), band=p[8], luma=float(p[9])))
+            elif len(p) == 5:
+                # shipped crop_rec.c afw_log_samples() format: S t_ms s1 g luma (4 fields, t in ms)
+                cur['samples'].append(dict(t=float(p[1]), frame=0, s1=float(p[2]), s2=float(p[2]), s4=float(p[2]),
+                                           g=float(p[3]), q=0.0, band='-', luma=float(p[4])))
         elif line.startswith('# done') and cur is not None:
             kv = _kv(line)
             cur['done'] = dict(t=float(kv['t']), val=kv.get('val'), n=int(kv.get('n', 0)))

@@ -1,220 +1,225 @@
-# EOS M ML-driven autofocus: handover
+# EOS M ML-driven autofocus: handover (v2 — 2026-10-19 late)
 
-**Date:** 2026-10-19 · **Branch:** `eosm-slim-gui` (local, not pushed) · **HEAD:** `47d8589`
-**Camera:** Canon EOS M, fw 2.0.2, EF-M 18-55 f/3.5-5.6 IS STM · **Module:** `modules/crop_rec/crop_rec.c`
+**Date:** 2026-10-19 (late session) · **Branch:** `eosm-slim-gui` · **Camera:** Canon EOS M, fw 2.0.2
+**Lens used:** EF-M 18-55 f/3.5-5.6 IS STM (zoom), EF 50 f/1.8 STM on a 0.71× speedbooster (reported as 35 mm)
+**Module:** `modules/crop_rec/crop_rec.c` (now ~17.5k lines; the AF block is self-contained)
+**Build:** `crop_rec.mo` md5 `f587be4849a959ccb8bbcd54b9d5787f` (patches 1–10), full EOS M zip build clean.
 
-This handover is for the next engineer or model working on the MPU-driven autofocus. It
-supersedes [EOSM-MPU-HANDOVER.md](EOSM-MPU-HANDOVER.md), which predates the working
-lens drive. The detailed field history is in [EOSM-AF.md](EOSM-AF.md) §3.8; the test procedure
-is in [EOSM-AF-TESTING.md](EOSM-AF-TESTING.md).
+This handover supersedes the morning version. The detailed history and evidence are in
+[EOSM-AF-WAY-FORWARD.md](EOSM-AF-WAY-FORWARD.md) (read first), [EOSM-AF.md](EOSM-AF.md) §3.8,
+[AF-PATCH2-FIELD-PLAN.md](AF-PATCH2-FIELD-PLAN.md) §11 (per-patch behaviour, log lines, rollback),
+[AF-HUNT-FOREVER.md](AF-HUNT-FOREVER.md) (persistent hunt design),
+[AF-ROI-X10.md](AF-ROI-X10.md) (centre ROI / x5 vs x10), [EOSM-AF-STOP-ANALYSIS.md](EOSM-AF-STOP-ANALYSIS.md),
+[EOSM-AF-FOCUSFEED.md](EOSM-AF-FOCUSFEED.md), and the reviews `AF-PATCH-REVIEW*.md`.
 
 ---
 
 ## 1. Status in one paragraph
 
-ML can now move the EF-M lens itself and run its own contrast AF at x5 under crop presets.
-**One-shot AF (algorithm B) is reliable:** the bench gives 6/6 in focus at ±150/±400/±800
-pulses of defocus, with a median of 3-6 s. It also ran once during RAW recording without
-disturbing it. **Auto refocus with the MPU drive is the open problem.**
-- Hunting from panning and texture-less scenes is fixed: 0 false triggers in the Refocus test.
-- Re-triggering on *mild* blur still fails. The local search sees no slope within ±40 pulses,
-  declares "in focus", and leaves the picture at about 82%.
-- Last Refocus test: **3/5 ok**, false_trig 0.
+ML drives the EF-M lens itself via raw `(9,1,5)` pulses and runs its own contrast AF under crop presets.
+**One-shot AF on 18 mm is solid** (5/5 Refocus tests, solid bench), **the 50 mm EF + speedbooster also
+passes** (5/5 after the adaptive-defocus retry), **35 mm is borderline** (3/5, one 49-move timeout), and
+**55 mm is the open problem**: the B07 reference landing frequently finds no peak or lands soft, and
+deep-defocus trials fail even with good light. The persistent never-give-up hunt was added, but the late
+field logs showed it was mostly **not attempting** (stale pre-attempt sharpness made it close episodes
+as "sharp" immediately); patch 10 fixes that and is **not yet field-validated**. Patch 10 also adds a
+good-enough tolerance, a learned fine step (for the 50 mm's too-small steps), a faster epilogue and
+55 mm fallbacks. Everything is compile- and host-test-verified, not camera-verified.
 
-## 2. How it works (the facts that everything relies on)
+---
 
-### The actuator
+## 2. Hardware / protocol facts that still hold
 
-- ICU→MPU `(9,1,5) [hi lo SPD 00 00]`, sent through the packet builder at `0x38C4`, inside a
-  `(9,0x25,16)[02 …]` session.
-  - SPD `0x07` is the measured stepping speed, about 0.35 pulses/ms.
-  - `0x1F` is about 3× faster and is used for unmeasured repositioning.
-  - `0xFF` (ML's `lens_focus` form) only allows ±1..3 pulses, which is why ML's focus never
-    moved this lens.
-- **The MPU monitor must be open.** `MpuMonOpen` = `send(8,3,1,{00})` re-initialises the
-  MPU's lens engine.
-  - Without it, every move is rejected in under 40 ms (FOCUS_DONE `0x4a….`).
-  - Opening it blacks out LV for about 2 s. The "Keep open" mode pays that once.
-- **No position feedback.** `focus_dist` does not update, and the MPU's lens-position cache
-  (`0xFFF8132E`) is not refreshed in this mode.
+- **Actuator:** ICU→MPU `(9,1,5) [hi lo SPD 00 00]` through the packet builder `0x38C4`, inside a
+  `(9,0x25,16)` session. SPD `0x07` ≈ 0.35 pulses/ms (measured), `0x1F` ≈ 3× faster for unmeasured
+  repositioning. SPD `0xFF` (ML's `lens_focus`) only moves ±1..3 pulses — useless.
+- **The MPU monitor must be open.** `MpuMonOpen` = `send(8,3,1,{00})`; without it moves are rejected
+  in <40 ms. Opening blacks out LV ~2 s; **Keep open** pays it once.
+- **No position feedback.** `focus_dist` does not update and the MPU lens-position cache is stale.
+  Every `afd_pos` is commanded-pulse accounting.
+- **FOCUS_DONE is not the motion end.** Long moves finish at a ~510 ms timer (bit `0x0400`); moves are
+  chunked (100 pulses at 07, 300 at 1F) and the code waits a modelled travel time.
+- **`(9,3,1)` stop does NOT halt a running `(9,1)` move.** 12/12 recovered stop trials kept changing
+  for 300–500 ms after the stop (see EOSM-AF-STOP-ANALYSIS.md). Do not build stop-on-threshold or
+  predictive braking; chunking is the real safety mechanism, and B's position model is biased by this
+  (the P1 experiment below).
+- **Reversals are fine for short moves** (±40/±80 return to 95–103%); the old "backlash" was moves
+  being cut short. The offset distribution R is still not measured.
+- **End stop:** the MPU answers further moves <150 ms with bit `0x1000`; two in a row are treated as an
+  end stop (`afd_es_check`).
+- **Focus measure:** Laplacian sum `s` + gradient sum `g` over the **centre 25 % × 25 %** of the
+  720×480 LV buffer (180×120 px = 6.25 % of the frame area; stride 2 in `afdiag_sharpness_ex`, stride 4
+  in `afd_measure`). **Not** the whole frame. `g` is broad (±~120 pulses at 18 mm) for coarse work; the
+  `s` peak is ~40–60 pulses wide (σ≈21 at 18 mm, x5). Blur floor ≈ 17k ex-scale; sharp subjects 80–180k.
+- **Focal length freezes when the MPU monitor opens.** EXIF proves the lens reports 18/35/55 correctly
+  (and 35 mm for the 50+speedbooster), but `lens_info.focal_len` and the camera UI stay at the
+  pre-open value. Workaround: set the zoom **before** the first AF drive, or use **AF diag → Zoom
+  refresh (read lens mm)** (close→read→fine→reopen if the in-place request is stale). Patch 8 adds
+  automatic ~1 s detection and `mm_pre=`/`mm_post=` logging; whether the MPU answers while the monitor
+  is open is **still the key unmeasured question**.
+- **Auto refocus trigger gates** are unchanged from the morning design: relative peak memory, drop
+  thresholds 60/75/85 % (sens Low/Medium/High), dwell + 500 ms, absolute q/edge fallback, scene
+  settled/steady, failed-scene memory, hold/penalty. Patch 9/10 layer the persistent hunt on top.
 
-### Motion behaviour (all measured)
+---
 
-- **FOCUS_DONE is not the end of the motion.**
-  - At 07 it arrives at a fixed ~510 ms (bit `0x0400`) for long moves.
-  - At 1F it can arrive at ~150 ms while the lens moves until ~590 ms.
-  - So moves are chunked (100 pulses at 07, 300 at 1F) and wait for a modelled travel time.
-  - After an unmeasured move, the code waits for two still frames.
-  - Getting this wrong caused most of the "unpredictable" behaviour seen before.
-- **Reversals are fine for short moves:** ±40 and ±80 out-and-back return to 95-103% of
-  focus. The earlier "backlash" was really moves being cut short.
-- **`(9,3,1)` stop does not halt a `(9,1)` move.** Algorithm C (stop-on-threshold) is dead.
-- **End stop:** the MPU answers further moves in under 150 ms with bit `0x1000`. Two in a row
-  are treated as an end stop (`afd_es_check`).
-- **Session close does not move the lens.** The epilogue instrumentation proved it; it was a
-  false lead.
+## 3. Code map (`modules/crop_rec/crop_rec.c`, current tree)
 
-### The focus measure
+| Area | Function | ~Line | What it does |
+|---|---|---|---|
+| Engine | `afd_engine` | 10565 | session/monitor/LV wait, dispatch by mode (0 AF drive, 6 bench, 8 Refocus prep, …), epilogue |
+| Move layer | `afd_move_ex` | 8199 | chunked move, FOCUS_DONE + travel wait, end stop, logging |
+| Tracked move | `afd_move_track` | ~8600 | per-frame sampling during a move + optional stop callback |
+| Local search | `afd_run_local` | 9526 | ±2×fine probes, wide ±4×fine on soft/drop, climb, feedback landing; tolerance-aware for AREF |
+| B sweep | `afd_run_sweep` / `afd_sweep` | 9285 / 8969 | continuous sweep + stepped feedback landing; learned fine from peak width; full resweep after flat landing |
+| Landing | `afd_retrace`, `afd_land_steps` | 8400 / 9135 | retrace 1/2, 90/80 %, walk to best |
+| Ref max / keys | `afd_ref_max_*`, `afd_mm_bucket` | ~8750 | per zoom+mm high-water mark, resets (scene/zoom/RAW/toggle/foreign/RT) |
+| Engine verify/timing | in `afd_run` | ~9650 | 300 ms landing verify (skipped for AREF with land≥90), fast epilogue for AREF |
+| Fine step | `afd_fine_eff`, `afd_fine_learn_from_sw` | ~143 / 8950 | focal-length guess + learned value from B/C sweep peak width |
+| Auto refocus | `aref_eval` | 14444 | trigger/gates/absolute fallback; anchor clamp |
+| Reference anchor | `aref_mpu_settle`, `aref_mpu_finish` | 14230 / 14721 | post-landing reference adoption, freeze/floor/anchor, settle log |
+| Persistent hunt | `aref_hunt_step` + helpers | 15203 | IDLE/ARM/ATTEMPT/JUDGE, never-stop invariant, portfolio, backoff, judge |
+| Zoom refresh | `afd_lens_refresh` | 8172 | request fresh PROP_LV_LENS, log `# zoom probe`, manual action + auto poll |
+| Tolerance | `aref_tol_pct` | 143 | Strict 92 / Normal 88 / Relaxed 85 |
+| Refocus test | `aref_test_run`, `afrt_prep` | ~15800 / 10292 | HOLD/trials, adaptive defocus retry, reference validation/fallback |
+| Diagnostics | `afw_run` / bench | 10447 | AFSWEEP/AFSTOP/AFREV/AFBENCH; stop_check |
 
-- Laplacian sum `s` and gradient sum `g` over the centre ¼×¼ (`afdiag_sharpness_ex`, stride 2,
-  "ex" scale).
-- The fast per-frame `afd_measure` uses stride 4 (about 4 ms per call). Convert between the
-  two with `afd_to_ex`.
-- At x5 on the 18-55 at 18 mm, the s peak is about 40-60 pulses wide (σ ≈ 21) and g about
-  ±120.
-- Blur floor ≈ 17k (ex-scale); detailed subjects in focus reach 80-180k.
+**Settings worth knowing:**
+`AF drive monitor` = Keep open, `AF algorithm` = B, `Sweep speed` = 07, `Session close` = ON,
+`Fine step` = Auto (or manual; manual overrides learned), `Refocus method` = MPU drive, `Refocus AF` = Local,
+`Auto refocus` = ON/ON+REC, **`Refocus persistence` = Persistent** (default; Normal = patches 1–9.1),
+**`Focus tolerance` = Normal 88 %** (default; Strict 92, Relaxed 85). The Refocus test always uses its
+own strict 90 % criterion.
 
-## 3. Code map (`modules/crop_rec/crop_rec.c`)
+---
 
-| Area | Functions |
-|---|---|
-| Engine | `afd_engine(mode, flags)`: session, monitor, LV-recovery wait, epilogue (stop, close), logs. Modes: 0 AF drive, 1 calib, 2 probe, 3 speed, 4 sweep record, 5 stop test, 6 bench, 7 rev-cal, 8 Refocus-test prep. Flags: `AFD_F_QUIET`, `AFD_F_REC`, `AFD_F_AREF` |
-| Moves | `afd_move_ex` (chunking, done wait, travel-time wait, stillness wait, end-stop check), `afd_move_track` (samples every frame during a move), `afd_goto` |
-| Algorithms | `afd_run` dispatcher (deadline, landing verify), `afd_run_sweep` / `afd_sweep_find` (**B**, the default), `afd_run_local` (Auto refocus), `afd_run_a/d/e`, `afd_land_steps` (feedback retrace plus climb to the top) |
-| Monitor | `afd_mon_open_raw`, `afd_mon_close_now`, self-heal on a stale monitor, re-open on wake, auto-close (default Never) |
-| Auto refocus | `aref_step` → `aref_eval` (gates 0-12), `aref_mpu_arm`, `aref_mpu_exec` (in the persistent worker `afd_worker_task`), `aref_mpu_finish`, `aref_mpu_settle` |
-| Tests | `afb_*` (AF bench), `aref_test_run` (Refocus test), `afw_*` (sweep record and stop test), `afd_rect_*` (REC test) |
-| Safety | `afd_must_abort`, `afd_keep_awake`, `afd_log_flush` / `afd_note_flush` (never while recording) |
+## 4. Field evidence (what to trust)
 
-Menu: Settings → the AF diag entries (AF drive (MPU), AF drive monitor, AF algorithm, Sweep
-speed, Fine step, Session close, AF bench, Refocus test, …) and the Auto refocus entries
-(Auto refocus, Refocus sensitivity, Refocus method, Refocus AF, MPU drive while recording).
+### Refocus tests
 
-## 4. Open problems, in priority order
+| Session | Lens / focal | Result | Notes |
+|---|---|---|---|
+| morning | EF-M 18 mm | 3/5, then **5/5** after reboot | first failure was a near-black scene (luma 18→5), not AF |
+| morning | EF-M 35 mm | **5/5** | fine=20 (focal length frozen) |
+| morning | EF-M 55 mm | false 5/5 | reference landing 34,269 (soft), trials 90–141 % of it; `false_trig=5` |
+| late | EF-M 18 mm | **5/5**, retries=1 | `def0=60→120` retry worked |
+| late | EF-M 35 mm | **3/5** | +400 trial timed out after **49 moves / 18.7 s**; −150 took 28 moves / 14.8 s |
+| late | EF-M 55 mm | failed | 4 attempts aborted (B07 reference nopeak); extra-light attempt: B07 23,789 → local verify **124,530**, then deep trials failed (+150 at 15 % after 28 moves) |
+| late | EF 50 + SB (35 mm) | **5/5**, retries=1 | reference 167,867; but 18–28 moves / 8–12 s: steps too small for this gearing |
 
-### 4.1 The local search accepts a soft picture (cause of the 3/5)
+### Why auto refocus felt wrong in the late session
 
-- **Evidence:** latest AFRTEST.LOG.
-  - Trials +60 and +150 triggered (82% and 83% of ref).
-  - The local search made 3 moves, found neither side >5% better, and returned "in focus".
-  - The final picture was 82-83%.
-- **Likely cause:**
-  - The + side is close to the end stop, so the defocus moved little and left a flat flank.
-  - ±2×fine (±40) probes cannot see a 5% slope there.
-  - The plateau guard only falls back to B below 70% of the last landing.
-- **Suggested fix**, in `afd_run_local`:
-  - If no side improves and s0 < 92% of the last landing (same zoom), first probe wider
-    (±4×fine).
-  - If that is still flat, fall back to B.
-  - Also skip the "in focus" exit when the trigger came from the drop path (`pct` well below
-    100).
+`# hunt` logs from that session: **111 episodes, 93 `why=cold`, 75 reset `why=sharp attempts=0 travel=0`
+within 60–120 ms, only 19 attempts total.** Cause: `aref_hunt_pre_s` was not cleared between episodes,
+so the +10 % improvement rule judged against a stale pre-attempt value and closed the episode as sharp.
+**Patch 10 fixes this** (clear `pre_s`, +10 % only after an attempt, 6 s cold cooldown), but it is not
+field-validated yet.
 
-### 4.2 Reference erosion
+### Speed budget (measured, late session successful runs)
 
-- Across one Refocus test, ref_s drifted 115k → 95k → 86k → 77k (earlier session) and
-  97k → 84k → 71k (latest), because each re-land lands a little lower.
-- The climb-to-top (`afd_land_steps`, commit `47d8589`) helped only partly.
-- Consider tracking a per-zoom, per-scene maximum, and comparing landings to it rather than
-  to the last landing.
+- Median wall time **≈9.2 s** = ~0.6 s session open + **6.8 s search** + **1.77 s epilogue**.
+- Median **15 moves**, ~**450 ms/move**. Warm 2-move runs: 4.4 s wall (1.75 s is epilogue).
+- Patch 10 removes ~1.4 s of epilogue + ~0.3–0.6 s verify for AREF/hunt runs and should reduce moves
+  (tolerance + learned step). Expected near-term **30–40 % faster** (median ~5.5–6.5 s; warm ~2.5–3 s);
+  deep/failed runs 16–19 s → ~11–14 s, with some converted to successes by the new fallbacks. The next
+  speed lever after that is a measured motion model (AFSWEEP) to cut the ~450 ms/move.
 
-### 4.3 Speed
+### Other confirmed facts
 
-- The median AF time went from about 3 s to about 6 s after the motion-end waits (`fcc6f88`).
-- The travel model (`AFD_MV_MSPP_*`, `AFD_MV_LAT_MS`) uses guessed values for 0x14 and 0x1F.
-- Measure the real speed per speed byte with **AF sweep record** (AFSWEEP.LOG), then tune.
-  The offline replay tool (`contrib/af_replay`) parses AFSWEEP.
+- Stop test: `halted=0` in 4/4 new trials (12/12 total) — stop never halts.
+- Zoom refresh works manually (`# zoom refresh done old_mm=.. new_mm=.. fine=..`); automatic detection
+  is implemented but waiting for a session where the MPU answers while the monitor is open.
+- ROI: centre 25 %×25 %, not whole frame; x10's same ROI covers ~½ the linear scene (¼ area) and x5 is
+  more downsampled. The biggest reason Canon x10 behaves better is likely that x5 is the patched crop
+  path ("Canon AF data not trustworthy"), then tighter ROI/background rejection. Test the existing
+  engine at x10 before changing anything (see AF-ROI-X10.md).
 
-### 4.4 Focal length
+---
 
-- Almost all data is at 18-20 mm. The user reports worse AF at 30-50 mm.
-- **Fine step: Auto** (20 / 14 / 10 by focal length) is untested there.
-- Run the Refocus test and the bench at 35 and 50 mm.
+## 5. Open problems, in priority order
 
-### 4.5 Recording
+1. **Validate patch 10 in the field** (P0): does the hunt actually attempt on blurry scenes now? Does
+   Normal tolerance 88 % stop false hunting/extra moves? Is the fast epilogue safe? Do 55 mm Refocus
+   tests get past the reference landing via `# RT_REF fallback`? Check `# hunt`, `# fine learned`,
+   `# epilogue fast`, `# verify skipped`, `# RT_REF fallback`.
+2. **55 mm / deep defocus** (P0): B07 reference landing is unreliable and B's flat-landing resweep was
+   limited; patch 10 adds a full-B reference fallback and a full-width resweep. If deep trials still
+   fail, the next candidates are a full-range coarse scan with 1F, Canon x10 as a coarse finder, or
+   x10/ROI (below).
+3. **Speed** (P1): after patch 10, measure the remaining per-move ~450 ms. Run AFSWEEP at 07/14/1F to
+   calibrate the time→position model, then tune the travel wait/settle. Consider a two-speed search
+   (1F coarse, 07 final). Target median ≤5 s.
+4. **Adapted/EF lens step size** (P1): the learned fine step from a B/C sweep should fix the 50 mm's
+   tiny steps; validate `# fine learned`, and keep the manual Fine step override (40–60) as a fallback.
+5. **Focal-length freeze** (P1): manual refresh works; automatic detection only if the MPU answers the
+   in-place request. If it does not, either close/reopen (2 s blackout) or accept manual refresh. Do not
+   add more focal-length-dependent logic.
+6. **x5 vs x10 ROI** (P2): run the existing engine at x10 (AF sweep/bench) before a ROI selector; the
+   cheap code option is AF ROI 1/8 at x5 with stride 2 (AF-ROI-X10.md has the spec).
+7. **Recording (ON+REC)** (P2): re-test after patch 10's fast epilogue and the patch-9 hunt recording
+   rules; watch log completeness (afd_note is 2 KB, flushed after recording) and no monitor ops/tasks.
+8. **Safety debt** (P2): engine epilogue is still single-exit by convention; NODONE sends a stop and
+   logs; menu task_create is guarded; `is_continuous_af()` is scoped to AREF runs. See
+   AF-STATUS-REVIEW.md for the risk register.
 
-- Auto refocus during RAW recording (MPU drive while recording) worked in the few tries made
-  (a REC test landed at 100% in 6.2 s, with steady LV cadence), but it needs more runs.
-- True dropped-frame counts need an mlv_lite accessor; today only the vsync cadence is
-  logged.
+---
 
-### 4.6 Minor
+## 6. Next field session (short)
 
-- The bench reference drifts if the light changes. It re-references per algorithm and marks
-  `drift=1`.
-- Algorithms D, E and F are inferior on the bench; keep them only as experiments.
+1. Flash this build; **Movie Servo OFF**; monitor **Keep open**.
+2. Settings: Refocus persistence **Persistent**, Focus tolerance **Normal** (try Relaxed later), Fine
+   step **Auto**, Refocus AF **Local**, method **MPU drive**, AF diag log **ON**.
+3. **Refocus test at 18 mm** — expect 5/5, `retries` 0 or 1, fast epilogue.
+4. **55 mm Refocus test** with good light/texture — expect `# RT_REF fallback` instead of an abort; note
+   whether deep trials still fail and at which defocus.
+5. **Deep-defocus walk**: point at a very blurry subject, then a textured one. Expect real
+   `# hunt attempt`/`# hunt outcome` lines now, `# hunt skip why=sharp` / cooldown instead of churn, and
+   no hunting after a visibly good picture.
+6. **50 mm EF**: run one **AF sweep record** first (learns the fine step) or set Fine step 40–60
+   manually, then the walk; check `# fine learned` and move sizes.
+7. After: `python3 contrib/af_test/field_session.py --copy` — it prints the Refocus integrity, hunt,
+   zoom, timing and gate summaries.
 
-## 5. Build, flash, test, analyse
+---
 
-```
-# build (python2 is unavailable; module_strings.h placeholders must exist, see below)
-for m in crop_rec mpu_lab; do printf '#define MODULE_STRINGS() \\\n    MODULE_STRINGS_START() \\\n    MODULE_STRINGS_END()\n' > modules/$m/module_strings.h; done
-make -C platform/EOSM.202 zip SHELL=/bin/bash PYTHON=python3
-# flash: card is /dev/disk4s1 → /Volumes/EOS_DIGITAL (often present but unmounted)
-diskutil mount /dev/disk4s1
-unzip -oq platform/EOSM.202/magiclantern-crop_mood.2026Oct19.EOSM202.zip -d /Volumes/EOS_DIGITAL
-md5 /Volumes/EOS_DIGITAL/ML/modules/crop_rec.mo     # compare with the zip
-diskutil unmount /Volumes/EOS_DIGITAL
-# analyse a session
-python3 contrib/af_report/af_report.py --copy <dir>
-```
+## 7. Tooling and build
 
-The test procedure is [EOSM-AF-TESTING.md](EOSM-AF-TESTING.md). The **Refocus test** is the
-key regression measure for Auto refocus; target ok 5/5 with false_trig 0. The **AF bench**
-with "B speeds" is the regression measure for the engine.
+- Offline suite: `make af-test` or `python3 contrib/af_test/run_all.py` → **84 tests, 4 tiers, 6 real
+  corpus cases**, ~14 s. The corpus is in `contrib/af_test/corpus/real-20261019/` (real 2026-10-19 logs,
+  sha256 provenance). Add a session with `contrib/af_test/add_case.py`.
+- `contrib/af_replay/af_lab.py` + `REPORT_LAB.md`: algorithm ranking on real fitted curves.
+- `contrib/af_novel/`: defocus estimators/feed probe with preserved real samples.
+- Build: `export PATH=$HOME/gcc-arm-none-eabi-5_4-2016q3/bin:$PATH; make -C platform/EOSM.202 zip
+  SHELL=/bin/bash PYTHON=python3`. Gotchas: if the build deletes `modules/crop_rec/module_strings.h`,
+  restore the 3-line placeholder; the build regenerates `modules/crop_rec/README.rst` (restore with
+  `git checkout --`). Build artifacts are not committed.
+- Card flashing: unzip the resulting zip to `/Volumes/EOS_DIGITAL`, verify
+  `ML/modules/crop_rec.mo` md5, eject. Backups of every flashed module are in
+  `~/af_logs/flashed-backups/`.
 
-## 6. Rules and pitfalls (each one has bitten this project)
+---
 
-- **ML `snprintf`:** only `%d`, `%x` and plain `%s`. `%c` prints garbage and `%%` shifts
-  arguments. No field widths on `%s`.
-- **Never create a task in the module init.** crop_rec loads before mlv_lite. A task created
-  there made mlv_lite's `compress_task` creation fail, so RAW recording silently did nothing
-  and the console stayed open (`ASSERT … mlv_lite.c:5270`). The AF worker is created lazily
-  (after the first menu AF run).
-- **Never `task_create` during RAW recording** (no memory). Recording-time work uses the
-  pre-created worker or the REC test's arm-time task.
-- **Never open or close the MPU monitor while recording** (2 s LV blackout). **Never write
-  the card while recording;** logs are held in RAM and flushed after recording.
-- **Every engine path must send the stop `(9,3,1)` and the session close.** The epilogue in
-  `afd_engine` does this; keep it single-exit.
-- **CPU:** long AF loops must `msleep` between frames. A 30-50 ms measure in a tight loop at
-  high priority coincided with a Canon assert in `LvWbAlgorWrap.c:522`. AF tasks run at
-  priority `0x1f`.
-- **`module_strings.h`** is generated by a Python 2 script. Keep the 3-line placeholder. A
-  failing build can delete it, and an empty file produces a `MODULE_STRINGS` warning and
-  drops the module metadata.
-- **Do not trust FOCUS_DONE as the end of a move.** Do not land at a computed absolute
-  position after a long or fast move. Land by sharpness feedback with uniform short steps in
-  one direction.
+## 8. Git state
 
-## 7. Tools and logs
+Everything is committed on `eosm-slim-gui` in one commit:
+`crop_rec: MPU AF patches 1-10 + offline AF test harness, real corpus and handover`
+and pushed to `fork/eosm-slim-gui` (`git@github.com:mgojkovic/Crop-mood-eosm-slim-gui.git`).
+The build artifact `crop_rec.mo` md5 is `f587be4849a959ccb8bbcd54b9d5787f`. The upstream `origin`
+(`Amit199167/...`) was not pushed to; a PR is the owner's decision. Local field logs are under
+`~/af_logs/` (not in the repo); the curated real corpus is in the repo.
 
-| Tool | Purpose |
-|---|---|
-| `contrib/af_report/af_report.py` | One-command session report and verdicts (reads the card) |
-| `contrib/af_replay/` | Offline algorithm simulator fitted on the logged curves (REPORT.md) |
-| AFDRIVE.LOG | Every AF run, plus monitor, LV and `# aref` notes |
-| AFRTEST.LOG | Refocus test (`# RT_TRIAL`, `# RTEST` summary) |
-| AFBENCH.LOG | Bench per algorithm and defocus |
-| AFSWEEP / AFSTOP / AFREV / AFCALIB / AFPROBE / AFSPEED.LOG | Diagnostics |
+---
 
-Field log copies from this session are in the Claude scratchpad (`card8` … `card18`). They
-are temporary, so copy anything worth keeping.
+## 9. Rules for the next engineer (unchanged, plus new)
 
-## 8. Commit history of this work
-
-There are 47 commits from `f127fe3` to `47d8589`. The milestones:
-
-| Commit | Milestone |
-|---|---|
-| `ba0824c` | mpu_lab drive test: first lens movement with `(9,1)` at speed 07 |
-| `7be6799` | First AF drive (MPU) |
-| `81799ee` | Monitor "Keep open" |
-| `8917e0b` | Feedback-retrace landing: first reliable AF |
-| `22e0613` | `afd_engine(mode, flags)` refactor |
-| `3ef455f` / `2fa454a` | Algorithm selector, bench, reversal cal |
-| `7287f35` / `fa4fcaf` | Motion chunking, cheap measure, B default |
-| `44be715` | Persistent AF worker, MPU refocus while recording |
-| `aa80074` | Fix: no task at init (mlv_lite) |
-| `8a562c6` + `1e57793` | End stop by flags, low texture; Auto refocus settle gate, Refocus test |
-| `fcc6f88` | Wait for the real end of motion, landing verify |
-| `47d8589` | MPU trigger sensitivity 60/75/85%, climb-to-top landing |
-
-## 9. Housekeeping
-
-- Nothing is pushed. `git push` and any PR are for the owner to decide.
-- `doc/EOSM-MPU-HANDOVER.md` has an uncommitted change from another session.
-  `doc/EOSM-AF-ALGORITHMS.md` and `doc/EOSM-AF-IMPLEMENTATION.md` are untracked research notes
-  from another session. They were used, but this work did not commit them.
-- Agent worktrees are left under `.claude/worktrees/`. They can be removed with
-  `git worktree remove`.
-- Card module backups are in `/tmp/mpu_lab_backup_*`.
+- **No camera in CI.** All host tests are offline; field validation is manual.
+- **Do not tune thresholds on one scene.** Change one algorithm/decision per field run; the logs are the
+  ground truth.
+- **Never add focal-length-dependent logic** until the monitor freeze is fixed; use the refresh/manual
+  Fine step.
+- **Respect the safety rules:** no monitor open/close while recording, no `task_create` while recording,
+  no x10 while recording, keep the epilogue's stop/session handling, respect abort/deadline/travel caps.
+- **Do not build stop-on-threshold / predictive braking** unless a future primitive actually halts a move.
+- **Redact/keep logs:** the real corpus is committed; card ROM/MPU dumps and raw session logs stay local.
+- **Persistent persistence is a product decision:** Normal is the escape hatch; report false hunting on
+  a visibly good picture (it is the top UX risk).

@@ -1,0 +1,120 @@
+{
+  "name": "real-20261019-card17-bench",
+  "historical_fixture": true,
+  "session": "2026-10-19",
+  "notes": "Latest 2026-10-19 AF bench: B07 6/6 (pct 100-108), B14 4/6, B1F 5/6. Test-design weakness confirmed from the raw log: the positive-defocus trials barely defocus the scene (s_def 94.3-106.5% of the per-algorithm reference) while the negative ones do (28.9-34.9%), so only -defocus tests probe AF recovery. See doc/EOSM-AF-TESTING-V2.md.",
+  "provenance": {
+    "captured_from": "Claude scratchpad copy of the EOS M card",
+    "source_dir": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card17/20261019-143547/ML/LOGS",
+    "copied": "2026-10-19",
+    "build": "pre-task-6 AF build (old Re-focus reference, before the anchored RT reference / AFRT_REF_FLOOR_PCT=95)",
+    "files": {
+      "AFBENCH.LOG": {
+        "source": "/private/tmp/claude-501/-Users-mgojkovic-repos-Crop-mood-eosm-slim-gui/ea95f17a-e40e-4903-a809-65ac8220d6dc/scratchpad/card17/20261019-143547/ML/LOGS/AFBENCH.LOG",
+        "bytes": 43467,
+        "sha256": "990a7eec60395a6469d138bb0044d190af0e7244531a35c8c6c62d307b2b28e7"
+      }
+    }
+  },
+  "verdicts": {
+    "must_contain": [
+      "== Bench (land pct / ms, median)"
+    ],
+    "must_not_contain": [
+      "CRASH",
+      "HUNTING",
+      "AF drive NOT OK"
+    ]
+  },
+  "facts": {
+    "bench": {
+      "defocus": [
+        150,
+        -150,
+        400,
+        -400,
+        800,
+        -800
+      ],
+      "algos": {
+        "B07": {
+          "n": 6,
+          "ok": 6,
+          "pct": [
+            103,
+            100,
+            100,
+            101,
+            100,
+            108
+          ],
+          "pct_min": 100,
+          "pct_max": 108,
+          "aborted": 0,
+          "summary": {
+            "n": 6,
+            "median_ms": 4131,
+            "ok": 6
+          }
+        },
+        "B14": {
+          "n": 6,
+          "ok": 4,
+          "pct": [
+            99,
+            85,
+            96,
+            94,
+            95,
+            80
+          ],
+          "pct_min": 80,
+          "pct_max": 99,
+          "aborted": 0,
+          "summary": {
+            "n": 6,
+            "median_ms": 4072,
+            "ok": 4
+          }
+        },
+        "B1F": {
+          "n": 6,
+          "ok": 5,
+          "pct": [
+            101,
+            99,
+            100,
+            85,
+            99,
+            94
+          ],
+          "pct_min": 85,
+          "pct_max": 101,
+          "aborted": 0,
+          "summary": {
+            "n": 6,
+            "median_ms": 4305,
+            "ok": 5
+          }
+        }
+      },
+      "s_def_pct_positive_min": {
+        "min": 90,
+        "max": 110,
+        "note": "requested +defocus reaches only ~95-107% of the reference s"
+      },
+      "s_def_pct_positive_max": {
+        "min": 100,
+        "max": 115
+      },
+      "s_def_pct_negative_min": {
+        "min": 20,
+        "max": 45
+      },
+      "s_def_pct_negative_max": {
+        "max": 60,
+        "note": "requested -defocus really defocuses (29-35% of the reference s)"
+      }
+    }
+  }
+}

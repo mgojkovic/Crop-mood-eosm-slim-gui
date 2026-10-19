@@ -140,7 +140,8 @@ def parse_drive(lines):
             runs.append(d)
         elif l.startswith("# aref "):
             parts = l.split()
-            notes.append((parts[2], kv(l)))
+            if len(parts) > 2:          # a truncated line at the end of a log must not crash the report
+                notes.append((parts[2], kv(l)))
         elif l.startswith("# endstop"):
             notes.append(("endstop", {}))
         elif l.startswith("# REC ") or l.startswith("REC "):
@@ -327,28 +328,54 @@ def main():
                                                                     for x in s[-1:]) if s else ""))
             P("   (! = some aborted)")
 
-    # 6. refocus test
+    # 6. refocus test.  Patch 2 appends notrig/valid/false_pass to # RTEST and
+    # no_trigger/valid/false_pass to # RT_TRIAL, so trial lines must be shown in full
+    # (240 chars; the old 140-char cut hid the trailing integrity fields).
     if "AFRTEST.LOG" in inses:
-        rl = [l for l in lines_of(inses["AFRTEST.LOG"]) if l.startswith("# RTEST")]
+        rl = [l for l in lines_of(inses["AFRTEST.LOG"]) if l.startswith(("# RTEST", "# RT_TRIAL"))]
         summ = [l for l in rl if re.match(r"# RTEST\s", l)]
-        trial = [l for l in rl if l.startswith("# RTEST_")]
+        marker = [l for l in rl if re.match(r"# RTEST_(BEGIN|END)", l)]
+        trial = [l for l in rl if l.startswith("# RT_TRIAL ")]
+        invalid = [l for l in rl if l.startswith("# RT_TRIAL_INVALID")]
+        maxline = 240
         if rl:
             P("")
-            P("== Refocus test (AFRTEST): %d summary, %d trial lines" % (len(summ), len(trial)))
+            extra = " (%d invalid)" % len(invalid) if invalid else ""
+            P("== Refocus test (AFRTEST): %d summary, %d trial lines%s"
+              % (len(summ), len(trial) + len(invalid), extra))
+            d = kv(summ[-1]) if summ else {}
+            m = re.search(r"ok=(\d+)/(\d+)", summ[-1]) if summ else None
+            of = int(m.group(2)) if m else None
+            notrig = num(d, "notrig")
+            valid = num(d, "valid")
+            false_pass = num(d, "false_pass")
+            ft = num(d, "false_trig")
             for l in summ[-3:]:
-                P("   " + l[2:][:140])
+                P("   " + l[2:][:maxline])
+            if notrig is not None or valid is not None or false_pass is not None:
+                # modern (patch 2+) log: surface the integrity counters explicitly
+                P("   integrity: notrig=%s valid=%s/%s false_pass=%s"
+                  % (fmt(notrig), fmt(valid), fmt(of), fmt(false_pass)))
+            for l in marker:
+                P("   " + l[2:][:maxline])
             for l in trial[:12]:
-                P("   " + l[2:][:140])
+                P("   " + l[2:][:maxline])
             if len(trial) > 12:
                 P("   ... %d more trial lines" % (len(trial) - 12))
-            for l in summ[-1:]:
-                d = kv(l)
-                ft = num(d, "false_trig")
-                if ft is not None and ft > 1:
-                    verdict.append("Auto refocus HUNTING (RTEST false_trig=%d)" % ft)
-                m = re.search(r"ok=(\d+)/(\d+)", l)
-                if m and int(m.group(1)) < int(m.group(2)):
-                    verdict.append("Refocus test: only %s/%s ok" % m.groups())
+            for l in invalid[:6]:
+                P("   " + l[2:][:maxline])
+            if len(invalid) > 6:
+                P("   ... %d more invalid-trial lines" % (len(invalid) - 6))
+            if ft is not None and ft > 1:
+                verdict.append("Auto refocus HUNTING (RTEST false_trig=%d)" % ft)
+            if m and int(m.group(1)) < int(m.group(2)):
+                verdict.append("Refocus test: only %s/%s ok" % m.groups())
+            if notrig is not None and notrig > 0:
+                verdict.append("Refocus test: %d trial(s) did not trigger (invalid; valid=%s/%s)"
+                               % (int(notrig), fmt(valid), fmt(of)))
+            if false_pass is not None and false_pass > 0:
+                verdict.append("Refocus test: %d false pass(es) (ok counted on a no-trigger trial)"
+                               % int(false_pass))
 
     # 7. recording
     if notes:

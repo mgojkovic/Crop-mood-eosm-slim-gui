@@ -1,0 +1,843 @@
+# AFBENCH t=291769 lens="EF-M18-55mm f/3.5-5.6 IS STM" zoom=x5 crop_preset=2 frame_ms=42 meas_us=8600 log_cap=163840 algos=1c0 defocus=150,-150,400,-400,800,-800 def_back=40 reland_pct=70 ok_pct=90
+# focal_mm=18 fine=20 fine_setting=0
+# speed=7 coarse=100 fine=20 probe_pct=95 rt_back=60 rt_back2=140 rt_thr=90/80 rt_slack=4 fall_pct=80 max_total=9000 run_cap_ms=15000
+# chunk_07=100 chunk_mid=200 chunk_fast=300 unm_speed=1f sweep_speed_setting=7 poll_ms=10 task_prio=1f
+# B/C sweep_chunks=12 pre=60 fall_pct=60 fall_n=2 mspp_x10=29/14/10 lat_ms=120 track_pad_ms=150 stable_pct=2 stable_n=3 coast_ms=40 margin=80 err=100 c_len=200 c_stop_pct=90 c_ok_pct=85
+# D sigma=21 step=40 b_pct=85 before=60 rev_extra=40 disagree=80 max_ahead=450 behind=300 spread_pct=108 E step=40 improve_pct=110 focus_pct=85 climb_max=12 drop_pct=80/92 F margin_milli=100 min_curv=20
+# ms phase cmd pos s g luma done_val flags done_ms ret dist tries wait samp q
+# BENCH_REF begin
+775 i 0 0 39680 89006 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=8 q=445
+# s0=49975 g=99169 luma=68
+1372 p 100 100 36238 89912 63 4e1000 err 375 ret0 dist=158 t=1 wait=71 samp=7 q=403
+# probe dir=-1
+1796 o -40 60 0 0 0 4e0000 - 115 ret0 dist=158 t=0 wait=53 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=1796 n=14 peak=1 imax=2 smax=15193 smin=6344 smax_ex=64406 t_pk=84 t_stop=442 t_done=502 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=-40
+S 0 15172 25296 62
+S 63 14854 25378 62
+S 82 15193 25669 62
+S 123 14941 25271 60
+S 187 12849 23987 61
+S 204 14040 25040 60
+S 248 12016 23450 59
+S 336 9773 21507 60
+S 371 8413 20795 61
+S 439 7711 19989 61
+S 461 6849 19257 62
+S 498 6501 18577 62
+S 559 6881 19145 62
+S 581 6344 17964 62
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=60 ref=64406 pos=-40 coarse=0
+2949 o 180 140 0 0 0 4e1000 err 404 ret0 dist=158 t=0 wait=48 samp=0 q=0
+3202 r -20 120 49924 95690 59 4e0000 - 140 ret0 dist=158 t=1 wait=58 samp=6 q=521
+3447 r -20 100 65595 103573 59 4e0000 - 181 ret0 dist=158 t=1 wait=51 samp=7 q=633
+# retrace k=1 thr_pct=90 hit=1 s=65595
+4030 i 0 100 66119 104202 59 0 - -1 ret0 dist=158 t=1 wait=0 samp=109 q=634
+# BENCH_REF ref_s=66119
+4047 i 0 100 66167 104465 59 0 - -1 ret0 dist=158 t=1 wait=0 samp=10 q=633
+# s0=66101 g=104498 luma=59
+4670 p 100 200 34015 86983 61 4e1000 err 242 ret0 dist=158 t=1 wait=85 samp=9 q=391
+# probe dir=-1
+4965 o -40 160 0 0 0 4e0000 - 103 ret0 dist=158 t=0 wait=53 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=4965 n=14 peak=1 imax=0 smax=15901 smin=6563 smax_ex=67407 t_pk=0 t_stop=383 t_done=501 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=60
+S 0 15901 24213 58
+S 44 15806 24132 58
+S 81 15594 23964 58
+S 121 14500 23400 58
+S 186 12083 22515 58
+S 204 11828 22082 58
+S 248 10622 21468 58
+S 334 9137 20143 58
+S 372 8283 19719 58
+S 437 8571 19331 58
+S 453 7290 18718 59
+S 498 7024 18044 59
+S 573 6563 17603 59
+S 582 6563 17603 59
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=160 ref=67407 pos=60 coarse=0
+6081 o 180 240 0 0 0 4e1000 err 224 ret0 dist=158 t=0 wait=50 samp=0 q=0
+6338 r -20 220 48298 92734 55 4e0000 - 193 ret0 dist=158 t=1 wait=44 samp=13 q=520
+6652 r -20 200 65207 99283 55 4e0000 - 141 ret0 dist=158 t=1 wait=49 samp=58 q=656
+# retrace k=1 thr_pct=90 hit=1 s=65207
+7162 i 0 200 64502 99181 55 0 - -1 ret0 dist=158 t=1 wait=0 samp=113 q=650
+# BENCH_REF algo=B07 ref_s=64502 prev_ref_s=66119
+7606 x 190 390 0 0 0 4e1000 err 114 ret0 dist=158 t=0 wait=54 samp=0 q=0
+7966 x -40 350 0 0 0 4e0000 - 95 ret0 dist=158 t=0 wait=50 samp=0 q=0
+8091 i 0 350 63302 101554 55 0 - -1 ret0 dist=158 t=1 wait=0 samp=120 q=623
+# BENCH_TRIAL algo=B07 defocus=150 s_def=63302
+8158 i 0 350 63381 101279 55 0 - -1 ret0 dist=158 t=1 wait=0 samp=61 q=625
+# s0=63234 g=101303 luma=55
+8786 p 100 450 34725 83531 56 4e1000 err 238 ret0 dist=158 t=1 wait=57 samp=52 q=415
+# probe dir=-1
+9094 o -40 410 0 0 0 4e0000 - 124 ret0 dist=158 t=0 wait=51 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=9094 n=14 peak=1 imax=0 smax=14378 smin=6408 smax_ex=60951 t_pk=0 t_stop=374 t_done=510 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=310
+S 0 14378 22018 53
+S 63 13419 21451 53
+S 84 13642 21644 53
+S 120 13451 21155 53
+S 225 12474 20594 53
+S 248 10833 19327 53
+S 312 9672 18444 53
+S 333 8484 18240 53
+S 371 7687 17875 54
+S 442 6836 17540 55
+S 453 6836 17540 55
+S 499 6666 17388 55
+S 562 6629 17573 55
+S 583 6408 17336 56
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=410 ref=60951 pos=310 coarse=0
+10159 o 180 490 0 0 0 4e1000 err 229 ret0 dist=158 t=0 wait=51 samp=0 q=0
+10427 r -20 470 49632 95430 57 4e0000 - 165 ret0 dist=158 t=1 wait=63 samp=11 q=520
+10721 r -20 450 67226 106086 57 4e0000 - 142 ret0 dist=158 t=1 wait=43 samp=13 q=633
+# retrace k=1 thr_pct=90 hit=1 s=67226
+11224 i 0 450 66701 104416 57 0 - -1 ret0 dist=158 t=1 wait=0 samp=58 q=638
+# BENCH algo=B07 defocus=150 land_s=66701 ref_s=64502 pct=103 moves=6 ms=3016 travel=460 ab=0 drift=0
+11842 x -190 260 0 0 0 4e0000 - 258 ret0 dist=158 t=0 wait=46 samp=0 q=0
+12161 x 40 300 0 0 0 4e0000 - 115 ret0 dist=158 t=0 wait=64 samp=0 q=0
+12287 i 0 300 22498 65031 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=119 q=345
+# BENCH_TRIAL algo=B07 defocus=-150 s_def=22498
+12306 i 0 300 22697 65071 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=5 q=348
+# s0=22610 g=65022 luma=63
+13054 p 100 400 45386 89816 58 4e0400 - 534 ret0 dist=158 t=1 wait=87 samp=10 q=505
+# probe dir=1
+13536 o -160 240 0 0 0 4e0000 - 232 ret0 dist=158 t=0 wait=93 samp=0 q=0
+# sweep dir=1 len=100 spd=7 t_send=13536 n=14 peak=0 imax=10 smax=5672 smin=4611 smax_ex=24044 t_pk=446 t_stop=-1 t_done=505 val=4e0400 t_exp=410 t_stable=430 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=340
+S 0 4748 13126 64
+S 13 4748 13126 64
+S 57 4773 13187 63
+S 117 4741 13169 63
+S 141 4851 13535 63
+S 180 4611 13857 62
+S 247 5126 14128 62
+S 264 5027 14423 61
+S 307 5065 14727 61
+S 396 5424 15300 60
+S 430 5672 15580 60
+S 505 5577 16183 59
+S 520 5577 16183 59
+S 562 5510 16374 59
+# sweep dir=1 len=100 spd=7 t_send=14107 n=15 peak=0 imax=14 smax=14490 smin=5443 smax_ex=61426 t_pk=559 t_stop=-1 t_done=509 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=440
+S 0 5514 16386 59
+S 0 5485 16345 59
+S 19 5443 16329 59
+S 58 5927 16411 59
+S 125 5940 17010 58
+S 142 6527 17291 58
+S 186 7170 18028 58
+S 272 8246 19628 57
+S 308 9239 20531 57
+S 377 11436 22166 56
+S 398 11436 22166 56
+S 436 12710 22954 55
+S 498 13258 23296 55
+S 518 14471 23427 55
+S 559 14490 23568 55
+# sweep dir=1 len=100 spd=7 t_send=14735 n=14 peak=1 imax=1 smax=15254 smin=7800 smax_ex=64664 t_pk=57 t_stop=-1 t_done=305 val=4e1000 t_exp=410 t_stable=442 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=540
+S 0 13300 23216 55
+S 48 15254 23840 55
+S 71 15024 23354 55
+S 109 14383 23107 55
+S 197 10678 21624 56
+S 236 9334 20858 56
+S 305 7800 19852 56
+S 316 7800 19852 56
+S 361 8030 19754 56
+S 406 7930 19772 56
+S 442 7873 19699 56
+S 482 7883 19783 56
+S 550 7931 19671 56
+S 565 7953 19677 56
+# sweep peak dir=1 chunks_max=12 spd=7 pk=440 ref=64664 pos=540 coarse=0
+15785 o -180 360 0 0 0 4e0000 - 243 ret0 dist=158 t=0 wait=63 samp=0 q=0
+16057 r 20 380 24494 69038 61 4e0000 - 149 ret0 dist=158 t=1 wait=78 samp=10 q=354
+16351 r 20 400 27128 72634 59 4e0000 - 142 ret0 dist=158 t=1 wait=46 samp=13 q=373
+16599 r 20 420 30333 77629 58 4e0000 - 184 ret0 dist=158 t=1 wait=43 samp=14 q=390
+16842 r 20 440 38040 84740 57 4e0000 - 168 ret0 dist=158 t=1 wait=54 samp=8 q=448
+17101 r 20 460 47633 93133 56 4e0000 - 150 ret0 dist=158 t=1 wait=65 samp=10 q=511
+17375 r 20 480 56746 98076 55 4e0000 - 144 ret0 dist=158 t=1 wait=52 samp=6 q=578
+17626 r 20 500 60924 98450 55 4e0000 - 140 ret0 dist=158 t=1 wait=50 samp=7 q=618
+# retrace k=1 thr_pct=90 hit=1 s=60924
+18394 i 0 500 65086 100348 56 0 - -1 ret0 dist=158 t=1 wait=0 samp=60 q=648
+# BENCH algo=B07 defocus=-150 land_s=65086 ref_s=64502 pct=100 moves=13 ms=5988 travel=880 ab=0 drift=0
+# endstop dir=1 how=flags off=500 range_mem=0,0,1,500
+19082 x 440 500 0 0 0 4e1000 err 43 ret0 dist=158 t=0 wait=88 samp=0 q=0
+19382 x -40 460 0 0 0 4e0000 - 128 ret0 dist=158 t=0 wait=47 samp=0 q=0
+19497 i 0 460 66681 102983 59 0 - -1 ret0 dist=158 t=1 wait=0 samp=106 q=647
+# BENCH_TRIAL algo=B07 defocus=400 s_def=66681
+19522 i 0 460 66805 102689 59 0 - -1 ret0 dist=158 t=1 wait=0 samp=7 q=650
+# s0=66075 g=102964 luma=59
+20158 p 100 560 35914 87046 62 4e1000 err 237 ret0 dist=158 t=1 wait=53 samp=13 q=412
+# probe dir=-1
+20580 o -40 520 0 0 0 4e0000 - 91 ret0 dist=158 t=0 wait=85 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=20580 n=14 peak=1 imax=0 smax=15918 smin=6839 smax_ex=67479 t_pk=0 t_stop=437 t_done=507 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=420
+S 0 15918 25274 59
+S 16 15584 24624 59
+S 58 15481 24587 59
+S 124 13623 23535 59
+S 146 14889 24029 59
+S 183 14313 23185 59
+S 245 14425 23391 59
+S 266 11620 21262 60
+S 308 10340 20344 61
+S 396 8340 19204 62
+S 434 7707 18679 62
+S 495 8273 19079 62
+S 516 7049 18025 63
+S 558 6839 17915 63
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=520 ref=67479 pos=420 coarse=0
+21707 o 180 600 0 0 0 4e1000 err 197 ret0 dist=158 t=0 wait=63 samp=0 q=0
+22006 r -20 580 49649 96609 64 4e0000 - 142 ret0 dist=158 t=1 wait=88 samp=10 q=513
+22271 r -20 560 64813 105495 64 4e0000 - 139 ret0 dist=158 t=1 wait=44 samp=14 q=614
+# retrace k=1 thr_pct=90 hit=1 s=64813
+22774 i 0 560 64720 105087 64 0 - -1 ret0 dist=158 t=1 wait=0 samp=62 q=615
+# BENCH algo=B07 defocus=400 land_s=64720 ref_s=64502 pct=100 moves=6 ms=3209 travel=460 ab=0 drift=0
+23685 x -440 120 0 0 0 4e1000 err 45 ret0 dist=158 t=0 wait=52 samp=0 q=0
+24024 x 40 160 0 0 0 4e0000 - 83 ret0 dist=158 t=0 wait=83 samp=0 q=0
+24134 i 0 160 20686 56514 70 0 - -1 ret0 dist=158 t=1 wait=0 samp=97 q=366
+# BENCH_TRIAL algo=B07 defocus=-400 s_def=20686
+24149 i 0 160 20742 56514 70 0 - -1 ret0 dist=158 t=1 wait=0 samp=6 q=367
+# s0=20766 g=56504 luma=70
+24828 p 100 260 28916 76056 67 4e0400 - 505 ret0 dist=158 t=1 wait=49 samp=13 q=380
+# probe dir=1
+25257 o -160 100 0 0 0 4e1000 err 203 ret0 dist=158 t=0 wait=65 samp=0 q=0
+# sweep dir=1 len=100 spd=7 t_send=25257 n=14 peak=0 imax=13 smax=5529 smin=4496 smax_ex=23438 t_pk=553 t_stop=-1 t_done=510 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=200
+S 0 4496 12028 71
+S 8 4496 12028 71
+S 53 4577 12025 70
+S 123 4715 12435 70
+S 138 4715 12435 70
+S 175 4621 12627 69
+S 265 4649 13043 69
+S 304 4798 13482 68
+S 366 4817 13535 68
+S 388 5171 14349 67
+S 425 5121 14871 67
+S 491 5374 15290 66
+S 510 5500 15416 66
+S 553 5529 15627 65
+# sweep dir=1 len=100 spd=7 t_send=25825 n=14 peak=0 imax=12 smax=13476 smin=5267 smax_ex=57127 t_pk=561 t_stop=-1 t_done=550 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=300
+S 0 5267 15271 66
+S 51 6026 15758 65
+S 71 5903 15661 65
+S 108 5790 15846 64
+S 199 6052 16618 64
+S 236 6509 17169 64
+S 300 7072 18244 63
+S 322 7660 18830 63
+S 362 8393 19701 63
+S 429 10431 21769 62
+S 441 10431 21769 62
+S 487 11431 22627 61
+S 550 13476 23626 61
+S 572 13476 23626 61
+# sweep dir=1 len=100 spd=7 t_send=26401 n=14 peak=1 imax=2 smax=16194 smin=8080 smax_ex=68649 t_pk=138 t_stop=-1 t_done=415 val=4e1000 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=6 over=94 pos=400
+S 0 13476 23626 61
+S 30 13761 23783 61
+S 135 16194 25162 61
+S 154 15194 24616 61
+S 217 16142 25730 62
+S 239 14573 24321 62
+S 279 12530 23336 63
+S 344 10685 22023 63
+S 360 9644 21702 64
+S 401 8503 20835 64
+S 470 8478 20702 65
+S 489 8478 20702 65
+S 530 8194 20668 65
+S 616 8080 20576 65
+# sweep peak dir=1 chunks_max=12 spd=7 pk=306 ref=68649 pos=400 coarse=0
+27540 o -174 226 0 0 0 4e0000 - 235 ret0 dist=158 t=0 wait=99 samp=0 q=0
+27825 r 20 246 25229 70047 67 4e0000 - 146 ret0 dist=158 t=1 wait=44 samp=17 q=360
+28139 r 20 266 27995 75031 65 4e0000 - 232 ret0 dist=158 t=1 wait=53 samp=6 q=373
+28421 r 20 286 33373 81465 65 4e0000 - 207 ret0 dist=158 t=1 wait=50 samp=7 q=409
+28694 r 20 306 44756 90568 64 4e0000 - 160 ret0 dist=158 t=1 wait=50 samp=6 q=494
+28944 r 20 326 58117 100197 64 4e0000 - 135 ret0 dist=158 t=1 wait=47 samp=6 q=580
+29194 r 20 346 66348 105206 64 4e0000 - 185 ret0 dist=158 t=1 wait=50 samp=5 q=630
+# retrace k=1 thr_pct=90 hit=1 s=66348
+29694 i 0 346 65659 105238 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=58 q=623
+# BENCH algo=B07 defocus=-400 land_s=65659 ref_s=64502 pct=101 moves=12 ms=5495 travel=854 ab=0 drift=0
+# endstop dir=1 how=flags off=346 range_mem=0,0,1,346
+30315 x 840 346 0 0 0 4e1000 err 45 ret0 dist=158 t=0 wait=53 samp=0 q=0
+30689 x -40 306 0 0 0 4e0000 - 83 ret0 dist=158 t=0 wait=43 samp=0 q=0
+30816 i 0 306 67795 104204 64 0 - -1 ret0 dist=158 t=1 wait=0 samp=121 q=650
+# BENCH_TRIAL algo=B07 defocus=800 s_def=67795
+30888 i 0 306 66921 104413 64 0 - -1 ret0 dist=158 t=1 wait=0 samp=11 q=640
+# s0=66904 g=104455 luma=64
+31441 p 100 406 35455 86601 66 4e1000 err 239 ret0 dist=158 t=1 wait=45 samp=14 q=409
+# probe dir=-1
+31754 o -40 366 0 0 0 4e0000 - 86 ret0 dist=158 t=0 wait=60 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=31754 n=14 peak=1 imax=1 smax=15973 smin=6351 smax_ex=67712 t_pk=20 t_stop=450 t_done=512 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=266
+S 0 15822 23304 64
+S 22 15973 23345 64
+S 59 15731 23177 64
+S 121 14427 22813 64
+S 142 13714 22158 64
+S 184 12946 21708 64
+S 275 12946 21708 64
+S 310 9852 20648 64
+S 369 11070 20558 64
+S 393 8068 20042 65
+S 433 7286 19710 65
+S 500 7645 19257 66
+S 522 6713 18593 66
+S 559 6351 18253 66
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=366 ref=67712 pos=266 coarse=0
+32802 o 180 446 0 0 0 4e1000 err 225 ret0 dist=158 t=0 wait=44 samp=0 q=0
+33140 r -20 426 49186 97390 66 4e0000 - 139 ret0 dist=158 t=1 wait=52 samp=52 q=505
+33442 r -20 406 65423 106159 65 4e0000 - 137 ret0 dist=158 t=1 wait=46 samp=14 q=616
+# retrace k=1 thr_pct=90 hit=1 s=65423
+33956 i 0 406 64949 106063 65 0 - -1 ret0 dist=158 t=1 wait=0 samp=121 q=612
+# BENCH algo=B07 defocus=800 land_s=64949 ref_s=64502 pct=100 moves=6 ms=3005 travel=460 ab=0 drift=0
+# endstop dir=-1 how=flags off=-974 range_mem=1,-974,1,346
+35226 x -840 -974 0 0 0 4e1000 err 126 ret0 dist=158 t=0 wait=238 samp=0 q=0
+35518 x 40 -934 0 0 0 4e0000 - 120 ret0 dist=158 t=0 wait=48 samp=0 q=0
+35605 i 0 -934 20701 58602 78 0 - -1 ret0 dist=158 t=1 wait=0 samp=78 q=353
+# BENCH_TRIAL algo=B07 defocus=-800 s_def=20701
+35627 i 0 -934 20753 58651 78 0 - -1 ret0 dist=158 t=1 wait=0 samp=13 q=353
+# s0=20687 g=58626 luma=78
+36360 p 100 -834 29704 79716 75 4e0400 - 514 ret0 dist=158 t=1 wait=60 samp=10 q=372
+# probe dir=1
+36760 o -160 -994 0 0 0 4e1000 err 255 ret0 dist=158 t=0 wait=43 samp=0 q=0
+# sweep dir=1 len=100 spd=7 t_send=36760 n=15 peak=0 imax=14 smax=5788 smin=4498 smax_ex=24536 t_pk=603 t_stop=-1 t_done=508 val=4e0400 t_exp=410 t_stable=459 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=-894
+S 0 4540 12440 80
+S 16 4498 12434 80
+S 89 4680 12848 79
+S 124 4634 13142 79
+S 140 4634 13142 79
+S 205 4773 13785 78
+S 223 4719 13769 78
+S 267 4816 13934 78
+S 329 4661 13919 78
+S 348 4893 14565 77
+S 389 5006 15002 77
+S 459 5490 15942 77
+S 473 5490 15942 77
+S 517 5491 16303 76
+S 603 5788 16464 76
+# sweep dir=1 len=100 spd=7 t_send=37368 n=14 peak=0 imax=12 smax=15474 smin=5491 smax_ex=65597 t_pk=555 t_stop=-1 t_done=506 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=100 over=0 pos=-794
+S 0 5491 16303 76
+S 26 5690 16482 77
+S 93 5829 17083 76
+S 110 6046 17228 76
+S 153 6442 18008 76
+S 213 5980 17468 76
+S 234 7063 19533 76
+S 294 6835 18725 76
+S 344 8997 21911 75
+S 359 9055 22065 75
+S 403 10207 23085 75
+S 506 10858 23950 75
+S 526 15474 27070 74
+S 592 15253 26805 75
+# sweep dir=1 len=100 spd=7 t_send=37971 n=14 peak=1 imax=5 smax=16990 smin=8173 smax_ex=72024 t_pk=186 t_stop=-1 t_done=416 val=4e1000 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=22 over=78 pos=-694
+S 0 15751 27337 75
+S 16 15751 27337 75
+S 55 15630 27146 75
+S 116 16805 27947 75
+S 138 15965 27393 75
+S 200 16990 27804 75
+S 248 14144 25566 76
+S 262 14144 25566 76
+S 305 11947 24461 77
+S 401 11947 24461 77
+S 448 10091 23351 78
+S 495 8443 22053 79
+S 515 8300 21900 79
+S 556 8173 21953 79
+# sweep peak dir=1 chunks_max=12 spd=7 pk=-772 ref=72024 pos=-694 coarse=0
+39019 o -158 -852 0 0 0 4e0000 - 293 ret0 dist=158 t=0 wait=44 samp=0 q=0
+39284 r 20 -832 28629 80725 79 4e0000 - 153 ret0 dist=158 t=1 wait=46 samp=5 q=354
+39534 r 20 -812 34652 87688 77 4e0000 - 184 ret0 dist=158 t=1 wait=50 samp=6 q=395
+39784 r 20 -792 44147 96343 76 4e0000 - 136 ret0 dist=158 t=1 wait=50 samp=6 q=458
+40035 r 20 -772 61337 106511 75 4e0000 - 138 ret0 dist=158 t=1 wait=50 samp=6 q=575
+40284 r 20 -752 70192 113132 74 4e0000 - 140 ret0 dist=158 t=1 wait=48 samp=6 q=620
+# retrace k=1 thr_pct=90 hit=1 s=70192
+40784 i 0 -752 70056 113032 74 0 - -1 ret0 dist=158 t=1 wait=0 samp=107 q=619
+# BENCH algo=B07 defocus=-800 land_s=70056 ref_s=64502 pct=108 moves=11 ms=5053 travel=818 ab=0 drift=0
+40850 i 0 -752 69807 112987 74 0 - -1 ret0 dist=158 t=1 wait=0 samp=6 q=617
+# s0=69849 g=112991 luma=74
+41473 p 100 -652 34631 90961 77 4e1000 err 340 ret0 dist=158 t=1 wait=42 samp=50 q=380
+# probe dir=-1
+41869 o -40 -692 0 0 0 4e0000 - 120 ret0 dist=158 t=0 wait=72 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=41869 n=14 peak=1 imax=3 smax=16901 smin=6506 smax_ex=71646 t_pk=115 t_stop=371 t_done=508 val=4e0400 t_exp=410 t_stable=-1 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=-792
+S 0 16703 27165 75
+S 24 16792 27144 75
+S 91 16106 27370 74
+S 107 16901 27921 74
+S 152 16552 27804 74
+S 213 14781 26831 74
+S 237 14174 26216 74
+S 274 12487 24757 75
+S 343 9113 22163 76
+S 357 9113 22163 76
+S 402 7949 21217 76
+S 486 6742 19256 77
+S 525 6514 18474 77
+S 594 6506 18408 77
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=-692 ref=71646 pos=-792 coarse=0
+42972 o 180 -612 0 0 0 4e1000 err 194 ret0 dist=158 t=0 wait=77 samp=0 q=0
+43244 r -20 -632 49365 102235 76 4e0000 - 147 ret0 dist=158 t=1 wait=67 samp=8 q=482
+43537 r -20 -652 68547 113329 75 4e0000 - 144 ret0 dist=158 t=1 wait=46 samp=12 q=604
+# retrace k=1 thr_pct=90 hit=1 s=68547
+44104 i 0 -652 69566 112352 75 0 - -1 ret0 dist=158 t=1 wait=0 samp=123 q=619
+# BENCH_REF algo=B14 ref_s=69566 prev_ref_s=64502
+44597 x 190 -462 0 0 0 4e1000 err 125 ret0 dist=158 t=0 wait=62 samp=0 q=0
+45035 x -40 -502 0 0 0 4e0000 - 129 ret0 dist=158 t=0 wait=53 samp=0 q=0
+45231 i 0 -502 68461 113294 76 0 - -1 ret0 dist=158 t=1 wait=0 samp=179 q=604
+# BENCH_TRIAL algo=B14 defocus=150 s_def=68461
+45246 i 0 -502 68141 113225 76 0 - -1 ret0 dist=158 t=1 wait=0 samp=6 q=601
+# s0=68113 g=113251 luma=76
+45894 p 100 -402 35345 91403 77 4e1000 err 247 ret0 dist=158 t=1 wait=86 samp=7 q=386
+# probe dir=-1
+46285 o -40 -442 0 0 0 4e0000 - 85 ret0 dist=158 t=0 wait=54 samp=0 q=0
+# sweep dir=-1 len=200 spd=14 t_send=46285 n=12 peak=1 imax=1 smax=15279 smin=4793 smax_ex=64770 t_pk=35 t_stop=211 t_done=439 val=4e0000 t_exp=400 t_stable=-1 mspp_x10=14 moved=93 pos_pk=0 over=93 pos=-535
+S 0 15236 26946 73
+S 68 15279 26287 71
+S 104 10514 22948 72
+S 124 11005 23333 72
+S 188 8310 20210 73
+S 204 6484 18586 74
+S 248 5689 17497 75
+S 319 4934 14424 77
+S 331 4934 14424 77
+S 375 4793 13589 78
+S 439 4919 13479 78
+S 454 4919 13479 78
+# sweep peak dir=-1 chunks_max=6 spd=14 pk=-442 ref=64770 pos=-535 coarse=0
+47173 o 173 -362 0 0 0 4e0000 - 235 ret0 dist=158 t=0 wait=54 samp=0 q=0
+47485 r -20 -382 52115 100393 71 4e0000 - 198 ret0 dist=158 t=1 wait=52 samp=6 q=519
+47742 r -20 -402 37005 89593 72 4e0000 - 146 ret0 dist=158 t=1 wait=52 samp=10 q=413
+# retrace k=1 thr_pct=90 hit=0 s=52115
+48106 o 120 -282 0 0 0 4e1000 err 160 ret0 dist=158 t=0 wait=65 samp=0 q=0
+48394 r -20 -302 49430 99104 71 4e0000 - 142 ret0 dist=158 t=1 wait=85 samp=7 q=498
+48727 r -20 -322 68222 106508 69 4e0000 - 142 ret0 dist=158 t=1 wait=48 samp=63 q=640
+# retrace k=2 thr_pct=80 hit=1 s=68222
+49238 i 0 -322 69429 106939 68 0 - -1 ret0 dist=158 t=1 wait=0 samp=90 q=649
+# BENCH algo=B14 defocus=150 land_s=69429 ref_s=69566 pct=99 moves=9 ms=3910 travel=713 ab=0 drift=0
+49705 x -190 -512 0 0 0 4e0000 - 296 ret0 dist=158 t=0 wait=54 samp=0 q=0
+50040 x 40 -472 0 0 0 4e0000 - 84 ret0 dist=158 t=0 wait=74 samp=0 q=0
+50151 i 0 -472 22619 64224 73 0 - -1 ret0 dist=158 t=1 wait=0 samp=96 q=352
+# BENCH_TRIAL algo=B14 defocus=-150 s_def=22619
+50166 i 0 -472 22779 64253 73 0 - -1 ret0 dist=158 t=1 wait=0 samp=5 q=354
+# s0=22689 g=64215 luma=73
+50846 p 100 -372 48222 96568 69 4e0400 - 505 ret0 dist=158 t=1 wait=49 samp=12 q=499
+# probe dir=1
+51329 o -160 -532 0 0 0 4e0000 - 225 ret0 dist=158 t=0 wait=56 samp=0 q=0
+# sweep dir=1 len=200 spd=14 t_send=51329 n=13 peak=0 imax=11 smax=14858 smin=4588 smax_ex=62986 t_pk=507 t_stop=-1 t_done=389 val=4e0000 t_exp=400 t_stable=443 mspp_x10=14 moved=200 pos_pk=200 over=0 pos=-332
+S 0 4680 12902 74
+S 63 4734 13190 74
+S 80 4588 13542 73
+S 125 5065 14635 72
+S 209 6158 17386 70
+S 247 7227 18341 69
+S 318 11858 21396 67
+S 331 11858 21396 67
+S 374 14030 23194 67
+S 443 14802 24484 66
+S 458 14802 24484 66
+S 501 14858 24390 66
+S 568 14830 24240 66
+# sweep dir=1 len=200 spd=14 t_send=51901 n=5 peak=1 imax=0 smax=14830 smin=8066 smax_ex=62867 t_pk=0 t_stop=-1 t_done=140 val=4e1000 t_exp=400 t_stable=-1 mspp_x10=14 moved=200 pos_pk=0 over=200 pos=-132
+S 0 14830 24240 66
+S 16 14830 24240 66
+S 55 14617 24057 67
+S 140 8317 20645 69
+S 175 8066 20766 69
+# sweep peak dir=1 chunks_max=6 spd=14 pk=-332 ref=62986 pos=-132 coarse=0
+52705 o -280 -412 0 0 0 4e1000 err 351 ret0 dist=158 t=0 wait=54 samp=0 q=0
+53016 r 20 -392 20254 55002 77 4e0000 - 191 ret0 dist=158 t=1 wait=45 samp=59 q=368
+53289 r 20 -372 20681 57631 77 4e0000 - 142 ret0 dist=158 t=1 wait=69 samp=9 q=358
+53574 r 20 -352 21423 60837 77 4e0000 - 140 ret0 dist=158 t=1 wait=75 samp=11 q=352
+53832 r 20 -332 22312 63698 76 4e0000 - 193 ret0 dist=158 t=1 wait=45 samp=9 q=350
+54155 r 20 -312 23452 67460 75 4e0000 - 206 ret0 dist=158 t=1 wait=56 samp=6 q=347
+54472 r 20 -292 25748 72044 74 4e0000 - 149 ret0 dist=158 t=1 wait=44 samp=14 q=357
+54791 r 20 -272 28698 78216 73 4e0000 - 222 ret0 dist=158 t=1 wait=81 samp=9 q=366
+55035 r 20 -252 33787 84681 72 4e0000 - 140 ret0 dist=158 t=1 wait=53 samp=6 q=398
+55284 r 20 -232 46511 94387 71 4e0000 - 142 ret0 dist=158 t=1 wait=47 samp=7 q=492
+55546 r 20 -212 60095 103619 70 4e0000 - 148 ret0 dist=158 t=1 wait=70 samp=6 q=579
+# retrace k=1 thr_pct=90 hit=1 s=60095
+56032 i 0 -212 59270 103034 71 0 - -1 ret0 dist=158 t=1 wait=0 samp=74 q=575
+# BENCH algo=B14 defocus=-150 land_s=59270 ref_s=69566 pct=85 moves=15 ms=5794 travel=1140 ab=0 drift=0
+# endstop dir=1 how=flags off=-212 range_mem=1,-974,1,-212
+56692 x 440 -212 0 0 0 4e1000 err 71 ret0 dist=158 t=0 wait=44 samp=0 q=0
+57024 x -40 -252 0 0 0 4e0000 - 86 ret0 dist=158 t=0 wait=63 samp=0 q=0
+57101 i 0 -252 69334 106248 68 0 - -1 ret0 dist=158 t=1 wait=0 samp=71 q=652
+# BENCH_TRIAL algo=B14 defocus=400 s_def=69334
+57160 i 0 -252 68415 107283 67 0 - -1 ret0 dist=158 t=1 wait=0 samp=53 q=637
+# s0=67529 g=107631 luma=67
+57791 p 100 -152 34335 88311 69 4e1000 err 255 ret0 dist=158 t=1 wait=84 samp=9 q=388
+# probe dir=-1
+58085 o -40 -192 0 0 0 4e0000 - 106 ret0 dist=158 t=0 wait=55 samp=0 q=0
+# sweep dir=-1 len=200 spd=14 t_send=58085 n=11 peak=1 imax=1 smax=16067 smin=4747 smax_ex=68111 t_pk=50 t_stop=211 t_done=438 val=4e0000 t_exp=400 t_stable=-1 mspp_x10=14 moved=93 pos_pk=0 over=93 pos=-285
+S 0 16013 26469 66
+S 97 16067 26391 66
+S 121 10691 23103 67
+S 188 8656 19438 69
+S 204 6575 17391 70
+S 248 5709 16633 71
+S 308 6623 16933 70
+S 331 4875 14169 73
+S 372 4747 13123 74
+S 438 4846 13322 74
+S 454 4778 13004 74
+# sweep peak dir=-1 chunks_max=6 spd=14 pk=-192 ref=68111 pos=-285 coarse=0
+59025 o 173 -112 0 0 0 4e0000 - 236 ret0 dist=158 t=0 wait=64 samp=0 q=0
+59287 r -20 -132 51974 97024 69 4e0000 - 148 ret0 dist=158 t=1 wait=72 samp=6 q=535
+59537 r -20 -152 37517 87567 70 4e0000 - 147 ret0 dist=158 t=1 wait=53 samp=6 q=428
+# retrace k=1 thr_pct=90 hit=0 s=51974
+59898 o 120 -32 0 0 0 4e1000 err 165 ret0 dist=158 t=0 wait=57 samp=0 q=0
+60196 r -20 -52 47034 98266 68 4e0000 - 145 ret0 dist=158 t=1 wait=82 samp=22 q=478
+60461 r -20 -72 66140 106424 67 4e0000 - 140 ret0 dist=158 t=1 wait=45 samp=13 q=621
+# retrace k=2 thr_pct=80 hit=1 s=66140
+60965 i 0 -72 66935 107267 67 0 - -1 ret0 dist=158 t=1 wait=0 samp=63 q=624
+# BENCH algo=B14 defocus=400 land_s=66935 ref_s=69566 pct=96 moves=9 ms=3740 travel=713 ab=0 drift=0
+61872 x -440 -512 0 0 0 4e1000 err 48 ret0 dist=158 t=0 wait=51 samp=0 q=0
+62255 x 40 -472 0 0 0 4e0000 - 88 ret0 dist=158 t=0 wait=52 samp=0 q=0
+62381 i 0 -472 20303 56719 76 0 - -1 ret0 dist=158 t=1 wait=0 samp=116 q=357
+# BENCH_TRIAL algo=B14 defocus=-400 s_def=20303
+62447 i 0 -472 20360 56796 76 0 - -1 ret0 dist=158 t=1 wait=0 samp=53 q=358
+# s0=20368 g=56732 luma=76
+63208 p 100 -372 28331 77667 72 4e0400 - 574 ret0 dist=158 t=1 wait=51 samp=7 q=364
+# probe dir=1
+63702 o -160 -532 0 0 0 4e1000 err 235 ret0 dist=158 t=0 wait=96 samp=0 q=0
+# sweep dir=1 len=200 spd=14 t_send=63702 n=14 peak=0 imax=11 smax=13822 smin=4422 smax_ex=58594 t_pk=507 t_stop=-1 t_done=386 val=4e0000 t_exp=400 t_stable=425 mspp_x10=14 moved=200 pos_pk=200 over=0 pos=-332
+S 0 4444 12114 77
+S 8 4444 12114 77
+S 54 4427 12417 76
+S 112 4422 12274 77
+S 134 4844 13794 75
+S 174 5162 14670 74
+S 242 5979 17307 72
+S 264 6030 17874 72
+S 301 7273 19551 70
+S 386 13204 23860 68
+S 425 13672 24100 68
+S 499 13822 24188 68
+S 515 13822 24188 68
+S 555 13528 24106 68
+# sweep dir=1 len=200 spd=14 t_send=64261 n=8 peak=1 imax=3 smax=15155 smin=8364 smax_ex=64245 t_pk=61 t_stop=165 t_done=176 val=4e1000 t_exp=400 t_stable=-1 mspp_x10=14 moved=60 pos_pk=0 over=60 pos=-272
+S 0 13528 24106 68
+S 0 13804 24338 68
+S 36 14287 24467 68
+S 76 15155 25401 69
+S 147 8732 21384 71
+S 159 8732 21384 71
+S 205 8364 20964 71
+S 302 8364 20964 71
+# sweep peak dir=1 chunks_max=6 spd=14 pk=-332 ref=64245 pos=-272 coarse=0
+65005 o -140 -412 0 0 0 4e0000 - 213 ret0 dist=158 t=0 wait=52 samp=0 q=0
+65261 r 20 -392 32136 82664 72 4e0000 - 190 ret0 dist=158 t=1 wait=47 samp=6 q=388
+65512 r 20 -372 42332 90876 70 4e0000 - 185 ret0 dist=158 t=1 wait=46 samp=6 q=465
+65821 r 20 -352 54911 100909 69 4e0000 - 185 ret0 dist=158 t=1 wait=50 samp=61 q=544
+66201 r 20 -332 66527 105721 68 4e0000 - 137 ret0 dist=158 t=1 wait=128 samp=7 q=629
+# retrace k=1 thr_pct=90 hit=1 s=66527
+66744 i 0 -332 65621 106570 68 0 - -1 ret0 dist=158 t=1 wait=0 samp=117 q=615
+# BENCH algo=B14 defocus=-400 land_s=65621 ref_s=69566 pct=94 moves=9 ms=4235 travel=880 ab=0 drift=0
+# endstop dir=1 how=flags off=-332 range_mem=1,-974,1,-332
+67366 x 840 -332 0 0 0 4e1000 err 65 ret0 dist=158 t=0 wait=62 samp=0 q=0
+67736 x -40 -372 0 0 0 4e0000 - 123 ret0 dist=158 t=0 wait=84 samp=0 q=0
+67804 i 0 -372 70425 105916 69 0 - -1 ret0 dist=158 t=1 wait=0 samp=61 q=664
+# BENCH_TRIAL algo=B14 defocus=800 s_def=70425
+67871 i 0 -372 70477 105461 69 0 - -1 ret0 dist=158 t=1 wait=0 samp=54 q=668
+# s0=70572 g=105474 luma=69
+68500 p 100 -272 34381 86903 68 4e1000 err 262 ret0 dist=158 t=1 wait=87 samp=7 q=395
+# probe dir=-1
+68791 o -40 -312 0 0 0 4e0000 - 153 ret0 dist=158 t=0 wait=49 samp=0 q=0
+# sweep dir=-1 len=200 spd=14 t_send=68792 n=12 peak=1 imax=0 smax=14641 smin=4483 smax_ex=62066 t_pk=0 t_stop=347 t_done=386 val=4e0000 t_exp=400 t_stable=-1 mspp_x10=14 moved=190 pos_pk=0 over=190 pos=-502
+S 0 14641 23747 64
+S 6 14641 23747 64
+S 72 12889 22241 63
+S 89 13180 21874 63
+S 132 10201 19975 63
+S 194 12091 20419 63
+S 216 6281 17903 66
+S 256 5524 15988 67
+S 347 5524 15988 67
+S 382 4705 13229 70
+S 450 4483 13129 70
+S 465 4483 13129 70
+# sweep peak dir=-1 chunks_max=6 spd=14 pk=-312 ref=62066 pos=-502 coarse=0
+69866 o 270 -232 0 0 0 4e1000 err 307 ret0 dist=158 t=0 wait=65 samp=0 q=0
+70178 r -20 -252 49497 97387 66 4e0000 - 142 ret0 dist=158 t=1 wait=103 samp=14 q=508
+70431 r -20 -272 65521 106283 66 4e0000 - 139 ret0 dist=158 t=1 wait=47 samp=13 q=616
+# retrace k=1 thr_pct=90 hit=1 s=65521
+70931 i 0 -272 66649 105893 66 0 - -1 ret0 dist=158 t=1 wait=0 samp=60 q=629
+# BENCH algo=B14 defocus=800 land_s=66649 ref_s=69566 pct=95 moves=6 ms=3012 travel=650 ab=0 drift=0
+# endstop dir=-1 how=flags off=-1652 range_mem=1,-1652,1,-332
+72041 x -840 -1652 0 0 0 4e1000 err 40 ret0 dist=158 t=0 wait=84 samp=0 q=0
+72447 x 40 -1612 0 0 0 4e0000 - 223 ret0 dist=158 t=0 wait=69 samp=0 q=0
+72515 i 0 -1612 20106 55757 71 0 - -1 ret0 dist=158 t=1 wait=0 samp=58 q=360
+# BENCH_TRIAL algo=B14 defocus=-800 s_def=20106
+72588 i 0 -1612 19998 55738 71 0 - -1 ret0 dist=158 t=1 wait=0 samp=8 q=358
+# s0=19937 g=55743 luma=71
+73340 p 100 -1512 27733 76017 67 4e0400 - 504 ret0 dist=158 t=1 wait=66 samp=8 q=364
+# probe dir=1
+73802 o -160 -1672 0 0 0 4e1000 err 213 ret0 dist=158 t=0 wait=50 samp=0 q=0
+# sweep dir=1 len=200 spd=14 t_send=73802 n=13 peak=0 imax=10 smax=12267 smin=4545 smax_ex=52002 t_pk=479 t_stop=-1 t_done=439 val=4e0000 t_exp=400 t_stable=460 mspp_x10=14 moved=200 pos_pk=200 over=0 pos=-1472
+S 0 4545 11885 71
+S 65 4631 12389 70
+S 82 4626 12832 70
+S 125 5018 13352 69
+S 185 4638 13118 70
+S 207 5387 15571 67
+S 267 4992 14276 68
+S 348 5990 17056 66
+S 374 12117 20761 62
+S 439 10004 19314 63
+S 460 12267 21713 62
+S 504 12139 21999 62
+S 564 12236 22902 61
+# sweep dir=1 len=200 spd=14 t_send=74372 n=14 peak=1 imax=2 smax=13533 smin=7912 smax_ex=57369 t_pk=56 t_stop=-1 t_done=178 val=4e1000 t_exp=400 t_stable=434 mspp_x10=14 moved=200 pos_pk=0 over=200 pos=-1272
+S 0 12393 23051 62
+S 14 12393 23051 62
+S 54 13533 23905 61
+S 115 12554 23102 62
+S 137 10127 21569 62
+S 178 8078 19606 63
+S 268 8103 19745 63
+S 304 8038 19768 63
+S 365 8015 19731 63
+S 390 8063 19797 62
+S 434 7935 19865 63
+S 494 7955 20041 62
+S 514 7993 19843 62
+S 554 7912 19854 62
+# sweep peak dir=1 chunks_max=6 spd=14 pk=-1472 ref=57369 pos=-1272 coarse=0
+75495 o -280 -1552 0 0 0 4e1000 err 349 ret0 dist=158 t=0 wait=70 samp=0 q=0
+75755 r 20 -1532 19347 52341 69 4e0000 - 160 ret0 dist=158 t=1 wait=70 samp=10 q=369
+76004 r 20 -1512 20233 54987 68 4e0000 - 150 ret0 dist=158 t=1 wait=62 samp=7 q=367
+76257 r 20 -1492 21076 58020 68 4e0000 - 149 ret0 dist=158 t=1 wait=62 samp=10 q=363
+76555 r 20 -1472 22333 61175 68 4e0000 - 147 ret0 dist=158 t=1 wait=46 samp=9 q=365
+76809 r 20 -1452 23151 65305 67 4e0000 - 187 ret0 dist=158 t=1 wait=49 samp=11 q=354
+77056 r 20 -1432 24663 69789 66 4e0000 - 182 ret0 dist=158 t=1 wait=49 samp=10 q=353
+77306 r 20 -1412 28364 74772 65 4e0000 - 188 ret0 dist=158 t=1 wait=46 samp=10 q=379
+77556 r 20 -1392 32012 81054 64 4e0000 - 191 ret0 dist=158 t=1 wait=42 samp=11 q=394
+77805 r 20 -1372 43005 89835 63 4e0000 - 186 ret0 dist=158 t=1 wait=47 samp=9 q=478
+78055 r 20 -1352 55800 98424 62 4e0000 - 189 ret0 dist=158 t=1 wait=45 samp=9 q=566
+# retrace k=1 thr_pct=90 hit=1 s=55800
+78558 i 0 -1352 55730 98665 62 0 - -1 ret0 dist=158 t=1 wait=0 samp=124 q=564
+# BENCH algo=B14 defocus=-800 land_s=55730 ref_s=69566 pct=80 moves=15 ms=5910 travel=1140 ab=0 drift=0
+78627 i 0 -1352 55671 98781 62 0 - -1 ret0 dist=158 t=1 wait=0 samp=6 q=563
+# s0=55730 g=98769 luma=62
+79270 p 100 -1252 35057 85299 65 4e1000 err 455 ret0 dist=158 t=1 wait=89 samp=13 q=410
+# probe dir=-1
+79558 o -40 -1292 0 0 0 4e0000 - 97 ret0 dist=158 t=0 wait=42 samp=0 q=0
+# sweep dir=-1 len=100 spd=7 t_send=79559 n=14 peak=1 imax=0 smax=15215 smin=6775 smax_ex=64499 t_pk=0 t_stop=391 t_done=597 val=4e0000 t_exp=410 t_stable=498 mspp_x10=29 moved=100 pos_pk=0 over=100 pos=-1392
+S 0 15215 23623 61
+S 84 14821 23477 61
+S 121 14449 23341 61
+S 189 12170 21968 62
+S 206 12745 22469 62
+S 249 11597 21571 62
+S 309 12389 21981 62
+S 330 9040 19534 63
+S 371 7879 18707 63
+S 437 8433 18743 63
+S 455 7206 17626 64
+S 498 6852 17098 64
+S 597 6852 17098 64
+S 642 6775 16821 64
+# sweep peak dir=-1 chunks_max=12 spd=7 pk=-1292 ref=64499 pos=-1392 coarse=0
+80648 o 180 -1212 0 0 0 4e1000 err 202 ret0 dist=158 t=0 wait=84 samp=0 q=0
+80938 r -20 -1232 49195 93361 62 4e0000 - 142 ret0 dist=158 t=1 wait=52 samp=6 q=526
+81259 r -20 -1252 67276 100850 61 4e0000 - 207 ret0 dist=158 t=1 wait=42 samp=55 q=667
+# retrace k=1 thr_pct=90 hit=1 s=67276
+81750 i 0 -1252 67143 101590 62 0 - -1 ret0 dist=158 t=1 wait=0 samp=76 q=660
+# BENCH_REF algo=B1F ref_s=67143 prev_ref_s=69566
+82248 x 190 -1062 0 0 0 4e1000 err 123 ret0 dist=158 t=0 wait=76 samp=0 q=0
+82688 x -40 -1102 0 0 0 4e0000 - 127 ret0 dist=158 t=0 wait=56 samp=0 q=0
+82811 i 0 -1102 63326 105840 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=61 q=598
+# BENCH_TRIAL algo=B1F defocus=150 s_def=63326
+82879 i 0 -1102 62264 105072 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=54 q=592
+# s0=63031 g=105598 luma=63
+83442 p 100 -1002 35923 86679 65 4e1000 err 245 ret0 dist=158 t=1 wait=45 samp=7 q=414
+# probe dir=-1
+83812 o -40 -1042 0 0 0 4e0000 - 91 ret0 dist=158 t=0 wait=50 samp=0 q=0
+# sweep dir=-1 len=300 spd=1f t_send=83812 n=9 peak=1 imax=0 smax=15017 smin=4510 smax_ex=63660 t_pk=0 t_stop=204 t_done=343 val=4e1000 t_exp=420 t_stable=-1 mspp_x10=10 moved=124 pos_pk=0 over=124 pos=-1166
+S 0 15017 24965 63
+S 62 11470 22322 63
+S 84 12587 22821 63
+S 121 7568 19692 65
+S 193 4983 14357 68
+S 204 4983 14357 68
+S 249 4652 13276 70
+S 343 4652 13276 70
+S 371 4510 11880 72
+# sweep peak dir=-1 chunks_max=4 spd=1f pk=-1042 ref=63660 pos=-1166 coarse=0
+84688 o 204 -962 0 0 0 4e0000 - 318 ret0 dist=158 t=0 wait=57 samp=0 q=0
+84941 r -20 -982 46424 94958 66 4e0000 - 188 ret0 dist=158 t=1 wait=45 samp=13 q=488
+85276 r -20 -1002 35931 85687 68 4e0000 - 137 ret0 dist=158 t=1 wait=95 samp=6 q=419
+# retrace k=1 thr_pct=90 hit=0 s=46424
+85691 o 120 -882 0 0 0 4e1000 err 162 ret0 dist=158 t=0 wait=51 samp=0 q=0
+85941 r -20 -902 47843 98399 68 4e0000 - 185 ret0 dist=158 t=1 wait=46 samp=9 q=486
+86273 r -20 -922 65686 108136 67 4e0000 - 139 ret0 dist=158 t=1 wait=92 samp=9 q=607
+# retrace k=2 thr_pct=80 hit=1 s=65686
+86885 i 0 -922 68409 104723 68 0 - -1 ret0 dist=158 t=1 wait=0 samp=180 q=653
+# BENCH algo=B1F defocus=150 land_s=68409 ref_s=67143 pct=101 moves=9 ms=3880 travel=844 ab=0 drift=0
+87431 x -190 -1112 0 0 0 4e0000 - 264 ret0 dist=158 t=0 wait=52 samp=0 q=0
+87817 x 40 -1072 0 0 0 4e0000 - 89 ret0 dist=158 t=0 wait=50 samp=0 q=0
+87941 i 0 -1072 22530 65144 73 0 - -1 ret0 dist=158 t=1 wait=0 samp=60 q=345
+# BENCH_TRIAL algo=B1F defocus=-150 s_def=22530
+88012 i 0 -1072 22674 65018 73 0 - -1 ret0 dist=158 t=1 wait=0 samp=56 q=348
+# s0=22568 g=65059 luma=73
+88771 p 100 -972 48864 94800 68 4e0400 - 532 ret0 dist=158 t=1 wait=92 samp=9 q=515
+# probe dir=1
+89258 o -160 -1132 0 0 0 4e0000 - 236 ret0 dist=158 t=0 wait=88 samp=0 q=0
+# sweep dir=1 len=300 spd=1f t_send=89258 n=14 peak=1 imax=7 smax=14266 smin=4425 smax_ex=60476 t_pk=259 t_stop=-1 t_done=409 val=4e1000 t_exp=420 t_stable=435 mspp_x10=10 moved=300 pos_pk=139 over=161 pos=-832
+S 0 4425 13177 74
+S 11 4425 13177 74
+S 55 4685 13473 73
+S 121 6115 16937 71
+S 138 5521 16905 70
+S 178 7641 18375 68
+S 245 11238 21806 66
+S 261 14266 24428 65
+S 305 8870 21362 67
+S 409 8807 20973 67
+S 435 7787 20309 67
+S 495 7882 20288 67
+S 519 7928 20344 67
+S 555 8026 20368 67
+# sweep peak dir=1 chunks_max=4 spd=1f pk=-993 ref=60476 pos=-832 coarse=0
+90315 o -241 -1073 0 0 0 4e0000 - 344 ret0 dist=158 t=0 wait=51 samp=0 q=0
+90571 r 20 -1053 20551 58997 71 4e0000 - 140 ret0 dist=158 t=1 wait=47 samp=5 q=348
+90821 r 20 -1033 21510 61782 70 4e0000 - 186 ret0 dist=158 t=1 wait=45 samp=6 q=348
+91137 r 20 -1013 22403 65091 69 4e0000 - 191 ret0 dist=158 t=1 wait=57 samp=54 q=344
+91402 r 20 -993 24528 68852 68 4e0000 - 142 ret0 dist=158 t=1 wait=68 samp=10 q=356
+91684 r 20 -973 27255 74105 67 4e0000 - 150 ret0 dist=158 t=1 wait=83 samp=10 q=367
+92007 r 20 -953 30578 80156 66 4e0000 - 147 ret0 dist=158 t=1 wait=45 samp=62 q=381
+92375 r 20 -933 39512 88596 66 4e0000 - 171 ret0 dist=158 t=1 wait=178 samp=12 q=445
+92675 r 20 -913 52294 97472 65 4e0000 - 171 ret0 dist=158 t=1 wait=63 samp=50 q=536
+92937 r 20 -893 63893 105067 64 4e0000 - 143 ret0 dist=158 t=1 wait=66 samp=6 q=608
+# retrace k=1 thr_pct=90 hit=1 s=63893
+93429 i 0 -893 66515 104114 63 0 - -1 ret0 dist=158 t=1 wait=0 samp=70 q=638
+# BENCH algo=B1F defocus=-150 land_s=66515 ref_s=67143 pct=99 moves=13 ms=5404 travel=981 ab=0 drift=0
+# endstop dir=1 how=flags off=-893 range_mem=1,-1652,1,-893
+94085 x 440 -893 0 0 0 4e1000 err 68 ret0 dist=158 t=0 wait=83 samp=0 q=0
+94425 x -40 -933 0 0 0 4e0000 - 90 ret0 dist=158 t=0 wait=60 samp=0 q=0
+94547 i 0 -933 71531 104275 64 0 - -1 ret0 dist=158 t=1 wait=0 samp=115 q=685
+# BENCH_TRIAL algo=B1F defocus=400 s_def=71531
+94560 i 0 -933 71769 104715 64 0 - -1 ret0 dist=158 t=1 wait=0 samp=6 q=685
+# s0=71746 g=104619 luma=64
+95186 p 100 -833 36625 86399 66 4e1000 err 252 ret0 dist=158 t=1 wait=90 samp=6 q=423
+# probe dir=-1
+95488 o -40 -873 0 0 0 4e0000 - 112 ret0 dist=158 t=0 wait=51 samp=0 q=0
+# sweep dir=-1 len=300 spd=1f t_send=95489 n=8 peak=1 imax=0 smax=15574 smin=4637 smax_ex=66021 t_pk=0 t_stop=249 t_done=307 val=4e1000 t_exp=420 t_stable=-1 mspp_x10=10 moved=169 pos_pk=0 over=169 pos=-1042
+S 0 15574 24948 64
+S 82 12723 24009 64
+S 119 7850 19962 65
+S 183 12003 21015 65
+S 208 5170 15102 69
+S 245 4707 13667 71
+S 307 5120 14214 70
+S 328 4637 12115 73
+# sweep peak dir=-1 chunks_max=4 spd=1f pk=-873 ref=66021 pos=-1042 coarse=0
+96355 o 249 -793 0 0 0 4e0000 - 355 ret0 dist=158 t=0 wait=54 samp=0 q=0
+96686 r -20 -813 67981 107461 66 4e0000 - 145 ret0 dist=158 t=1 wait=52 samp=6 q=632
+# retrace k=1 thr_pct=90 hit=1 s=67981
+97183 i 0 -813 67604 107604 66 0 - -1 ret0 dist=158 t=1 wait=0 samp=90 q=628
+# BENCH algo=B1F defocus=400 land_s=67604 ref_s=67143 pct=100 moves=5 ms=2527 travel=709 ab=0 drift=0
+98022 x -440 -1253 0 0 0 4e1000 err 51 ret0 dist=158 t=0 wait=49 samp=0 q=0
+98345 x 40 -1213 0 0 0 4e0000 - 92 ret0 dist=158 t=0 wait=63 samp=0 q=0
+98473 i 0 -1213 20839 57424 72 0 - -1 ret0 dist=158 t=1 wait=0 samp=121 q=362
+# BENCH_TRIAL algo=B1F defocus=-400 s_def=20839
+98489 i 0 -1213 20807 57211 72 0 - -1 ret0 dist=158 t=1 wait=0 samp=9 q=363
+# s0=20690 g=57258 luma=72
+99228 p 100 -1113 28599 76459 67 4e0400 - 509 ret0 dist=158 t=1 wait=73 samp=6 q=374
+# probe dir=1
+99716 o -160 -1273 0 0 0 4e1000 err 243 ret0 dist=158 t=0 wait=82 samp=0 q=0
+# sweep dir=1 len=300 spd=1f t_send=99716 n=14 peak=1 imax=7 smax=14103 smin=4598 smax_ex=59785 t_pk=289 t_stop=-1 t_done=412 val=4e1000 t_exp=420 t_stable=439 mspp_x10=10 moved=300 pos_pk=169 over=131 pos=-973
+S 0 4598 12178 73
+S 20 4676 12154 73
+S 59 4642 12796 72
+S 126 5443 14433 70
+S 149 5483 15635 69
+S 186 6607 17037 67
+S 247 6184 16676 68
+S 269 14103 25281 65
+S 310 14096 24454 65
+S 412 14033 24373 65
+S 439 8372 20962 66
+S 498 8454 20854 66
+S 519 8375 20659 66
+S 560 8230 20668 66
+# sweep peak dir=1 chunks_max=4 spd=1f pk=-1104 ref=59785 pos=-973 coarse=0
+100844 o -211 -1184 0 0 0 4e0000 - 324 ret0 dist=158 t=0 wait=48 samp=0 q=0
+101145 r 20 -1164 22801 64983 73 4e0000 - 144 ret0 dist=158 t=1 wait=88 samp=11 q=350
+101413 r 20 -1144 23787 68821 72 4e0000 - 149 ret0 dist=158 t=1 wait=46 samp=6 q=345
+101729 r 20 -1124 25842 73456 70 4e0000 - 215 ret0 dist=158 t=1 wait=83 samp=6 q=351
+101994 r 20 -1104 29289 78335 69 4e0000 - 139 ret0 dist=158 t=1 wait=70 samp=5 q=373
+102298 r 20 -1084 34205 85155 68 4e0000 - 138 ret0 dist=158 t=1 wait=53 samp=13 q=401
+102747 r 20 -1064 46008 93342 66 4e0000 - 175 ret0 dist=158 t=1 wait=55 samp=200 q=492
+103039 r 20 -1044 58454 102244 65 4e0000 - 142 ret0 dist=158 t=1 wait=47 samp=13 q=571
+# retrace k=1 thr_pct=90 hit=1 s=58454
+103526 i 0 -1044 57546 102283 65 0 - -1 ret0 dist=158 t=1 wait=0 samp=102 q=562
+# BENCH algo=B1F defocus=-400 land_s=57546 ref_s=67143 pct=85 moves=11 ms=4938 travel=911 ab=0 drift=0
+# endstop dir=1 how=flags off=-1044 range_mem=1,-1652,1,-1044
+104152 x 840 -1044 0 0 0 4e1000 err 47 ret0 dist=158 t=0 wait=49 samp=0 q=0
+104478 x -40 -1084 0 0 0 4e0000 - 94 ret0 dist=158 t=0 wait=67 samp=0 q=0
+104604 i 0 -1084 66039 105065 66 0 - -1 ret0 dist=158 t=1 wait=0 samp=119 q=628
+# BENCH_TRIAL algo=B1F defocus=800 s_def=66039
+104620 i 0 -1084 65700 105228 65 0 - -1 ret0 dist=158 t=1 wait=0 samp=9 q=624
+# s0=66025 g=105391 luma=65
+105272 p 100 -984 34186 87574 67 4e1000 err 247 ret0 dist=158 t=1 wait=74 samp=10 q=390
+# probe dir=-1
+105659 o -40 -1024 0 0 0 4e0000 - 86 ret0 dist=158 t=0 wait=57 samp=0 q=0
+# sweep dir=-1 len=300 spd=1f t_send=105659 n=8 peak=1 imax=0 smax=16684 smin=4353 smax_ex=70726 t_pk=0 t_stop=264 t_done=316 val=4e1000 t_exp=420 t_stable=-1 mspp_x10=10 moved=184 pos_pk=0 over=184 pos=-1208
+S 0 16684 25612 65
+S 98 16667 25561 65
+S 124 7490 18640 67
+S 184 11618 22046 66
+S 208 5072 15000 70
+S 248 4687 13519 72
+S 316 4353 12237 74
+S 330 4353 12237 74
+# sweep peak dir=-1 chunks_max=4 spd=1f pk=-1024 ref=70726 pos=-1208 coarse=0
+106603 o 264 -944 0 0 0 4e0000 - 354 ret0 dist=158 t=0 wait=67 samp=0 q=0
+106857 r -20 -964 61287 101535 68 4e0000 - 145 ret0 dist=158 t=1 wait=57 samp=6 q=603
+107120 r -20 -984 71654 107472 68 4e0000 - 141 ret0 dist=158 t=1 wait=67 samp=9 q=666
+# retrace k=1 thr_pct=90 hit=1 s=71654
+107675 i 0 -984 67040 109342 68 0 - -1 ret0 dist=158 t=1 wait=0 samp=133 q=613
+# BENCH algo=B1F defocus=800 land_s=67040 ref_s=67143 pct=99 moves=6 ms=2932 travel=744 ab=0 drift=0
+# endstop dir=-1 how=flags off=-2364 range_mem=1,-2364,1,-1044
+109041 x -840 -2364 0 0 0 4e1000 err 114 ret0 dist=158 t=0 wait=231 samp=0 q=0
+109394 x 40 -2324 0 0 0 4e0000 - 106 ret0 dist=158 t=0 wait=79 samp=0 q=0
+109523 i 0 -2324 20607 58345 73 0 - -1 ret0 dist=158 t=1 wait=0 samp=122 q=353
+# BENCH_TRIAL algo=B1F defocus=-800 s_def=20607
+109539 i 0 -2324 20057 58327 73 0 - -1 ret0 dist=158 t=1 wait=0 samp=9 q=343
+# s0=20203 g=58352 luma=73
+110374 p 100 -2224 29312 77408 69 4e0400 - 507 ret0 dist=158 t=1 wait=187 samp=8 q=378
+# probe dir=1
+110809 o -160 -2384 0 0 0 4e1000 err 203 ret0 dist=158 t=0 wait=58 samp=0 q=0
+# sweep dir=1 len=300 spd=1f t_send=110809 n=14 peak=1 imax=7 smax=14262 smin=4653 smax_ex=60459 t_pk=289 t_stop=-1 t_done=375 val=4e1000 t_exp=420 t_stable=-1 mspp_x10=10 moved=300 pos_pk=169 over=131 pos=-2084
+S 0 4667 12309 74
+S 18 4683 12331 74
+S 59 4653 13089 74
+S 159 4653 13089 74
+S 185 6353 18107 69
+S 231 9452 20552 67
+S 267 14220 22310 66
+S 309 14262 23390 68
+S 375 11966 22360 68
+S 397 8288 20984 69
+S 435 8292 21002 70
+S 502 8044 21076 70
+S 518 7992 21040 70
+S 562 7674 21158 70
+# sweep peak dir=1 chunks_max=4 spd=1f pk=-2215 ref=60459 pos=-2084 coarse=0
+111961 o -211 -2295 0 0 0 4e0000 - 301 ret0 dist=158 t=0 wait=74 samp=0 q=0
+112233 r 20 -2275 23238 66416 77 4e0000 - 138 ret0 dist=158 t=1 wait=42 samp=6 q=349
+112568 r 20 -2255 24527 70589 76 4e0000 - 142 ret0 dist=158 t=1 wait=85 samp=6 q=347
+112836 r 20 -2235 26512 75500 76 4e0000 - 140 ret0 dist=158 t=1 wait=72 samp=6 q=351
+113125 r 20 -2215 29482 81024 75 4e0000 - 143 ret0 dist=158 t=1 wait=49 samp=9 q=363
+113374 r 20 -2195 36324 88546 74 4e0000 - 142 ret0 dist=158 t=1 wait=47 samp=9 q=410
+113624 r 20 -2175 48114 97326 73 4e0000 - 141 ret0 dist=158 t=1 wait=49 samp=9 q=494
+113875 r 20 -2155 62364 107784 72 4e0000 - 141 ret0 dist=158 t=1 wait=44 samp=9 q=578
+# retrace k=1 thr_pct=90 hit=1 s=62364
+114377 i 0 -2155 63209 105911 70 0 - -1 ret0 dist=158 t=1 wait=0 samp=63 q=596
+# BENCH algo=B1F defocus=-800 land_s=63209 ref_s=67143 pct=94 moves=11 ms=4731 travel=911 ab=0 drift=0
+# BENCH_SUMMARY algo=B07 n=6 median_ms=4131 ok=6 mean_pct=102
+# BENCH_SUMMARY algo=B14 n=6 median_ms=4072 ok=4 mean_pct=91
+# BENCH_SUMMARY algo=B1F n=6 median_ms=4305 ok=5 mean_pct=96
+# epilogue pre_stop_s=63017 post_stop_s=62056 post_close_s=62211 post_close2_s=62021 session_close=ON
+# RESULT bench aborted=0 trials=18 total_ms=114377
+
