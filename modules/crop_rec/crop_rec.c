@@ -126,6 +126,7 @@ static CONFIG_INT("crop.button_H-Shutter", Half_Shutter, 2);
 CONFIG_INT("crop.button_INFO",      INFO_button, 0);
 CONFIG_INT("crop.auto_refocus", Auto_refocus, 0); /* EOS M slim: 0=OFF, 1=ON, 2=ON + REC */
 CONFIG_INT("crop.auto_refocus_sens", Auto_refocus_sens, 1); /* EOS M slim: 0=Low, 1=Medium, 2=High */
+CONFIG_INT("crop.auto_refocus_method", Auto_refocus_method, 0); /* EOS M slim: 0=Canon AF, 1=MPU drive (not recording) */
 CONFIG_INT("crop.shutter_zoom", Shutter_zoom, 0); /* EOS M slim: 0=OFF, 1=hold x10, 2=sticky x10, 3=AF assist */
 CONFIG_INT("crop.arrows_U_D",       Arrows_U_D, 3); /* ISO */
 CONFIG_INT("crop.more_hacks",       more_hacks, 1);
@@ -5960,6 +5961,17 @@ static struct menu_entry slim_info_button_menu[] = {
         .help2     = "Low: only clear blur, slower. Medium: default. High: smaller sharpness drops and shorter\n"
                      "waits - may also refocus on pans or scene changes.",
     },
+    {
+        .name      = "Refocus method",
+        .priv      = &Auto_refocus_method,
+        .max       = 1,
+        .choices   = CHOICES("Canon", "MPU drive"),
+        .edit_mode = EM_INLINE_ADJUST,
+        .icon_type = IT_DICE,
+        .help      = "How Auto refocus moves the lens. Canon: half-press AF. MPU drive: ML's own AF drive.",
+        .help2     = "MPU drive only while not recording (Canon AF is used while recording). Needs AF drive\n"
+                     "monitor = Keep open: the first refocus opens it (LV dark ~2 s).",
+    },
 };
 
 /* Mode UI: 0=1x1, 1=1x3, 2=3x3, 3=LV (Full-Res LiveView). */
@@ -10448,7 +10460,9 @@ static const uint8_t  aref_abs_em[3]    = { 0, 45, 55 };    /* ... and max edge 
 #define AREF_ABS_Q_GOOD     85    /* q below this with a strong edge (see below) re-arms the absolute path */
 #define AREF_ABS_EM_GOOD    100
 
-enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN };
+/* AREF_MPU: an MPU AF drive (afd_engine) runs in aref_mpu_task; nothing else
+ * may trigger until aref_step has collected its result. */
+enum { AREF_MON = 0, AREF_REQUESTED, AREF_OURS, AREF_FOREIGN, AREF_MPU };
 
 static int aref_phase = AREF_MON;
 static int aref_is_idle(void) { return aref_phase == AREF_MON; }
@@ -10479,6 +10493,31 @@ static uint32_t aref_pause_ref = 0;  /* peak at the failure that paused us */
 static uint32_t aref_trig_ref = 0;
 static int aref_count0 = 0;          /* slim_af_result_count at the request */
 static int aref_dbg_t = 0;           /* ms: last periodic decision record */
+static volatile int aref_mpu_state = 0; /* 0 idle, 1 task running, 2 task finished (result below) */
+static volatile int aref_mpu_pct = -1;  /* afd_engine result: landing % of best, -1 = aborted */
+static volatile int aref_mpu_ms = 0;
+static int aref_mpu_notified = 0;
+
+/* Glue task: one afd_engine AF drive, off the polling callback (it blocks for
+ * seconds).  aref_step set afdiag_afdrive_busy before creating us; we clear it. */
+static void aref_mpu_task(void *unused)
+{
+    (void) unused;
+    int t0 = get_ms_clock();
+    int pct = -1;
+    if (afdiag_afdrive_mon && !afd_mon_is_open && !aref_mpu_notified)
+    {
+        aref_mpu_notified = 1;
+        NotifyBox(3000, "MPU AF: opening monitor");
+    }
+    /* the engine re-checks these itself and aborts, this only skips a pointless start */
+    if (lv && !RECORDING && !is_manual_focus() && !gui_menu_shown())
+        pct = afd_engine(0, AFD_F_QUIET);
+    aref_mpu_pct = pct;
+    aref_mpu_ms = get_ms_clock() - t0;
+    afdiag_afdrive_busy = 0;
+    aref_mpu_state = 2;
+}
 
 static void aref_log(int what, uint32_t cur)
 {
@@ -10566,6 +10605,28 @@ static void aref_step(void)
         aref_eligible = 0;
         aref_forget = 1;
         aref_abs_used = 0;
+    }
+
+    /* MPU drive running or just finished.  Same follow-up as a Canon AF: cooldown,
+     * settle, then the post-check judges the new picture against the peak memory
+     * (so it cannot re-trigger on the very first sample).  An abort (menu, LV
+     * end, recording, manual focus) is not a failure: cooldown and settle only. */
+    if (aref_phase == AREF_MPU)
+    {
+        if (aref_mpu_state != 2) return;
+        aref_mpu_state = 0;
+        aref_phase = AREF_MON;
+        aref_next_at = now + (aref_mpu_pct < 0 ? AREF_FAIL_BACKOFF_MS : AREF_COOLDOWN_MS);
+        aref_drop_ref(now, AREF_SETTLE_MS, 0);
+        if (aref_mpu_pct >= 0)
+        {
+            aref_post_check = 1;
+            aref_post_t = now;
+        }
+        /* one event: w0 = 13, w1 = result % of best (-1 = aborted), w2 = duration ms */
+        afdiag_record(AFD_EV_REFOCUS, 16, 13, aref_mpu_pct, aref_mpu_ms,
+                      lv_dispsize | (RECORDING ? 0x100 : 0) | (aref_fails << 16));
+        return;
     }
 
     /* Follow an AF run, ours or the user's (Shutter zoom AF). */
@@ -10850,6 +10911,29 @@ static void aref_step(void)
     }
 
     if (!path || gate) return;
+
+    if (Auto_refocus_method == 1 && !RECORDING)
+    {
+        /* TODO(recording): MPU drive is not used while recording (AFD_F_REC is
+         * not implemented in afd_engine, recording safety is being investigated
+         * separately).  While recording, the Canon path below stays unchanged. */
+        if (afdiag_afdrive_busy || afdiag_afsearch_busy)
+        {
+            aref_next_at = now + 1000;   /* AF drive / search in use: look again shortly */
+            return;
+        }
+        aref_trig_ref = peak;
+        aref_low_since = 0;
+        if (path == 2) aref_abs_used = 1;
+        aref_mpu_state = 1;
+        aref_mpu_pct = -1;
+        afdiag_afdrive_busy = 1;
+        aref_phase = AREF_MPU;
+        aref_log(1, cur);
+        aref_log_affr();
+        task_create("aref_mpu", 0x1e, 0x3000, aref_mpu_task, (void*)0);
+        return;
+    }
 
     aref_trig_ref = peak;
     aref_count0 = slim_af_result_count;
@@ -12252,6 +12336,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(Shutter_zoom)
     MODULE_CONFIG(Auto_refocus)
     MODULE_CONFIG(Auto_refocus_sens)
+    MODULE_CONFIG(Auto_refocus_method)
     MODULE_CONFIG(tapdisp)
     MODULE_CONFIG(Arrows_L_R)
     MODULE_CONFIG(Arrows_U_D)
