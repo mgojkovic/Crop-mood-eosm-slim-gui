@@ -270,6 +270,10 @@ If peak stop is too early or too late, tune in `afdiag_afsearch_task`:
 4. `modules/mpu_lab/mpu_lab.c` — raw probe implementation and logging.
 5. `modules/crop_rec/crop_rec.c` — `afdiag_afsearch_task` and menu entry.
 6. `doc/EOSM-AF.md` — earlier Auto refocus/lens-drive background.
+7. `doc/EOSM-AF-ALGORITHMS.md` — research notes on faster focus algorithms
+   and the recommended implementation plan.
+8. `doc/EOSM-AF-IMPLEMENTATION.md` — component code, open-source references,
+   and the combined coarse/fine + fit + Brent + DFD cascade.
 
 ---
 
