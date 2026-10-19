@@ -12,6 +12,17 @@ This handover supersedes the morning version. The detailed history and evidence 
 [AF-ROI-X10.md](AF-ROI-X10.md) (centre ROI / x5 vs x10), [EOSM-AF-STOP-ANALYSIS.md](EOSM-AF-STOP-ANALYSIS.md),
 [EOSM-AF-FOCUSFEED.md](EOSM-AF-FOCUSFEED.md), and the reviews `AF-PATCH-REVIEW*.md`.
 
+> **Update 2026-10-20 (patches 11-12, field-validated):** see [AF-PATCH11-RECATCH.md](AF-PATCH11-RECATCH.md) and
+> [AF-PATCH12-SPEED.md](AF-PATCH12-SPEED.md). Root cause of the 55 mm ping-pong: the sweep found focus but the landing jumped
+> back to an estimated pulse position (20-60 pulses off; 55 mm peak ~30 wide), then open-loop recovery hit the end stops.
+> Patch 11 "re-catch" reverses from where the lens is in short tracked chunks and lands only on settled, frame-synced
+> readings (11.1); patch 12 cut fixed overheads (fast epilogue, Local skip at < 30 % of ref, tracked probe with an
+> interior-peak guard, 30-pulse re-catch chunks). Field (build ee07e3ab): Refocus tests **15/15** on 55 mm (5.7-9.2 s,
+> 6-11 moves; was 12.5-17.8 s, 21-32 moves), 18 mm (3.9-8.1 s) and EF50+SB (5.6-8.4 s). Tools: `contrib/af_test/time_budget.py`
+> (per-phase time budget), `contrib/af_replay/af_recatch.py` (landing simulator). AF pipe test: EF50 accepts early commands
+> and reports an honest FOCUS_DONE (~200 ms per 100 pulses); the EF-M refuses/ignores commands sent before its ~510 ms
+> timer done and loses position - never pipeline moves on the EF-M.
+
 ---
 
 ## 1. Status in one paragraph

@@ -50,3 +50,10 @@ as building blocks, add it to `ALGOS`, rerun.
 
 The model assumptions that are *not* measured (reversal range, sweep speed, stop latency, curve tails) are listed with their uncertainty
 in section 5 of `REPORT.md`; treat the results as a ranking of structures, not as predicted camera numbers.
+
+## af_recatch.py: classic vs re-catch landing (patch 11)
+
+Time-domain lens simulator with imperfections plus controllers mirroring `afd_run_sweep` / `afd_land_steps` (classic) and
+`doc/AF-PATCH11-RECATCH.md` (re-catch). `python3 contrib/af_replay/af_recatch.py --trials 300 [--extras]` prints the grid
+(lens 55 mm narrow / 18 mm / EF50 wide x defocus 60/150/400 x errors none/realistic/bad); `--trace LENS ERR DEFOCUS I ALGO`
+prints one move log; `--assumptions` lists the model. Tests: `tests/test_recatch.py`.
