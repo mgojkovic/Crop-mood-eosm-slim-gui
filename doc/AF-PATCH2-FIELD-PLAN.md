@@ -1,7 +1,7 @@
 # AF patch 2 field plan: test integrity, timing / reference logging, stop-check, safety guards
 
 **Status:** implemented, **compile-checked only — no camera attached, NOT field-validated.**
-**Date:** 2026-10-19 · **Branch:** `eosm-slim-gui` (local, uncommitted) · **Module:** `modules/crop_rec/crop_rec.c`
+**Date:** 2026-10-19 · **Branch:** `eosm-slim-gui` (committed as `b5d6262`, pushed to `fork/eosm-slim-gui`) · **Module:** `modules/crop_rec/crop_rec.c`
 **Scope:** diagnostics and safety only. No search algorithm, trigger threshold, epilogue or landing change.
 **Predecessors:** [AF-PATCH-FIELD-PLAN.md](AF-PATCH-FIELD-PLAN.md) (task-5/6: local-search soft-picture
 fix, ref max, aref/Refocus-test reference floors — **left intact**), [AF-STATUS-REVIEW.md](AF-STATUS-REVIEW.md)
@@ -348,10 +348,10 @@ AF bench B speeds, then an Auto-refocus walk; monitor **Keep open**; never while
 
 ## 9. Rollback
 
-The patch is uncommitted on `eosm-slim-gui`. Everything is in `modules/crop_rec/crop_rec.c`.
+The patch is committed on `eosm-slim-gui` (`b5d6262`). Everything is in `modules/crop_rec/crop_rec.c`.
 
 - **Full rollback of patch 2 only:** restore the file from before this patch. There is no separate commit
-  (the task-5/6 patch is uncommitted too), so `git checkout -- modules/crop_rec/crop_rec.c` reverts
+  (patches 1-10 are committed), so `git checkout -- modules/crop_rec/crop_rec.c` reverts
   **both** patches. Rebuild + flash:
   `export PATH=$HOME/gcc-arm-none-eabi-5_4-2016q3/bin:$PATH; make -C platform/EOSM.202 zip SHELL=/bin/bash PYTHON=python3`
 - **Per-feature rollback (rebuild after each):**
@@ -546,7 +546,7 @@ against.
 
 ### 11.8 Rollback
 
-Everything is in `modules/crop_rec/crop_rec.c` (uncommitted). Full rollback:
+Everything is in `modules/crop_rec/crop_rec.c` (committed in `b5d6262`). Full rollback:
 `git checkout -- modules/crop_rec/crop_rec.c` (this returns to HEAD, i.e. drops patches 1–3). Patch-3-only
 rollback has no single constant: the anchor replaced `AREF_REF_FLOOR_PCT` (the constant no longer exists);
 `AFRT_REF_FLOOR_PCT 0` disables the Refocus-test anchor and `AFRT_REF_LUMA_PCT` can be raised to disable
@@ -1136,7 +1136,7 @@ the requirement being met. `max_backoff_ms <= 36000` proves the cap; `attempts` 
 - **Soft rollback (no rebuild):** `Refocus persistence = Normal` (or Auto refocus OFF). Patches 1–8 behaviour
   returns immediately; this is the field escape hatch if Persistent is annoying.
 - **Firmware rollback of patch 9 only:** revert the patch-9 hunks (setting/menu/config, hunt block, aref_step
-  hooks, engine `AFD_F_HUNT` overrides, sweep direction, aref test/task resets). The file is uncommitted with
+  hooks, engine `AFD_F_HUNT` overrides, sweep direction, aref test/task resets). The file is committed in `b5d6262` with
   patches 1–8, so keep a pre-patch-9 copy/`crop_rec.mo` md5 before flashing; full rollback of the whole AF stack is
   `git checkout -- modules/crop_rec/crop_rec.c` + rebuild + reflash.
 - After any rollback: rebuild twice, re-run `contrib/af_test/run_all.py`, reflash.

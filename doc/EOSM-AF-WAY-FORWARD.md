@@ -1,6 +1,6 @@
 # EOS M autofocus — team review and way forward
 
-**Date:** 2026-10-19 · **Branch:** `eosm-slim-gui` (local, not pushed) · **Base HEAD:** `043d914` (AF code unchanged since `47d8589`)
+**Date:** 2026-10-19 · **Branch:** `eosm-slim-gui` (pushed to `fork/eosm-slim-gui`, commit `b5d6262`) · **Base HEAD:** `043d914` (AF code unchanged since `47d8589`)
 **Scope:** five parallel workstreams — current-state audit, testing, algorithms, out-of-the-box ideas, and a firmware patch for the top open problem.
 **Status:** everything below is **offline / compile-checked only**. No camera was attached, so no patch in this tree has been field-validated. The firmware patch set (patches 1-5 + the AFDIAG feed logging) is frozen: full build exit 0 twice, `crop_rec.mo` md5 `ebb45f8b53ba4cd7b53036ca5a8a4e8f` deterministic, host suite 81/81 tests and 6/6 real corpus cases PASS, and the final adversarial review concludes **safe to flash, no blocking findings**.
 
@@ -35,7 +35,7 @@ Companion documents produced by this review:
 2. **Both open problems were reference-definition bugs as much as search bugs.** The local search
    accepts a soft picture via its in-focus exit, and the Auto-refocus bookkeeping redefines the
    scene reference from each post-landing sample. A patch addressing both is now in the tree
-   (uncommitted, compile-clean): wide ±4×fine probe + drop-path guard + per-zoom high-water mark
+   (committed, compile-clean): wide ±4×fine probe + drop-path guard + per-zoom high-water mark
    + a reference floor + an anchored Refocus-test reference.
 3. **The cheap, safe shippable algorithm remains B (the default).** The simulator confirms
    G (predictive braking) and C (stop-on-threshold) can beat B *only if* `(9,3,1)` halts a running
@@ -113,9 +113,9 @@ stepped fits), which is why the new simulator pool gives different far-class num
 
 ---
 
-## 4. The firmware patches now in the tree (uncommitted)
+## 4. The firmware patches now in the tree (committed, patches 1-10)
 
-File: [modules/crop_rec/crop_rec.c](../modules/crop_rec/crop_rec.c) · five stacked, uncommitted
+File: [modules/crop_rec/crop_rec.c](../modules/crop_rec/crop_rec.c) · ten stacked, committed
 patches (reference/local-search, diagnostics/safety, and three rounds of review fixes) plus the
 AFDIAG full-payload feed logging. Full `make -C platform/EOSM.202 zip` exits 0; `crop_rec.c`
 compiles clean; `crop_rec.mo` md5 `ebb45f8b53ba4cd7b53036ca5a8a4e8f`, identical across forced

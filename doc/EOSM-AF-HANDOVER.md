@@ -202,7 +202,7 @@ field-validated yet.
 ## 8. Git state
 
 Everything is committed on `eosm-slim-gui` in one commit:
-`crop_rec: MPU AF patches 1-10 + offline AF test harness, real corpus and handover`
+`b5d6262 crop_rec: MPU AF patches 1-10 + offline AF test harness, real corpus and handover`
 and pushed to `fork/eosm-slim-gui` (`git@github.com:mgojkovic/Crop-mood-eosm-slim-gui.git`).
 The build artifact `crop_rec.mo` md5 is `f587be4849a959ccb8bbcd54b9d5787f`. The upstream `origin`
 (`Amit199167/...`) was not pushed to; a PR is the owner's decision. Local field logs are under
