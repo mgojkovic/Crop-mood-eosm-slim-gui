@@ -7436,7 +7436,8 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
  * (latest) / 0xFFF8132C (start of the last move), next to the poll gates at
  * 0xFFF812B8.. and the reference 0xFFF812DC: snapshot that region first so
  * it survives the slow-read fallback. */
-#define AFD_MON_LV_OFF_MS    2000   /* LV-exit closer: LV must stay off this long */
+#define AFD_MON_WAKE_OFF_MS  2000   /* wake re-open: LV must have been off this long */
+#define AFD_MON_WAKE_WAIT_MS 1000   /* ... and stay on (not recording) this long before re-opening */
 #define AFD_MON_REC_GUARD_MS 5000   /* ... and no recording within this long */
 #define AFD_F_QUIET          1
 #define AFD_F_REC            2
@@ -7455,11 +7456,28 @@ static int afdiag_afdrive_mon = 2;   /* 0 OFF, 1 ON (open/close per run), 2 keep
  * execute.  Keeping it open pays that blackout once instead of every run. */
 static volatile int afd_mon_is_open = 0;
 static volatile int afd_mon_closing = 0;
-static void afd_mon_close_now(void)
+static volatile int afd_mon_ever = 0;     /* the monitor was opened at least once this session */
+/* "Monitor auto-close": 0 Never, 1 LV off 2 s, 2 LV off 60 s (LV-off closer in the polling cbr) */
+static int afdiag_mon_autoclose = 0;
+static const int afd_mon_autoclose_ms[3] = { 0, 2000, 60000 };
+/* "Re-open on wake": 1 ON, 0 OFF (re-open the monitor when LV returns after >= 2 s off) */
+static int afdiag_mon_wake = 1;
+static volatile int afd_mon_wake_busy = 0;
+static void afd_note(const char *fmt, ...);
+static void afd_mon_close_now(const char *why)
 {
     if (!afd_mon_is_open) return;
     ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose */
     afd_mon_is_open = 0;
+    afd_note("# monitor closed why=%s t=%d\n", why, get_ms_clock());
+}
+/* MpuMonOpen with a note; the caller owns afd_mon_is_open. Returns the MpuMonOpen result. */
+static int afd_mon_open_raw(const char *why)
+{
+    int e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
+    afd_note("# monitor open why=%s e=%d t=%d\n", why, e, get_ms_clock());
+    if (!e) afd_mon_ever = 1;
+    return e;
 }   /* 1: MpuMonOpen/Close around the run (default; OFF does not drive the lens), 0: no monitor */
 static char afd_buf[AFD_LOG_SIZE];
 static int afd_log_reserve = AFD_LOG_RESERVE;
@@ -7475,6 +7493,7 @@ static int afd_frame_ms = AFD_FRAME_MS;   /* LV frame period: between the two sa
 static int afd_speed = AFD_SPEED;         /* speed byte of the move payload */
 static int afd_done_timeout = AFD_DONE_TIMEOUT_MS;
 static int afd_last_done_ms, afd_last_done_val;   /* FOCUS_DONE of the last move (-1 = none) */
+static int afd_mon_stale = 0;   /* the first move of the run was rejected (monitor no longer effective) */
 static uint32_t afd_best_s;
 static int afd_best_pos;
 static int afd_best_dir;     /* direction of travel when the best was measured */
@@ -7725,6 +7744,13 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
     samp_ms = get_ms_clock() - ts;
     afd_last_g = g;
     afd_moves += n ? 1 : 0;
+    /* first real move rejected by the MPU (done within 40 ms, FOCUS_DONE word 0x4a0000):
+     * the monitor is stale; end the run, afd_engine decides whether to re-open */
+    if (n && afd_moves == 1 && done_ms >= 0 && done_ms < 40 && ((done_val >> 16) & 0xFF) == 0x4A)
+    {
+        afd_mon_stale = 1;
+        afd_aborted = 1;
+    }
     int f_nodone = n && done_ms < 0;
     int f_err = n && done_ms >= 0 && (done_val & 0x1000);
     int f_fast = n && done_ms >= 0 && done_ms < AFD_FAST_MS;
@@ -8309,12 +8335,12 @@ static int afd_engine(int mode, int flags)
     int opened_now = 0;
     int recnow = (RECORDING || RECORDING_RAW || mlv_raw_rec_busy());
     if (afd_mon_is_open && mon != 2 && !recnow)
-        afd_mon_close_now();               /* setting changed away from Keep open */
+        afd_mon_close_now("setting");      /* setting changed away from Keep open */
     if (mon && !afd_mon_is_open)
     {
         /* never open the monitor while recording (LV blackout ~2 s) */
         if (recnow) return -1;
-        e = ((int (*)(void)) 0xFF1DD098)();   /* MpuMonOpen */
+        e = afd_mon_open_raw("run");
         if (e)
         {
             if (!(flags & AFD_F_QUIET)) NotifyBox(4000, "%s: MonOpen failed %d", name, e);
@@ -8363,20 +8389,57 @@ static int afd_engine(int mode, int flags)
 
     uint32_t best = 0, final_s = 0;
     int pct = 0;
-    if (!afd_wait_lv(opened_now))
+    int reopened = 0, stale_final = 0;
+    afd_mon_stale = 0;
+    while (1)
     {
-        if (!afd_aborted) afd_nolv = 1;
-    }
-    else if (speedt) afd_speed_run();
-    else if (probe) afd_probe_run();
-    else if (calib) afd_calib_run();
-    else
-    {
-        final_s = afd_run(&best);
-        afd_deadline = 0;
-        if (!best) best = afd_best_s;
-        pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
-        ret_pct = afd_nopeak ? -1 : pct;   /* no peak found = no focus: a failure for Auto refocus */
+        if (!afd_wait_lv(opened_now))
+        {
+            if (!afd_aborted) afd_nolv = 1;
+        }
+        else if (speedt) afd_speed_run();
+        else if (probe) afd_probe_run();
+        else if (calib) afd_calib_run();
+        else
+        {
+            final_s = afd_run(&best);
+            afd_deadline = 0;
+            if (!best) best = afd_best_s;
+            pct = best ? (int) ((uint64_t) final_s * 100 / best) : 0;
+            ret_pct = afd_nopeak ? -1 : pct;   /* no peak found = no focus: a failure for Auto refocus */
+        }
+        if (!afd_mon_stale) break;
+        /* self-heal: the MPU rejected the first move, the monitor is no longer effective */
+        afd_mon_stale = 0;
+        int recst = (afd_rec_run || RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) ? 1 : 0;
+        afd_note("# monitor stale t=%d rec=%d reopened=%d\n", get_ms_clock(), recst, reopened);
+        if (recst || reopened || !lv)
+        {
+            stale_final = 1;   /* never re-open while recording; at most one re-open per run */
+            break;
+        }
+        reopened = 1;
+        afd_log("# monitor stale -> reopen\n");
+        send(9, 3, 1, &stop);
+        msleep(300);
+        send(9, 0x25, 16, zeros);
+        msleep(300);
+        int was_open = afd_mon_is_open;
+        if (afd_mon_is_open) afd_mon_close_now("stale");
+        else if (mon)
+        {
+            ((int (*)(void)) 0xFF1DD118)();   /* MpuMonClose (ON: this run's monitor) */
+            afd_note("# monitor closed why=stale t=%d\n", get_ms_clock());
+        }
+        e = afd_mon_open_raw("stale");
+        if (e) { afd_log("# reopen failed e=%d\n", e); stale_final = 1; break; }
+        if (was_open || mon == 2) afd_mon_is_open = 1;
+        send(9, 0x25, 16, open_s);
+        msleep(300);
+        afd_pos = 0; afd_moves = 0; afd_travel = 0; afd_retraces = 0; afd_aborted = 0;
+        afd_nolv = 0; afd_n_nodone = afd_n_err = afd_n_fast = 0;
+        opened_now = 1;
+        if (afd_must_abort()) { afd_aborted = 1; break; }
     }
     afd_deadline = 0;
     if (mode == 0) afd_nopeak_last = afd_nopeak;
@@ -8397,7 +8460,7 @@ static int afd_engine(int mode, int flags)
     /* mon == 2: left open for the next run (closed on LV exit / menu / setting) */
 
     afd_log_reserve = 0;
-    const char *ab = afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_nopeak ? "nopeak" :
+    const char *ab = stale_final ? "mon_stale" : afd_nolv ? "nolv" : afd_lowcontrast ? "lowcontrast" : afd_nopeak ? "nopeak" :
                      afd_timeout ? "timeout" : afd_aborted ? "1" : "0";
     afd_poll_on = 0;
     afd_extra_ms = 0;
@@ -8688,12 +8751,33 @@ static MENU_SELECT_FUNC(afdiag_afprobe_select)
     task_create("afdiag_afprobe", 0x1e, 0x3000, afdiag_afprobe_task, (void*)0);
 }
 
-static void afd_mon_close_task(void *unused)
+/* arg: 1 = LV-off closer, 0 = menu */
+static void afd_mon_close_task(void *arg)
 {
-    (void) unused;
     if (!afdiag_afdrive_busy && !afdiag_afsearch_busy && !(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
-        afd_mon_close_now();
+        afd_mon_close_now(arg ? "lv_off" : "menu");
     afd_mon_closing = 0;
+}
+
+/* LV came back after a long off period: close-if-open + MpuMonOpen, so the blackout
+ * happens now instead of at the first AF drive.  Checks again right before acting. */
+static void afd_mon_wake_task(void *arg)
+{
+    int off_ms = (int) arg;
+    if (lv && !afdiag_afdrive_busy && !afdiag_afsearch_busy && !afd_mon_closing && afdiag_afdrive_mon == 2 &&
+        !(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+    {
+        afdiag_afdrive_busy = 1;
+        afd_mon_close_now("wake");
+        if (!afd_mon_open_raw("wake"))
+        {
+            afd_mon_is_open = 1;
+            afd_note("# monitor reopened on wake lv_off_ms=%d t=%d\n", off_ms, get_ms_clock());
+        }
+        msleep(300);
+        afdiag_afdrive_busy = 0;
+    }
+    afd_mon_wake_busy = 0;
 }
 
 static MENU_SELECT_FUNC(afdiag_afdrive_monclose_select)
@@ -8768,6 +8852,26 @@ static struct menu_entry afdiag_menu[] = {
         .help2     = "Keep open (default): opened on the first run (LV dark ~2 s once), then left open so later runs\n"
                      "start at once; closed when LV ends or via 'AF drive: close monitor'. ON: open/close every run\n"
                      "(dark ~2 s each time). OFF does NOT drive the lens (MPU rejects moves with 0x4A).",
+    },
+    {
+        .name      = "Monitor auto-close",
+        .priv      = &afdiag_mon_autoclose,
+        .max       = 2,
+        .choices   = CHOICES("Never", "LV off 2 s", "LV off 60 s"),
+        .icon_type = IT_DICE,
+        .help      = "When to close the MPU monitor left open by 'AF drive monitor: Keep open'.",
+        .help2     = "Never (default): stays open so AF drive is always ready. LV off N s: closed once LV has been off\n"
+                     "that long (never while recording). A stale monitor is re-opened automatically by AF drive.",
+    },
+    {
+        .name      = "Re-open on wake",
+        .priv      = &afdiag_mon_wake,
+        .max       = 1,
+        .choices   = CHOICES("OFF", "ON"),
+        .icon_type = IT_BOOL,
+        .help      = "Keep open: re-open the MPU monitor when LV returns after >= 2 s off.",
+        .help2     = "Moves the ~2 s LV blackout to wake-up time instead of the first AF drive.\n"
+                     "Only after the monitor was opened once; not while recording.",
     },
     {
         .name      = "AF drive: close monitor",
@@ -11394,20 +11498,42 @@ static unsigned int crop_rec_polling_cbr(unsigned int unused)
         /* Close the MPU monitor only after LV has been off for a while (an LV blip,
          * e.g. when recording starts, must not close it), never while recording
          * and not within AFD_MON_REC_GUARD_MS after recording stopped. */
-        static int lv_off_since = 0, rec_prev = 0, rec_end_t = 0;
+        static int lv_off_since = 0, rec_prev = 0, rec_end_t = 0, lv_prev = 1, wake_at = 0, wake_off_ms = 0;
         int now = get_ms_clock();
         int rec = (RECORDING || RECORDING_RAW || mlv_raw_rec_busy()) ? 1 : 0;
         if (rec_prev && !rec) rec_end_t = now ? now : 1;
         rec_prev = rec;
+        if (lv && !lv_prev && lv_off_since)
+        {
+            /* wake: LV 0 -> 1 after being off >= AFD_MON_WAKE_OFF_MS */
+            int off = now - lv_off_since;
+            afd_note("# lv on after off_ms=%d t=%d\n", off, now);
+            wake_at = 0;
+            if (afdiag_mon_wake && afdiag_afdrive_mon == 2 && afd_mon_ever && !rec && off >= AFD_MON_WAKE_OFF_MS)
+            {
+                wake_at = now + AFD_MON_WAKE_WAIT_MS;
+                if (!wake_at) wake_at = 1;
+                wake_off_ms = off;
+            }
+        }
+        if (!lv && lv_prev) afd_note("# lv off t=%d\n", now);
+        lv_prev = lv ? 1 : 0;
         if (lv) lv_off_since = 0;
         else if (!lv_off_since) lv_off_since = now ? now : 1;
-        if (afd_mon_is_open && !lv && lv_off_since && !rec && !afd_mon_closing && !afdiag_afdrive_busy &&
-            now - lv_off_since >= AFD_MON_LV_OFF_MS &&
+        if (wake_at && (!lv || rec || afdiag_afdrive_mon != 2)) wake_at = 0;   /* conditions lost: cancel */
+        else if (wake_at && now - wake_at >= 0 && !afd_mon_wake_busy && !afdiag_afdrive_busy && !afd_mon_closing)
+        {
+            wake_at = 0;
+            afd_mon_wake_busy = 1;
+            task_create("afd_monwake", 0x1e, 0x1000, afd_mon_wake_task, (void*)wake_off_ms);
+        }
+        if (afd_mon_is_open && afdiag_mon_autoclose && !lv && lv_off_since && !rec && !afd_mon_closing && !afdiag_afdrive_busy &&
+            now - lv_off_since >= afd_mon_autoclose_ms[afdiag_mon_autoclose] &&
             (!rec_end_t || now - rec_end_t >= AFD_MON_REC_GUARD_MS))
         {
             afd_note("# monitor auto-closed lv_off_ms=%d t=%d\n", now - lv_off_since, now);
             afd_mon_closing = 1;
-            task_create("afd_monclose", 0x1e, 0x1000, afd_mon_close_task, (void*)0);
+            task_create("afd_monclose", 0x1e, 0x1000, afd_mon_close_task, (void*)1);
         }
     }
     
