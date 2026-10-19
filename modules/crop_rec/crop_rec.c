@@ -7500,8 +7500,10 @@ static int afd_best_dir;     /* direction of travel when the best was measured *
 
 /* NOTE: ML snprintf lacks the char conversion and mishandles the percent escape: the AFD/AFS/calib log text
  * uses only %d, %x and plain %s, percentages are written as name_pct=N. */
+static int afd_log_quiet = 0;   /* modes 4/5 keep their own log (afs_log) */
 static void afd_log(const char *fmt, ...)
 {
+    if (afd_log_quiet) return;
     int room = (int) sizeof(afd_buf) - afd_log_reserve;   /* reserve 0 only for the RESULT line */
     if (afd_len >= room - 1) return;
     va_list ap;
@@ -7593,6 +7595,201 @@ static uint32_t afd_sample_stable(uint32_t *g_out, int *luma_out, int *tries)
 /* ---- AF drive probe helpers: MPU RAM word reads (monitor must be open) ----
  * Same call as mpu_lab drv_read_gates: MpuMonRead(kind 0, addr, 4, buf), 0 = ok,
  * the word is printed/assembled in the byte order of buf (b0 first = MSB). */
+/* ---- AF measurement tools: multi-measure sampler and tracking move ---- */
+
+/* Every LV frame (vsync callback): code waits for this to change to get a NEW frame. */
+static volatile unsigned afd_frame_cnt = 0;
+
+/* One pass over the sharpness ROI (centre 1/4 x 1/4, stride 2, like afdiag_sharpness_ex).
+ * s1/s2/s4: |4c - left - right - up - down| summed, neighbours 1/2/4 pixels away.
+ * g: |dx| + |dy| (1-pixel) summed.  q = s1*1000/g, band = s1*1000/(s2+s4+1). */
+struct afd_meas
+{
+    uint32_t s1, s2, s4, g;
+    int luma;
+    int q, band;
+    int n;              /* ROI samples (0 = no LV buffer) */
+};
+
+static int afd_s4_step = 2;   /* s4 sampled every N pixels/rows (x4 scaled when 4); 4 only if a call is >15 ms */
+
+static int afd_ratio(uint32_t a, uint32_t b)   /* a*1000/b without 64-bit division */
+{
+    if (!b) return 0;
+    if (a < 4294967u) return (int) (a * 1000u / b);
+    return (int) (a / (b / 1000u + 1));
+}
+
+static void afd_measure(struct afd_meas *m)
+{
+    uint32_t s1 = 0, s2 = 0, s4 = 0, g = 0, lsum = 0;
+    int n = 0, n4 = 0;
+    memset(m, 0, sizeof(*m));
+    struct vram_info *vi = get_yuv422_vram();
+    if (!vi || !vi->vram) return;
+    int width = vi->width, height = vi->height, pitch = vi->pitch;
+    if (width < 64 || height < 64 || pitch < width * 2) return;
+    const uint8_t *vram = (const uint8_t *) UNCACHEABLE(vi->vram);
+    int x0 = width * 3 / 8,  x1 = width * 5 / 8;
+    int y0 = height * 3 / 8, y1 = height * 5 / 8;
+    int m4 = afd_s4_step / 2 - 1;   /* 0 or 1: mask on the stride-2 grid indices */
+    int p2 = 2 * pitch, p4 = 4 * pitch;
+    int yi = 0;
+    for (int y = y0 + 4; y < y1 - 4; y += 2, yi++)
+    {
+        const uint8_t *row = vram + y * pitch;
+        int xi = 0;
+        for (int x = x0 + 4; x < x1 - 4; x += 2, xi++)
+        {
+            const uint8_t *c = row + x * 2 + 1;
+            int cv = c[0];
+            int e1 = 4 * cv - c[-2] - c[2] - c[-pitch] - c[pitch];
+            int e2 = 4 * cv - c[-4] - c[4] - c[-p2] - c[p2];
+            if (e1 < 0) e1 = -e1;
+            if (e2 < 0) e2 = -e2;
+            s1 += e1;
+            s2 += e2;
+            int gx = c[2] - c[-2]; if (gx < 0) gx = -gx;
+            int gy = c[pitch] - c[-pitch]; if (gy < 0) gy = -gy;
+            g += gx + gy;
+            lsum += cv;
+            n++;
+            if ((xi & m4) == 0 && (yi & m4) == 0)
+            {
+                int e4 = 4 * cv - c[-8] - c[8] - c[-p4] - c[p4];
+                if (e4 < 0) e4 = -e4;
+                s4 += e4;
+                n4++;
+            }
+        }
+    }
+    if (!n) return;
+    if (m4) s4 <<= 2;   /* 1/4 of the points: scale to the stride-2 sum */
+    m->s1 = s1; m->s2 = s2; m->s4 = s4; m->g = g;
+    m->luma = lsum / n;
+    m->n = n;
+    m->q = afd_ratio(s1, g);
+    m->band = afd_ratio(s1, s2 + s4 + 1);
+    (void) n4;
+}
+
+/* Time one afd_measure call (average of 8) in microseconds; picks the s4 stride. */
+static int afd_measure_cost_us(void)
+{
+    struct afd_meas m;
+    afd_s4_step = 2;
+    afd_measure(&m);   /* warm up */
+    uint64_t t0 = get_us_clock();
+    for (int i = 0; i < 8; i++) afd_measure(&m);
+    int us = (int) (get_us_clock() - t0) / 8;
+    if (us > 15000)
+    {
+        afd_s4_step = 4;
+        t0 = get_us_clock();
+        for (int i = 0; i < 8; i++) afd_measure(&m);
+        us = (int) (get_us_clock() - t0) / 8;
+    }
+    return us;
+}
+
+#define AFT_DONE_TIMEOUT_MS  3000
+#define AFT_EXTRA_FRAMES     2
+#define AFT_MAX_SAMPLES      160   /* per move: 3 s / 24 fps = 72 */
+
+struct afd_samp
+{
+    int t_ms;           /* ms since the move command was sent */
+    int frame;          /* LV frames since the send (afd_frame_cnt - count at send) */
+    struct afd_meas m;
+};
+
+struct afd_track
+{
+    int n;              /* samples */
+    int done_ms;        /* FOCUS_DONE, ms since send (-1 = none within the timeout) */
+    uint32_t done_val;
+    int stop_ms;        /* ms since send when (9,3,1) was sent (-1 = not sent) */
+    int aborted;
+};
+
+/* Called every ~2 ms while tracking (t_ms since send, last sample or NULL, samples so far);
+ * return 1 to send the stop (9,3,1) at once.  Called until it fires. */
+typedef int (*afd_stop_fn)(int t_ms, const struct afd_samp *last, int count);
+
+/* Send (9,1,5) [hi lo speed 00 00] for n pulses, then take one afd_measure per NEW LV frame
+ * until FOCUS_DONE (timeout 3 s) plus 2 more frames.  A baseline sample is taken just
+ * before the send (t_ms=0 frame=0).  Must run inside the afd_engine session.
+ * Returns the number of samples stored (<= max); details in *r. */
+static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, afd_stop_fn stop_cond, struct afd_track *r)
+{
+    static const uint8_t stop = 0;
+    int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
+    int cnt = 0;
+    r->n = 0; r->done_ms = -1; r->done_val = 0; r->stop_ms = -1; r->aborted = 0;
+    if (afd_must_abort() || afd_travel + ABS(n) > AFD_MAX_TOTAL) { r->aborted = 1; afd_aborted = 1; return 0; }
+
+    unsigned f0 = afd_frame_cnt, last_f = f0;
+    int done0 = afdiag_focus_done_count;
+    if (max > 0)
+    {
+        afd_measure(&samples[0].m);
+        samples[0].t_ms = 0; samples[0].frame = 0;
+        cnt = 1;
+    }
+    uint8_t d[5] = { (uint8_t)((n >> 8) & 0xFF), (uint8_t)(n & 0xFF), (uint8_t) speed, 0, 0 };
+    int t0 = get_ms_clock();
+    send(9, 1, 5, d);
+    afd_pos += n;
+    afd_travel += ABS(n);
+    int extra = -1;   /* frames still wanted after FOCUS_DONE; -1 = not done yet */
+    while (1)
+    {
+        int t = get_ms_clock() - t0;
+        if (r->done_ms < 0 && afdiag_focus_done_count != done0)
+        {
+            r->done_ms = t;
+            r->done_val = afdiag_focus_done_val;
+            extra = AFT_EXTRA_FRAMES;
+        }
+        if (r->done_ms < 0 && t >= AFT_DONE_TIMEOUT_MS) break;
+        if (afd_must_abort())
+        {
+            r->aborted = 1; afd_aborted = 1;
+            if (r->stop_ms < 0) { send(9, 3, 1, &stop); r->stop_ms = t; }
+            break;
+        }
+        if (r->stop_ms < 0 && r->done_ms < 0 && stop_cond && stop_cond(t, cnt > 0 ? &samples[cnt - 1] : 0, cnt))
+        {
+            send(9, 3, 1, &stop);
+            r->stop_ms = get_ms_clock() - t0;
+        }
+        unsigned f = afd_frame_cnt;
+        if (f != last_f)
+        {
+            last_f = f;
+            if (cnt < max)
+            {
+                samples[cnt].t_ms = get_ms_clock() - t0;
+                samples[cnt].frame = (int) (f - f0);
+                afd_measure(&samples[cnt].m);
+                cnt++;
+            }
+            if (extra > 0) extra--;
+        }
+        if (extra == 0) break;
+        msleep(2);
+    }
+    if (r->done_ms < 0 && !r->aborted)
+    {
+        /* timeout: make sure the motor is not left running */
+        send(9, 3, 1, &stop);
+        if (r->stop_ms < 0) r->stop_ms = get_ms_clock() - t0;
+        msleep(200);
+    }
+    r->n = cnt;
+    return cnt;
+}
+
 static int afd_poll_on = 0;       /* poll the busy/state words while waiting in afd_move_ex */
 static int afd_poll_t0 = 0;       /* ms clock when the last move command was sent */
 static int afd_extra_ms = 0;      /* extra settle after FOCUS_DONE (probe) */
@@ -8274,6 +8471,101 @@ static void afd_note_flush(void)
     afd_note_lock = 0;
 }
 
+/* ---- modes 4 (AF sweep record) and 5 (AF stop test): own big log buffer ---- */
+#define AFW_LOG_SIZE   65536
+#define AFW_SWEEP_FILE "ML/LOGS/AFSWEEP.LOG"
+#define AFW_STOP_FILE  "ML/LOGS/AFSTOP.LOG"
+static char *afw_buf = 0;
+static struct afd_samp *afw_samp = 0;
+static int afw_len = 0;
+static const char *afw_file;
+
+static void afw_log(const char *fmt, ...)
+{
+    int room = AFW_LOG_SIZE - afw_len;
+    if (!afw_buf || room <= 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(afw_buf + afw_len, room, fmt, ap);
+    va_end(ap);
+    if (k > 0) afw_len += MIN(k, room - 1);
+}
+
+static void afw_log_samples(const struct afd_samp *s, int n)
+{
+    for (int i = 0; i < n; i++)
+        afw_log("S %d %d %d %d %d %d %d %d %d\n", s[i].t_ms, s[i].frame, (int) s[i].m.s1, (int) s[i].m.s2,
+                (int) s[i].m.s4, (int) s[i].m.g, s[i].m.q, s[i].m.band, s[i].m.luma);
+}
+
+static int afw_stop_at = 0;   /* stop test: send the stop at this many ms after the send */
+static int afw_stop_cond(int t_ms, const struct afd_samp *last, int count)
+{
+    (void) last; (void) count;
+    return t_ms >= afw_stop_at;
+}
+
+static void afw_run(int mode)
+{
+    afw_file = (mode == 4) ? AFW_SWEEP_FILE : AFW_STOP_FILE;
+    afw_len = 0;
+    afw_buf = fio_malloc(AFW_LOG_SIZE);
+    afw_samp = fio_malloc(AFT_MAX_SAMPLES * sizeof(struct afd_samp));
+    if (!afw_buf || !afw_samp)
+    {
+        if (afw_buf) fio_free(afw_buf);
+        if (afw_samp) fio_free(afw_samp);
+        afw_buf = 0; afw_samp = 0;
+        afd_aborted = 1;
+        return;
+    }
+    int us = afd_measure_cost_us();
+    afw_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d frame_ms=%d meas_ms=%d\n",
+            mode == 4 ? "AFSWEEP" : "AFSTOP", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
+            afd_frame_ms, (us + 500) / 1000);
+    afw_log("# meas_us=%d s4_step=%d done_timeout=%d extra_frames=%d\n", us, afd_s4_step, AFT_DONE_TIMEOUT_MS, AFT_EXTRA_FRAMES);
+    static const int sw_cmd[4] = { 600, -600, 600, -600 };
+    static const int sw_spd[4] = { 0x07, 0x07, 0x1F, 0x1F };
+    static const int st_cmd[4] = { 400, -400, 400, -400 };
+    static const int st_at[4]  = { 150, 250, 350, 450 };
+    struct afd_track r;
+    for (int k = 0; k < 4 && !afd_aborted; k++)
+    {
+        int cmd = (mode == 4) ? sw_cmd[k] : st_cmd[k];
+        int spd = (mode == 4) ? sw_spd[k] : 0x07;
+        afw_stop_at = st_at[k];
+        afw_log("# sweep k=%d cmd=%d speed=%x dir=%d\n", k + 1, cmd, spd, cmd > 0 ? 1 : -1);
+        if (mode == 5) afw_log("# stop_plan k=%d at=%d\n", k + 1, afw_stop_at);
+        int n = afd_move_track(cmd, spd, afw_samp, AFT_MAX_SAMPLES, mode == 5 ? afw_stop_cond : 0, &r);
+        afw_log_samples(afw_samp, n);
+        if (mode == 5)
+            afw_log("# stop k=%d t_stop=%d t_done=%d val=%x\n", k + 1, r.stop_ms, r.done_ms, (unsigned) r.done_val);
+        afw_log("# done k=%d t=%d val=%x n=%d\n", k + 1, r.done_ms, (unsigned) r.done_val, n);
+        if (r.aborted) { afw_log("# aborted k=%d\n", k + 1); break; }
+        msleep(500);   /* settle before the next move */
+    }
+    afd_moves = 4;
+}
+
+/* After the session is closed (the card is written only when not recording). */
+static void afw_finish(void)
+{
+    if (!afw_buf) return;
+    if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
+    {
+        if (!is_dir(AFDIAG_LOG_DIR)) FIO_CreateDirectory(AFDIAG_LOG_DIR);
+        FILE *f = FIO_CreateFileOrAppend(afw_file);
+        if (f)
+        {
+            FIO_WriteFile(f, afw_buf, afw_len);
+            FIO_CloseFile(f);
+        }
+    }
+    fio_free(afw_buf);
+    fio_free(afw_samp);
+    afw_buf = 0; afw_samp = 0;
+}
+
 /* One session for all actions: mode 0 AF drive, 1 AF drive calib, 2 AF drive probe, 3 speed test. */
 /* The AF drive engine: everything after the preconditions and the menu
  * wait.  The caller owns afdiag_afdrive_busy and has checked LV / AF mode.
@@ -8285,10 +8577,11 @@ static void afd_note_flush(void)
  * sharpness as % of the best (AF drive), 0 for calib/probe, -1 if aborted. */
 static int afd_engine(int mode, int flags)
 {
-    int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
-    const char *name = speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
+    int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3), meas = (mode >= 4);
+    const char *name = mode == 4 ? "AF sweep record" : mode == 5 ? "AF stop test" : speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     int ret_pct = 0;
     if (afd_log_pending) return -1;   /* the previous log is still waiting for the card */
+    if (meas && (RECORDING || RECORDING_RAW || mlv_raw_rec_busy())) return -1;   /* never while recording */
     afd_rec_run = 0;
     if (flags & AFD_F_REC)
     {
@@ -8353,6 +8646,7 @@ static int afd_engine(int mode, int flags)
     static const uint8_t zeros[16] = { 0 };
     static const uint8_t open_s[16] = { 0x02 };
     int (*send)(int,int,int,const void *) = (int (*)(int,int,int,const void *)) 0x38C4;
+    afd_log_quiet = meas;
     afd_log("# %s t=%d lens=\"%s\" zoom=x%d crop_preset=%d dist0=%d monitor=%s opened_now=%d\n",
             speedt ? "AFSPEED" : probe ? "AFPROBE" : calib ? "AFCALIB" : "AFDRIVE", get_ms_clock(), lens_info.name, lv_dispsize, crop_preset_index,
             (int) lens_info.focus_dist, mon == 2 ? "KEEP" : mon ? "ON" : "OFF", opened_now);
@@ -8400,6 +8694,7 @@ static int afd_engine(int mode, int flags)
         else if (speedt) afd_speed_run();
         else if (probe) afd_probe_run();
         else if (calib) afd_calib_run();
+        else if (meas) afw_run(mode);
         else
         {
             final_s = afd_run(&best);
@@ -8485,17 +8780,24 @@ static int afd_engine(int mode, int flags)
                 ab, afd_best_pos, (int) best, afd_peak_g_pos, afd_fine_peak_pos, (int) final_s, pct, afd_retraces, (int) afd_land_s, pct, afd_moves,
                 afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
 
+    afd_log_quiet = 0;
     afd_rec_run = 0;
+    if (meas) afw_finish();
+    else
+    {
     afd_pend_file = speedt ? AFV_LOG_FILE : probe ? AFP_LOG_FILE : calib ? AFC_LOG_FILE : AFD_LOG_FILE;
     afd_pend_len = afd_len;
     if (!(RECORDING || RECORDING_RAW || mlv_raw_rec_busy()))
         afd_log_write();
     else
         afd_log_pending = 1;   /* written by afd_log_flush() once recording has ended */
+    }
 
     if (!(flags & AFD_F_QUIET))
     {
-        if (speedt)
+        if (meas)
+            NotifyBox(6000, "%s %s: %dms, log %s", name, afd_aborted ? "ABORTED" : "done", total_ms, mode == 4 ? "AFSWEEP.LOG" : "AFSTOP.LOG");
+        else if (speedt)
             NotifyBox(6000, "AF speed test %s: %d moves %dms, log AFSPEED.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
         else if (probe)
             NotifyBox(6000, "AF probe %s: %d moves %dms, log AFPROBE.LOG", afd_aborted ? "ABORTED" : "done", afd_moves, total_ms);
@@ -8514,7 +8816,7 @@ static int afd_engine(int mode, int flags)
 static void afd_task_common(int mode)
 {
     int calib = (mode == 1), probe = (mode == 2), speedt = (mode == 3);
-    const char *name = speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
+    const char *name = mode == 4 ? "AF sweep record" : mode == 5 ? "AF stop test" : speedt ? "AF speed test MPU" : probe ? "AF probe MPU" : calib ? "AF calib MPU" : "AF drive MPU";
     if (afdiag_afdrive_busy || afdiag_afsearch_busy) return;
     if (afd_log_pending)
     {
@@ -8523,7 +8825,7 @@ static void afd_task_common(int mode)
     }
     afdiag_afdrive_busy = 1;
 
-    if (!is_EOSM || !lv || RECORDING || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
+    if (!is_EOSM || !lv || RECORDING || (mode >= 4 && (RECORDING_RAW || mlv_raw_rec_busy())) || is_manual_focus() || slim_af_state != SLIM_AF_IDLE)
     {
         NotifyBox(4000, "%s: needs AF mode, LV, idle, not recording", name);
         goto out;
@@ -8556,6 +8858,7 @@ static volatile int afd_vs_frames = 0, afd_vs_last = 0, afd_vs_maxgap = 0;
 
 static unsigned int afd_rec_vsync_cbr(unsigned int unused)
 {
+    afd_frame_cnt++;
     if (afd_rect_track)
     {
         int now = get_ms_clock();
@@ -8721,6 +9024,32 @@ static void afdiag_afspeed_task(void *unused)
 {
     (void) unused;
     afd_task_common(3);
+}
+
+static void afdiag_afsweep_task(void *unused)
+{
+    (void) unused;
+    afd_task_common(4);
+}
+
+static void afdiag_afstop_task(void *unused)
+{
+    (void) unused;
+    afd_task_common(5);
+}
+
+static MENU_SELECT_FUNC(afdiag_afsweep_select)
+{
+    (void) priv;
+    (void) delta;
+    task_create("afdiag_afsweep", 0x1e, 0x3000, afdiag_afsweep_task, (void*)0);
+}
+
+static MENU_SELECT_FUNC(afdiag_afstop_select)
+{
+    (void) priv;
+    (void) delta;
+    task_create("afdiag_afstop", 0x1e, 0x3000, afdiag_afstop_task, (void*)0);
 }
 
 static MENU_SELECT_FUNC(afdiag_afspeed_select)
@@ -8902,6 +9231,22 @@ static struct menu_entry afdiag_menu[] = {
         .help      = "DIAGNOSTIC: does a speed byte faster than 0x07 move the lens?",
         .help2     = "For speed 03,05,07,09,0B,0F,14,1F moves +120 then -120 and logs FOCUS_DONE time/value and the\n"
                      "sharpness before/after. Same conditions as AF drive. Log: ML/LOGS/AFSPEED.LOG.",
+    },
+    {
+        .name      = "AF sweep record",
+        .select    = afdiag_afsweep_select,
+        .icon_type = IT_DICE,
+        .help      = "MEASUREMENT: record full focus curves: +600, -600 at speed 07, then at 1F.",
+        .help2     = "Samples s1/s2/s4/g/q/band/luma every LV frame while the lens moves. Log: ML/LOGS/AFSWEEP.LOG.\n"
+                     "Reaching an end stop is fine (the MPU limits it). Same conditions as AF drive; not while recording.",
+    },
+    {
+        .name      = "AF stop test",
+        .select    = afdiag_afstop_select,
+        .icon_type = IT_DICE,
+        .help      = "MEASUREMENT: does (9,3,1) halt a (9,1) move? 4 moves of +-400, stop after 150/250/350/450 ms.",
+        .help2     = "Samples sharpness every LV frame; the s trace shows when the lens stops. Log: ML/LOGS/AFSTOP.LOG.\n"
+                     "Same conditions as AF drive; not while recording.",
     },
     {
         .name      = "AF drive REC test",
