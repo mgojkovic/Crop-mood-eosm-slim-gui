@@ -7406,6 +7406,11 @@ static MENU_SELECT_FUNC(afdiag_afsearch_select)
 #define AFD_SPEED            0x07
 #define AFD_SPEED_MID        0x14
 #define AFD_SPEED_FAST       0x1F   /* ~3x the lens speed of 07; unmeasured repositioning, B sweep (setting) */
+/* motion model for afd_move_ex's travel-time wait (same values as AFD_SW_MSPP_*) */
+#define AFD_MV_MSPP_07_X10   29
+#define AFD_MV_MSPP_MID_X10  14
+#define AFD_MV_MSPP_FAST_X10 10
+#define AFD_MV_LAT_MS        120
 /* FOCUS_DONE is a ~510 ms timer for long moves, not the end of the motion (field run: sharpness kept
  * changing hundreds of ms after it).  Every command is therefore short enough to finish within the
  * timer: max |pulses| per command by speed (07: ~0.35 pulses/ms; 1F: ~3x), each chunk waits for its done. */
@@ -8106,6 +8111,31 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             nch++;
             if (done_ms < 0) { any_nodone = 1; afd_es_n = 0; afd_es_acc = 0; break; }   /* no done: do not send the rest on top of a running motor */
             if (afd_es_check(c > 0 ? 1 : -1, c, c, done_ms, done_val)) break;   /* end stop: do not push the rest of the move into it */
+            /* FOCUS_DONE is not the motion end (at 1F it came at ~150 ms for a
+             * 300-pulse chunk that moved until ~590 ms): wait the modelled
+             * travel time before the next command or measurement */
+            {
+                int mspp = sp == AFD_SPEED_FAST ? AFD_MV_MSPP_FAST_X10 : sp == AFD_SPEED_MID ? AFD_MV_MSPP_MID_X10 : AFD_MV_MSPP_07_X10;
+                int need = AFD_MV_LAT_MS + ABS(c) * mspp / 10;
+                int el = get_ms_clock() - t;
+                if (el < need) msleep(need - el);
+            }
+        }
+        /* after an unmeasured (fast) move: also wait until the picture is still
+         * (two frames within 3%, max 700 ms), so the next measured step does not
+         * sample a lens that is still travelling */
+        if (!sample && !afd_aborted)
+        {
+            uint32_t prev = 0;
+            int t0w = get_ms_clock();
+            while (get_ms_clock() - t0w < 700)
+            {
+                uint32_t gq = 0; int lq = 0;
+                uint32_t sq = afd_sample_one(&gq, &lq);
+                if (prev && sq && afd_close(sq > prev ? sq : prev, sq > prev ? prev : sq, 3)) break;
+                prev = sq;
+                msleep(afd_frame_ms > 0 ? afd_frame_ms : 42);
+            }
         }
         int tw = get_ms_clock();
         afd_wait((afd_fast ? afd_frame_ms : AFD_SETTLE_MS) + afd_extra_ms);
@@ -9253,6 +9283,7 @@ static uint32_t afd_run_local(uint32_t *best_out)
 }
 
 /* Entry point of the AF search: dispatches on afd_algo_cur. */
+static uint32_t afd_ep_sample(void);   /* defined with afd_engine */
 static uint32_t afd_run(uint32_t *best_out)
 {
     /* B (and C, and the local search, which may fall back to B) search the whole range: a longer cap */
@@ -9267,6 +9298,27 @@ static uint32_t afd_run(uint32_t *best_out)
         case 4: r = afd_run_e(best_out); break;
         case AFD_ALGO_LOCAL: r = afd_run_local(best_out); break;
         default: r = afd_run_a(best_out); break;   /* 0 A and 5 F */
+    }
+    if (r && !afd_aborted && !afd_nopeak && !afd_lowcontrast && afd_algo_cur != 0 && afd_algo_cur != 5)
+    {
+        /* verify the landing: 300 ms later the picture must still be sharp;
+         * if it is not (the lens was still travelling), land once more */
+        msleep(300);
+        uint32_t v = afd_ep_sample();
+        if (v && afd_below(v, r, 85) && !afd_must_abort())
+        {
+            int d = afd_run_dir ? afd_run_dir : 1;
+            afd_log("# landing drift land_s=%d after_300ms=%d -> re-land dir=%d\n", (int) r, (int) v, d);
+            uint32_t r2 = afd_land_steps(d, afd_pos - d * AFD_RT_BACK, AFD_RT_BACK, r);
+            if (!afd_aborted)
+            {
+                msleep(300);
+                uint32_t v2 = afd_ep_sample();
+                afd_log("# re-land s=%d after_300ms=%d\n", (int) r2, (int) v2);
+                if (v2) r = v2;
+            }
+        }
+        else if (v) r = MIN(r, MAX(v, r * 9 / 10));
     }
     if (r && !afd_aborted && !afd_nopeak && !afd_lowcontrast)
     {
@@ -13265,7 +13317,15 @@ static void aref_mpu_settle(int now, uint32_t med, int emax, uint32_t g)
 {
     uint32_t pre = aref_mpu_pre;
     aref_peak_clear();
-    aref_peak_update(now, med, emax, g);
+    if (aref_mpu_land && afd_below(med, aref_mpu_land, 70))
+    {
+        /* the picture settled far below what the landing measured: do not
+         * adopt a blurry reference (then real blur would never trigger) */
+        afd_note("# aref settled far below landing med=%d land=%d: landing kept as reference\n", (int) med, (int) aref_mpu_land);
+        aref_peak_update(now, aref_mpu_land, emax, g);
+    }
+    else
+        aref_peak_update(now, med, emax, g);
     aref_fails = 0;
     aref_log(14, med);
     int impr = !pre || (uint64_t) med * 100 > (uint64_t) pre * (100 + AREF_MPU_IMPROVE_PCT);
