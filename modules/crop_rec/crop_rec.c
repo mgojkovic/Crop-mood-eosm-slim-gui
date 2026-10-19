@@ -8596,6 +8596,7 @@ static void afd_sweep(const char *tag, int dir, int len, int speed, afd_stop_fn 
     {
         w->endstop = 1;
         afd_endstop_dir = dir;
+        afd_pos -= dir * moved;   /* at the end stop the lens did not travel: assume nothing moved */
         afd_log("# endstop dir=%d\n", dir);
     }
     int tpk = n ? afd_sw_samp[imax].t_ms : 0;
@@ -12641,6 +12642,7 @@ static int aref_rec_fb_noted = 0;    /* the fallback to Canon AF while recording
  * Menu actions keep their own task_create (not while recording); the REC test its arm-time task.  All of them
  * are mutually excluded by afdiag_afdrive_busy alone, nobody waits for anybody: no lock to deadlock on. */
 static volatile int afd_wk_req = 0;     /* 0 idle, 1 posted by aref_step, 2 running */
+static int afd_wk_t_post = 0;          /* ms clock when aref_step posted the request */
 static volatile int afd_wk_flags = 0;
 static volatile int afd_wk_ok = 0;      /* the task exists */
 static volatile int aref_mpu_moves = 0;
@@ -12653,6 +12655,7 @@ static void afd_worker_task(void *unused)
         msleep(50);
         if (afd_wk_req != 1) continue;
         afd_wk_req = 2;
+        afd_nopeak_last = 0;   /* a skipped/refused run must not count as "no peak" */
         int fl = afd_wk_flags;
         int t0 = get_ms_clock();
         int pct = -1;
@@ -12779,6 +12782,19 @@ static void aref_step(void)
      * end, recording, manual focus) is not a failure: cooldown and settle only. */
     if (aref_phase == AREF_MPU)
     {
+        /* watchdog: the worker never picked the request up (task dead or never
+         * started) -> release everything, fall back to Canon AF from now on */
+        if (afd_wk_req == 1 && now - afd_wk_t_post > 1500)
+        {
+            afd_wk_req = 0;
+            afd_wk_ok = 0;
+            afdiag_afdrive_busy = 0;
+            aref_mpu_state = 0;
+            aref_phase = AREF_MON;
+            aref_next_at = now + AREF_FAIL_BACKOFF_MS;
+            afd_note("# aref worker not responding: request dropped t=%d\n", now);
+            return;
+        }
         if (aref_mpu_state != 2) return;
         aref_mpu_state = 0;
         aref_phase = AREF_MON;
@@ -13128,6 +13144,7 @@ static void aref_step(void)
             aref_log(1, cur);
             aref_log_affr();
             afd_wk_flags = rec ? (AFD_F_REC | AFD_F_QUIET) : AFD_F_QUIET;
+            afd_wk_t_post = now;
             afd_wk_req = 1;
             return;
         }
