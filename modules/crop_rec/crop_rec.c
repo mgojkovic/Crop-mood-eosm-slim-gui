@@ -7727,13 +7727,89 @@ static void afpr_put(const char *name, int mm, int zoom, int w50, int floor_pct,
     e->honest_pct = honest_pct; e->fine = fine; e->p = p; e->stamp = ++afpr_clock;
     snprintf(e->name, sizeof(e->name), "%s", name);
 }
+#define AFPR_TMP     "ML/SETTINGS/AFLENS.TMP"
+static int afpr_parse_int(const char *s, int base, int *out)
+{
+    int neg = 0, v = 0, nd = 0;
+    if (*s == '-') { neg = 1; s++; }
+    for (; *s; s++, nd++)
+    {
+        int d = (*s >= '0' && *s <= '9') ? *s - '0' : (base == 16 && *s >= 'a' && *s <= 'f') ? *s - 'a' + 10 : -1;
+        if (d < 0 || d >= base || nd > (base == 16 ? 6 : 8)) return 0;   /* hex: at most 7 digits (no int overflow) */
+        v = v * base + d;
+    }
+    if (!nd) return 0;
+    *out = neg ? -v : v;
+    return 1;
+}
+/* one AFLENS.TXT line (modified in place: the separators become NULs).  1 = a valid profile, *e filled (p = 0, stamp = 0). */
+static int afpr_parse_line(char *p, struct afpr_ent *e)
+{
+    char *fld[10];
+    int nf = 0;
+    fld[nf++] = p;
+    for (char *q = p; *q && nf < 10; q++)
+        if (*q == '|') { *q = 0; if (nf < 10) fld[nf] = q + 1; nf++; }
+    int v[7];
+    int ok = nf == 9 && !strcmp(fld[0], "v1") && strlen(fld[1]) < 32;
+    for (int k = 0; ok && k < 7; k++)
+        ok = afpr_parse_int(fld[2 + k], k == 4 ? 16 : 10, &v[k]);
+    if (!(ok && v[0] >= 0 && v[0] <= 400 && v[1] >= 1 && v[1] <= 10 && v[2] >= 1 && v[2] <= 400 && v[3] >= -1 &&
+          v[3] <= 300 && v[5] >= 0 && v[5] <= 100 && v[6] >= 6 && v[6] <= 30))
+        return 0;
+    memset(e, 0, sizeof(*e));
+    snprintf(e->name, sizeof(e->name), "%s", fld[1]);
+    e->mm = v[0]; e->zoom = v[1]; e->w50 = v[2]; e->floor_pct = v[3]; e->done_word = v[4]; e->honest_pct = v[5]; e->fine = v[6];
+    e->used = 1;
+    return 1;
+}
+/* Bounded read of the profile file (AFLENS.TXT, else the TMP left by a crash between write and rename): at most
+ * AFPR_READ_MAX bytes, NUL terminated, cut after the last complete line.  Returns a fio_malloc buffer (caller frees) or 0;
+ * *size = the file size (-1 when no file exists, 0 when the read failed).  Not for use while recording. */
+#define AFPR_READ_MAX 16384
+static char *afpr_read_file(int *size, const char **path_out)
+{
+    uint32_t fsz = 0;
+    const char *path = AFPR_FILE;
+    *size = -1;
+    if (FIO_GetFileSize(AFPR_FILE, &fsz))
+    {
+        path = AFPR_TMP;
+        fsz = 0;
+        if (FIO_GetFileSize(AFPR_TMP, &fsz)) return 0;   /* no file */
+    }
+    if (path_out) *path_out = path;
+    *size = (int) fsz;
+    if (fsz < 1) return 0;
+    uint32_t want = fsz > AFPR_READ_MAX ? AFPR_READ_MAX : fsz;
+    char *buf = fio_malloc(want + 1);
+    if (!buf) { *size = 0; return 0; }
+    FILE *f = FIO_OpenFile(path, O_RDONLY | O_SYNC);
+    int got = 0;
+    if (f)
+    {
+        got = FIO_ReadFile(f, buf, want);
+        FIO_CloseFile(f);
+    }
+    if (got <= 0 || got > (int) want) { fio_free(buf); *size = 0; return 0; }
+    buf[got] = 0;
+    if (fsz > want)
+    {
+        while (got > 0 && buf[got - 1] != '\n') got--;   /* a cut-off last line is dropped */
+        buf[got] = 0;
+    }
+    return buf;
+}
 /* write the file (oldest first); an empty table removes it.  Never while recording (dirty stays set).  The text is built in
  * RAM first; the file is written to AFLENS.TMP, then AFLENS.TXT is replaced (a crash in between leaves the TMP, which
  * afpr_load falls back to).  A second caller while a save is running only sets afpr_dirty: the running save loops again.
- * afpr_dirty is cleared only after a successful write. */
-#define AFPR_TMP     "ML/SETTINGS/AFLENS.TMP"
-static char afpr_txt[2048];
+ * afpr_dirty is cleared only after a successful write.
+ * Patch 17 / P1: before writing, the file on the card is read again and every valid entry whose key is NOT in the RAM table
+ * is kept (written first = oldest), so a failed or partial load can never erase stored profiles.  An existing but unreadable
+ * file is never overwritten (dirty stays set, retried).  Only "Forget lens profiles" (afpr_nomerge) removes entries. */
+static char afpr_txt[8192];
 static volatile int afpr_save_lock = 0;
+static volatile int afpr_nomerge = 0;
 static int afpr_save_t = 0;
 static void afpr_save(void)
 {
@@ -7745,8 +7821,48 @@ static void afpr_save(void)
     for (int round = 0; round < 3 && afpr_dirty; round++)
     {
         afpr_dirty = 0;   /* a concurrent change sets it again */
-        int n = 0, len = 0;
+        int n = 0, len = 0, kept = 0;
         for (int i = 0; i < AFPR_N; i++) n += afpr_tab[i].used;
+        if (!afpr_nomerge)
+        {
+            int fsz = -1;
+            char *old = afpr_read_file(&fsz, 0);
+            if (fsz > 0 && !old)
+            {
+                afpr_dirty = 1;   /* the file exists but could not be read: do not overwrite it */
+                afd_note("# PROFILE save deferred: AFLENS.TXT unreadable size=%d\n", fsz);
+                break;
+            }
+            if (old)
+            {
+                char *p = old;
+                while (*p)
+                {
+                    char *eol = p;
+                    while (*eol && *eol != '\n') eol++;
+                    int last_line = !*eol;
+                    int ll = (int) (eol - p);
+                    if (ll > 0 && eol[-1] == '\r') ll--;
+                    if (ll > 0 && ll < 127)
+                    {
+                        char tmp[128];
+                        struct afpr_ent e;
+                        memcpy(tmp, p, ll);
+                        tmp[ll] = 0;
+                        if (afpr_parse_line(tmp, &e) && afpr_find(e.name, e.mm, e.zoom) < 0 && len + ll + 1 < (int) sizeof(afpr_txt) / 2)
+                        {
+                            memcpy(afpr_txt + len, p, ll);
+                            len += ll;
+                            afpr_txt[len++] = '\n';
+                            kept++;
+                        }
+                    }
+                    if (last_line) break;
+                    p = eol + 1;
+                }
+                fio_free(old);
+            }
+        }
         int last = -1;
         for (int c = 0; c < n; c++)
         {
@@ -7766,6 +7882,7 @@ static void afpr_save(void)
         {
             FIO_RemoveFile(AFPR_FILE);
             FIO_RemoveFile(AFPR_TMP);
+            afpr_nomerge = 0;
             continue;
         }
         FIO_RemoveFile(AFPR_TMP);
@@ -7775,47 +7892,25 @@ static void afpr_save(void)
         if (wr != len) { afpr_dirty = 1; break; }
         FIO_RemoveFile(AFPR_FILE);
         if (FIO_RenameFile(AFPR_TMP, AFPR_FILE)) afpr_dirty = 1;   /* the TMP stays; the next save retries */
+        else afpr_nomerge = 0;
+        if (kept) afd_note("# PROFILE save kept_from_file=%d ram=%d\n", kept, n);
     }
     afpr_save_lock = 0;
 }
 static void afpr_forget(void)
 {
     memset(afpr_tab, 0, sizeof(afpr_tab));
+    afpr_nomerge = 1;   /* the explicit way to drop entries: the file is not merged back */
     afpr_save();
 }
-static int afpr_parse_int(const char *s, int base, int *out)
-{
-    int neg = 0, v = 0, nd = 0;
-    if (*s == '-') { neg = 1; s++; }
-    for (; *s; s++, nd++)
-    {
-        int d = (*s >= '0' && *s <= '9') ? *s - '0' : (base == 16 && *s >= 'a' && *s <= 'f') ? *s - 'a' + 10 : -1;
-        if (d < 0 || d >= base || nd > (base == 16 ? 6 : 8)) return 0;   /* hex: at most 7 digits (no int overflow) */
-        v = v * base + d;
-    }
-    if (!nd) return 0;
-    *out = neg ? -v : v;
-    return 1;
-}
-/* tolerant: a bad line is skipped.  Module init only. */
+/* tolerant: a bad line is skipped.  Module init only (never recording).  Logs one "# PROFILE load" note. */
 static void afpr_load(void)
 {
-    uint32_t size = 0;
+    int size = -1, entries = 0, bad = 0;
     const char *path = AFPR_FILE;
-    if (FIO_GetFileSize(AFPR_FILE, &size)) { path = AFPR_TMP; size = 0; if (FIO_GetFileSize(AFPR_TMP, &size)) return; }   /* a crash between the write and the rename */
-    if (size < 8 || size > 16384) return;
-    char *buf = fio_malloc(size + 1);
-    if (!buf) return;
-    FILE *f = FIO_OpenFile(path, O_RDONLY | O_SYNC);
-    int got = 0;
-    if (f)
+    char *buf = afpr_read_file(&size, &path);
+    if (buf)
     {
-        got = FIO_ReadFile(f, buf, size);
-        FIO_CloseFile(f);
-    }
-    if (got > 0 && got <= (int) size)
-    {
-        buf[got] = 0;
         char *p = buf;
         while (*p)
         {
@@ -7824,23 +7919,18 @@ static void afpr_load(void)
             int last_line = !*eol;
             *eol = 0;
             if (eol > p && eol[-1] == '\r') eol[-1] = 0;
-            char *fld[9];
-            int nf = 0;
-            fld[nf++] = p;
-            for (char *q = p; *q && nf < 10; q++)
-                if (*q == '|') { *q = 0; if (nf < 9) fld[nf] = q + 1; nf++; }
-            int v[7];
-            int ok = nf == 9 && !strcmp(fld[0], "v1") && strlen(fld[1]) < 32;
-            for (int k = 0; ok && k < 7; k++)
-                ok = afpr_parse_int(fld[2 + k], k == 4 ? 16 : 10, &v[k]);
-            if (ok && v[0] >= 0 && v[0] <= 400 && v[1] >= 1 && v[1] <= 10 && v[2] >= 1 && v[2] <= 400 && v[3] >= -1 &&
-                v[3] <= 300 && v[5] >= 0 && v[5] <= 100 && v[6] >= 6 && v[6] <= 30)
-                afpr_put(fld[1], v[0], v[1], v[2], v[3], v[4], v[5], v[6], 0);
+            struct afpr_ent e;
+            if (*p && *p != '#')
+            {
+                if (afpr_parse_line(p, &e)) { afpr_put(e.name, e.mm, e.zoom, e.w50, e.floor_pct, e.done_word, e.honest_pct, e.fine, 0); entries++; }
+                else bad++;
+            }
             if (last_line) break;
             p = eol + 1;
         }
+        fio_free(buf);
     }
-    fio_free(buf);
+    afd_note("# PROFILE load path=%s size=%d entries=%d bad_lines=%d\n", size < 0 ? AFPR_FILE : path, size, entries, bad);
 }
 
 static int afdiag_finestep = 0;      /* Fine step menu: 0 Auto (20 at <= 24 mm, 14 at <= 35 mm, 10 above), 1 = 20, 2 = 12, 3 = 8 */
@@ -7921,6 +8011,8 @@ static int afd_sw_speed = AFD_SPEED_FAST; /* B/C sweep speed ("Sweep speed" sett
  * menu/config resolution; normal runs never set them (algo/speed = -1, dir = 0).  Cleared at engine end. */
 static int afd_hunt_algo = -1;    /* -1 = menu/config, AFD_ALGO_LOCAL = local search, 1 = B */
 static int afd_hunt_speed = -1;   /* -1 = menu setting, else a speed byte (0x07 / 0x14 / 0x1F) */
+static int afd_last_search_dir = 0;   /* patch 17 / H2: direction the last AF run searched FIRST (coarse scan, else sweep), 0 = none
+                                        * (set in afd_run_sweep, reset at engine start, published to the hunt by aref_mpu_exec) */
 static int afd_hunt_dir = 0;      /* 0 = normal probe direction, +1 / -1 = force the B sweep direction */
 static int afdiag_afsweepspd = 0;         /* 0 07 (default), 1 14, 2 1F */
 static const uint8_t afd_algo_menu_tbl[5] = { 0, 1, 3, 4, 5 };   /* menu index -> afd_algo_cur (2 = C is kept in the code only) */
@@ -8374,6 +8466,17 @@ typedef int (*afd_stop_fn)(int t_ms, const struct afd_samp *last, int count);
  * Returns the number of samples stored (<= max); details in *r. */
 static int afd_track_exp_ms = 0;   /* patch 13: t_exp of the move being tracked (0 = unknown) */
 static int afd_track_min_ms = 0;   /* tracking goes on until this many ms after the send, whatever FOCUS_DONE says (0 = off) */
+/* patch 16 / P3: dropped-move detector, log only.  The EF-M ignores some moves of 40..100 pulses (a "done" 60-120 ms after the
+ * send, no 0x0400 / 0x1000 bit) although they were sent after the previous done.  EF-M done word (0x4e....), |len| >= 40,
+ * honest-looking done earlier than 50 % of the expected 153 + 1.33 |len| ms: counted and logged, nothing is resent. */
+static int afd_suspect_dropped = 0;
+static void afd_p16_suspect(int len, int done_ms, int done_val)
+{
+    if (done_ms < 0 || ABS(len) < 40 || (done_val & 0xFF0000) != 0x4E0000 || (done_val & 0x1400)) return;
+    if (done_ms * 2 * 100 >= (153 * 100 + 133 * ABS(len))) return;
+    afd_suspect_dropped++;
+    afd_log("# move suspect_dropped p=%d done_ms=%d val=%x\n", len, done_ms, done_val);
+}
 static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, afd_stop_fn stop_cond, struct afd_track *r)
 {
     static const uint8_t stop = 0;
@@ -8414,6 +8517,7 @@ static int afd_move_track(int n, int speed, struct afd_samp *samples, int max, a
             extra = AFT_EXTRA_FRAMES;
             refused = ABS(n) >= AFD_ENDSTOP_MIN && t < AFD_ES_MS && (r->done_val & 0x1000);
             r->honest = !(r->done_val & 0x1400);
+            afd_p16_suspect(n, r->done_ms, (int) r->done_val);
             /* patch 13 / T1: honest done = motion end on a trusted lens; on the EF-M no pad, but not before t_exp */
             if (AFD_P13_DONE_TRUST && r->honest)
                 min_ms = (r->trust && r->done_val == AFD_P13_TRUST_VAL && t >= AFD_P13_TRUST_FAST_MS) ? 0 :
@@ -8644,6 +8748,7 @@ static uint32_t afd_move_ex(const char *phase, int n, int sample, int track)
             int mspp = sp == AFD_SPEED_FAST ? AFD_MV_MSPP_FAST_X10 : sp == AFD_SPEED_MID ? AFD_MV_MSPP_MID_X10 : AFD_MV_MSPP_07_X10;
             int need = AFD_MV_LAT_MS + ABS(c) * mspp / 10;
             afd_p13_note(done_ms, done_val, c, need, 0);
+            afd_p16_suspect(c, done_ms, done_val);
             if (afd_es_check(c > 0 ? 1 : -1, c, c, done_ms, done_val)) break;   /* end stop: do not push the rest of the move into it */
             /* FOCUS_DONE is not the motion end (at 1F it came at ~150 ms for a
              * 300-pulse chunk that moved until ~590 ms): wait the modelled
@@ -9900,14 +10005,16 @@ static int afd_sweep_find(int pos0, int d, int spd, int maxch, int *dir_out, uin
             if (found && cont && !other && k == 0 && w.imax == 0) afd_log("# sweep first sample is the probe continuation (cont=1)\n");
         }
         if (found) break;
-        /* nothing to find: a full-range direction (not the re-sweep) with s flat and g never rising, and no early end stop
-         * (which would suggest the peak is the other way) ends here instead of 12 more chunks the other way */
-        int cap = !other && !afd_sweep_one_dir && maxch * chunk >= AFD_CAP_RANGE && gmax && gfirst &&
-                  (uint64_t) gmax * 100 < (uint64_t) gmin * AFD_NOPEAK_PCT &&
-                  (uint64_t) gtop * 100 <= (uint64_t) gfirst * AFD_CAP_G_PCT && !(stopped && kdone < AFD_ES_EARLY_CHUNKS);
-        if (cap)
-            afd_log("# sweep dir=%d: flat after %d chunks (smax=%d smin=%d gtop=%d gfirst=%d endstop=%d), no other way\n", d, kdone,
+        /* nothing found in the first direction.  Patch 17 / H1: a flat first direction no longer ends the search (the old "flat, no
+         * other way" cap sent a deep search one way only: field 2026-10-20, focus +1400 away, 31 s); the other direction is
+         * always searched, unless it is a known end stop (afd_endstop_dir of this run). */
+        int cap = !other && !afd_sweep_one_dir && afd_endstop_dir == -d;
+        if (!other && !afd_sweep_one_dir && !cap && maxch * chunk >= AFD_CAP_RANGE && gmax && gfirst &&
+            (uint64_t) gmax * 100 < (uint64_t) gmin * AFD_NOPEAK_PCT && (uint64_t) gtop * 100 <= (uint64_t) gfirst * AFD_CAP_G_PCT)
+            afd_log("# sweep flat dir=%d -> other way (H1) after %d chunks (smax=%d smin=%d gtop=%d gfirst=%d endstop=%d)\n", d, kdone,
                     (int) gmax, (int) gmin, (int) gtop, (int) gfirst, stopped);
+        if (cap)
+            afd_log("# sweep dir=%d: other way is a known end stop (dir=%d), not searched\n", d, afd_endstop_dir);
         if (!other && !afd_sweep_one_dir && !cap)
         {
             other = 1; dir = -d; target = pos0 + d * pre;   /* then the other way, once, from the start position */
@@ -9933,6 +10040,9 @@ static int afd_sweep_find(int pos0, int d, int spd, int maxch, int *dir_out, uin
 /* chunks of a sweep at speed spd that cover `base` chunks of 07 */
 static int afd_sw_maxch(int spd, int base)
 {
+    /* patch 17 / H3: a trusted lens's larger 07 chunk (patch 15) widens the range instead of shrinking the count:
+     * 12 x chunk per direction (2400 at chunk 200).  Speeds 14 / 1F keep their fixed ranges. */
+    if (spd < AFD_SPEED_MID && afd_chunk(spd) > AFD_CHUNK_07) return base;
     return MAX(1, base * AFD_CHUNK_07 / afd_chunk(spd));
 }
 
@@ -10034,6 +10144,7 @@ static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
         coarse = 1;
         afd_phase("coarse");
         afd_log("# coarse1f: probe flat, scan at spd=%x chunks_max=%d from pos0=%d dir=%d\n", AFD_SPEED_FAST, AFD_SW_COARSE_CHUNKS, pos0, d);
+        if (!afd_last_search_dir) afd_last_search_dir = d;
         if (!afd_sweep_find(pos0, d, AFD_SPEED_FAST, AFD_SW_COARSE_CHUNKS, &cdir, &cref, &cpk))
         {
             afd_log("# coarse1f: no peak region\n");   /* afd_nopeak / afd_aborted set by afd_sweep_find */
@@ -10071,8 +10182,10 @@ static uint32_t afd_run_sweep(uint32_t *best_out, int cmode)
             afd_sweep_nopre = 1;   /* patch 12 / S3: no jump back, sweep from here */
             afd_sweep_cont = tp_rise && d == 1 && !afd_hunt_dir;   /* patch 15 / F1 */
         }
+        if (!afd_last_search_dir) afd_last_search_dir = d;
         found = afd_sweep_find(pos0, d, spd, maxch, &dir, &ref, &pk);
     }
+    else if (!afd_last_search_dir) afd_last_search_dir = dir;   /* the tracked probe found the peak: its direction */
     afd_sweep_one_dir = 0;
     if (!found)
     {
@@ -11366,7 +11479,7 @@ static void afrt_prep(void)
 #define AFPR_REACH     160
 #define AFPR_NSTEP     5
 #define AFPR_MV_MAX    48
-#define AFPR_PROBE_MS  8000    /* probe deadline after the landing (at least; the whole run is held to 20 s from its start when that is later) */
+#define AFPR_PROBE_MS  20000    /* probe deadline after the landing (at least; the whole run is held to 20 s from its start when that is later) */
 #define AFPR_X0_MIN_PCT 85
 static const int afpr_steps[AFPR_NSTEP] = { 10, 10, 20, 40, 80 };
 static volatile int afpr_keep_log = 0;    /* the Refocus test owns the log buffer: do not finish it */
@@ -11377,8 +11490,8 @@ static volatile int afpr_done_ok = 0;     /* ... forgetting it only when the pro
 static char afpr_why[24] = "engine";
 static int afpr_mv_val[AFPR_MV_MAX], afpr_mv_ms[AFPR_MV_MAX], afpr_mv_n;
 
-/* one measured 07 move (sample 2: never the unmeasured fast speed); done statistics; half-shutter ends the run */
-static uint32_t afpr_mv(const char *ph, int n)
+/* one sub-move: measured 07 move (sample 2: never the unmeasured fast speed); done statistics; half-shutter ends the run */
+static uint32_t afpr_mv1(const char *ph, int n)
 {
     uint32_t s = afd_move_ex(ph, n, 2, 0);
     if (!afd_aborted && n && afd_last_done_ms >= 0 && afpr_mv_n < AFPR_MV_MAX)
@@ -11390,7 +11503,20 @@ static uint32_t afpr_mv(const char *ph, int n)
     if (get_halfshutter_pressed()) afd_aborted = 1;
     return s;
 }
-/* back to x0 in chunks of at most 80 (measured moves); 0 = failed / aborted */
+#define AFPR_SUB 30   /* patch 16 / P1: untrusted lenses (EF-M) ignore some moves of 40..100 pulses; <= 30 complete honestly */
+static uint32_t afpr_mv(const char *ph, int n)
+{
+    if (afd_p13_trusted() || ABS(n) <= AFPR_SUB) return afpr_mv1(ph, n);
+    uint32_t s = 0;
+    for (int rem = n; rem && !afd_aborted; )
+    {
+        int c = COERCE(rem, -AFPR_SUB, AFPR_SUB);
+        s = afpr_mv1(ph, c);   /* each sub-move waits for its own FOCUS_DONE inside afd_move_ex */
+        rem -= c;
+    }
+    return s;
+}
+/* back to x0 in measured steps (sub-moves of <= 30 on an untrusted lens); 0 = failed / aborted */
 static int afpr_goto(int x0)
 {
     for (int k = 0; k < 8 && afd_pos != x0; k++)
@@ -11399,6 +11525,34 @@ static int afpr_goto(int x0)
         if (afd_aborted) return 0;
     }
     return afd_pos == x0;
+}
+/* patch 16 / P2: closed-loop recovery after a return to x0.  s0 (< 85 % of P) was read at the expected x0.  Walk +-fine
+ * steps (<= 30) around it, up to +-60 pulses (at most 8 readings), keep the best point, stop at >= 90 % of P, end at the best
+ * point and re-measure there.  *x0 follows the best point (the lens really is there).  Returns the settled s at the end. */
+static uint32_t afpr_recover(int *x0, uint32_t P, uint32_t s0, const char *where)
+{
+    int f = COERCE(afd_fine, 6, 30);
+    int base = *x0, cur = 0, best_off = 0, tries = 0, st = 0;
+    uint32_t best = s0, s = s0;
+    for (int k = 1; k <= 16 && tries < 8 && !afd_aborted && !((uint64_t) best * 100 >= (uint64_t) P * 90); k++)
+    {
+        int off = ((k & 1) ? 1 : -1) * ((k + 1) / 2) * f;   /* +f, -f, +2f, -2f ... */
+        if (ABS(off) > 60) break;
+        if (afd_pos != base + off) { afpr_mv("pv", base + off - afd_pos); if (afd_aborted) break; }
+        cur = off;
+        s = afd_rc_rest(&st);
+        if (afd_aborted) break;
+        tries++;
+        if (s > best) { best = s; best_off = cur; }
+    }
+    if (!afd_aborted && afd_pos != base + best_off)
+    {
+        afpr_mv("pv", base + best_off - afd_pos);
+        if (!afd_aborted) best = afd_rc_rest(&st);
+    }
+    *x0 = afd_pos;
+    afw_log("# PROF_RECOVER where=%s tries=%d s=%d pct=%d off=%d\n", where, tries, (int) best, P ? (int) ((uint64_t) best * 100 / P) : 0, best_off);
+    return best;
 }
 /* offset where s falls to 50 % of P, linear between the bracketing offsets; -1 if it never does */
 static int afpr_w50(const int *off, const uint32_t *s, int n, uint32_t P)
@@ -11453,9 +11607,7 @@ static void afpr_run(void)
     {
         afd_travel = 0;   /* the landing's travel is spent; the probe has its own, tiny, budget */
         afd_endstop_dir = 0; afd_es_dir = 0; afd_es_n = 0; afd_es_acc = 0;
-        int dl = get_ms_clock() + AFPR_PROBE_MS;
-        if (t_start + 20000 - dl > 0) dl = t_start + 20000;
-        afd_deadline = dl;
+        afd_deadline = get_ms_clock() + AFPR_PROBE_MS;   /* patch 16: landing end + 12 s (sub-moves of <= 30 take longer) */
         int x0 = afd_pos, st = 0;
         P = afd_rc_rest(&st);   /* the reference: settled s at x0 */
         afw_log("# PROF_P x0=%d P=%d settled=%d\n", x0, (int) P, st);
@@ -11482,8 +11634,16 @@ static void afpr_run(void)
             if (!afpr_goto(x0)) break;
             uint32_t sr = afd_rc_rest(&st);
             if (afd_aborted) break;
-            if (!side) { s_ret = sr; x0_ret = (int) ((uint64_t) sr * 100 / P); afw_log("# PROF_RET x0_return_pct=%d s=%d\n", x0_ret, (int) sr); }
-            else { s_end = sr; x0_end = (int) ((uint64_t) sr * 100 / P); afw_log("# PROF_END x0_end_pct=%d s=%d\n", x0_end, (int) sr); }
+            int pr = (int) ((uint64_t) sr * 100 / P);
+            afw_log("# PROF_%s pre_recover_pct=%d s=%d\n", side ? "END" : "RET", pr, (int) sr);
+            if (pr < AFPR_X0_MIN_PCT)
+            {
+                sr = afpr_recover(&x0, P, sr, side ? "end" : "mid");
+                if (afd_aborted) break;
+                pr = (int) ((uint64_t) sr * 100 / P);
+            }
+            if (!side) { s_ret = sr; x0_ret = pr; afw_log("# PROF_RET x0_return_pct=%d s=%d\n", x0_ret, (int) sr); if (pr < AFPR_X0_MIN_PCT) break; }
+            else { s_end = sr; x0_end = pr; afw_log("# PROF_END x0_end_pct=%d s=%d\n", x0_end, (int) sr); }
         }
 probe_end:
         {
@@ -11541,6 +11701,7 @@ probe_end:
             fine = w50 >= 0 ? afpr_fine_from(w50) : 0;
             if (w50 < 0) snprintf(afpr_why, sizeof(afpr_why), "nowidth");
             else if (x0_ret < AFPR_X0_MIN_PCT) snprintf(afpr_why, sizeof(afpr_why), "x0return");
+            else if (x0_end < AFPR_X0_MIN_PCT) snprintf(afpr_why, sizeof(afpr_why), "x0end");   /* patch 16: ok only with the picture back in focus */
             else if (afd_pos != x0) snprintf(afpr_why, sizeof(afpr_why), "noreturn");   /* never ok with the lens off x0 */
             else if (kmm != afd_mm_bucket() || kzoom != lv_dispsize) snprintf(afpr_why, sizeof(afpr_why), "keychange");
             else
@@ -11863,6 +12024,7 @@ static int afd_engine(int mode, int flags)
         afd_aref_trig_path = 0;
     }
     afd_path_local = 0;
+    afd_last_search_dir = 0;
     afd_rt_thr1 = AFD_RT_THR1;
     afd_fine = afd_fine_eff();
     int p14_w50 = 0, p14_fine = (AFD_P14_PROFILE_FINE && afdiag_finestep == 0) ? afpr_fine_cur(&p14_w50) : 0;
@@ -11920,7 +12082,7 @@ static int afd_engine(int mode, int flags)
     afd_last_dir = 0;
     afd_best_dir = 0;
     afd_nolv = 0;
-    afd_scene_n = 0; afd_scene = 0; afd_no_lowwait = 0;
+    afd_scene_n = 0; afd_scene = 0; afd_no_lowwait = 0; afd_suspect_dropped = 0;
     afd_n_nodone = afd_n_err = afd_n_fast = 0;
     afd_t0 = get_ms_clock();
     afd_log_reserve = AFD_LOG_RESERVE;
@@ -12180,7 +12342,7 @@ static int afd_engine(int mode, int flags)
     afd_done_timeout = AFD_DONE_TIMEOUT_MS;
     int epilogue_ms = get_ms_clock() - t_epi;   /* stop + session close + monitor close + epilogue samples */
     if (mode >= 6)
-        afw_log("# RESULT %s aborted=%s trials=%d total_ms=%d\n\n", mode == 10 ? "profile" : mode == 9 ? "pipetest" : mode == 8 ? "rtest_prep" : mode == 6 ? "bench" : "revcal", ab, afd_moves, total_ms);
+        afw_log("# RESULT %s aborted=%s trials=%d total_ms=%d suspect_dropped=%d\n\n", mode == 10 ? "profile" : mode == 9 ? "pipetest" : mode == 8 ? "rtest_prep" : mode == 6 ? "bench" : "revcal", ab, afd_moves, total_ms, afd_suspect_dropped);
     else if (speedt)
         afd_log("# RESULT aborted=%s moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d end_pos=%d\n\n",
                 ab, afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
@@ -12195,9 +12357,9 @@ static int afd_engine(int mode, int flags)
                 afd_cal_peak_pos[0] - afd_cal_peak_pos[1],
                 afd_cal_peak_pos[2] - afd_cal_peak_pos[0], afd_moves, afd_n_nodone, afd_n_err, afd_n_fast, total_ms, afd_pos);
     else
-        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d peak_g_pos=%d fine_peak_pos=%d final_s=%d final_best_pct=%d retraces=%d land_s=%d land_pct=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d search_ms=%d epilogue_ms=%d end_pos=%d travel=%d algo=%s\n\n",
+        afd_log("# RESULT aborted=%s best_pos=%d best_s=%d peak_g_pos=%d fine_peak_pos=%d final_s=%d final_best_pct=%d retraces=%d land_s=%d land_pct=%d moves=%d n_nodone=%d n_err=%d n_fast=%d total_ms=%d search_ms=%d epilogue_ms=%d end_pos=%d travel=%d algo=%s suspect_dropped=%d\n\n",
                 ab, afd_best_pos, (int) best, afd_peak_g_pos, afd_fine_peak_pos, (int) final_s, pct, afd_retraces, (int) afd_land_s, pct, afd_moves,
-                afd_n_nodone, afd_n_err, afd_n_fast, total_ms, search_ms, epilogue_ms, afd_pos, afd_travel, afd_algo_name());
+                afd_n_nodone, afd_n_err, afd_n_fast, total_ms, search_ms, epilogue_ms, afd_pos, afd_travel, afd_algo_name(), afd_suspect_dropped);
 
     afd_log_quiet = 0;
     afd_rec_run = 0;
@@ -12604,6 +12766,13 @@ static MENU_SELECT_FUNC(afdiag_proforget_select)
     NotifyBox(3000, "Lens profiles forgotten");
 }
 
+static MENU_UPDATE_FUNC(afdiag_proforget_update)
+{
+    int n = 0;
+    for (int i = 0; i < AFPR_N; i++) n += afpr_tab[i].used;
+    MENU_SET_RINFO("%d stored, %d built-in", n, AFPR_BUILTIN_N);   /* patch 17 / P1 */
+}
+
 static MENU_SELECT_FUNC(afdiag_afrev_select)
 {
     (void) priv;
@@ -12924,6 +13093,7 @@ static struct menu_entry afdiag_menu[] = {
     {
         .name      = "Forget lens profiles",
         .select    = afdiag_proforget_select,
+        .update    = afdiag_proforget_update,
         .icon_type = IT_ACTION,
         .help      = "Delete all stored lens profiles (ML/SETTINGS/AFLENS.TXT); they are measured again when needed.",
     },
@@ -15364,6 +15534,7 @@ static volatile int aref_mpu_esdir = 0;       /* end-stop direction seen by the 
 static volatile int aref_mpu_nopeak = 0;      /* the run found no real peak */
 static volatile int aref_mpu_lowc = 0;        /* the run found no texture */
 static volatile int aref_mpu_travel = 0;      /* pulses travelled by the run (bounded per attempt) */
+static volatile int aref_mpu_search_dir = 0;   /* patch 17 / H2: afd_last_search_dir of the last run */
 static volatile int aref_mpu_dir = 0;         /* B sweep direction of the run (for the reversed strategy) */
 static volatile int aref_mpu_timeout = 0;     /* patch 9.1 / S4: the run hit its own cap (timeout/travel abort) */
 
@@ -15404,6 +15575,7 @@ static void aref_mpu_exec(int fl)
     aref_mpu_lowc = afd_lowcontrast;
     aref_mpu_travel = afd_travel;
     aref_mpu_dir = afd_run_dir;
+    aref_mpu_search_dir = afd_last_search_dir;
     aref_mpu_timeout = afd_timeout || afd_travel_cap;
     if (fl & AFD_F_REC)
         afd_note("# aref rec pct=%d ms=%d moves=%d\n", pct, aref_mpu_ms, aref_mpu_moves);
@@ -16549,6 +16721,7 @@ static void aref_hunt_launch(int now, int s)
         /* the "other speed / reversed" leg: 14 or 1F, opposite to the previous B direction */
         afd_hunt_speed = (aref_hunt_n & 1) ? AFD_SPEED_MID : AFD_SPEED_FAST;
         afd_hunt_dir = aref_hunt_last_dir ? -aref_hunt_last_dir : 1;
+        afd_note("# hunt alt dir=%d prev_search_dir=%d t=%d\n", afd_hunt_dir, aref_hunt_last_dir, now);
     }
     else
     {
@@ -16884,7 +17057,7 @@ static void aref_step(void)
             aref_hunt_att_pct = aref_mpu_pct;
             aref_hunt_att_land = (int) aref_mpu_land;
             aref_hunt_travel += aref_mpu_travel;
-            aref_hunt_last_dir = aref_mpu_dir;
+            aref_hunt_last_dir = aref_mpu_search_dir ? aref_mpu_search_dir : aref_mpu_dir;   /* patch 17 / H2: the direction really searched first */
             if (aref_mpu_pct >= 0)
             {
                 /* the run found a peak: judge after the settle (aref_hunt_settle) or the fallback timer */

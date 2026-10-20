@@ -2,4 +2,6 @@
 # Line format: v1|name|mm|zoom|W50|floor_pct|done_word_hex|honest_pct|fine|n=<samples>|src=<contributors>
 # Same as the camera's ML/SETTINGS/AFLENS.TXT plus n= and src=.  Maintained by contrib/af_test/lens_db.py
 # (import / list / export-header); see the "Sharing lens profiles" section of contrib/af_test/README.md.
-v1|EF-M18-55mm f/3.5-5.6 IS STM|20|5|40|16|4e0000|92|28|n=1|src=mgojkovic-eosm|w=40|f=16
+v1|EF-M18-55mm f/3.5-5.6 IS STM|20|5|25|12|4e0000|91|18|n=2|src=mgojkovic-eosm|w=40,25|f=16,12
+v1|EF-M18-55mm f/3.5-5.6 IS STM|60|5|19|17|4e0000|50|13|n=1|src=mgojkovic-eosm|w=19|f=17
+v1|EF50mm f/1.8 STM|40|5|137|41|100|100|30|n=1|src=mgojkovic-eosm|w=137|f=41

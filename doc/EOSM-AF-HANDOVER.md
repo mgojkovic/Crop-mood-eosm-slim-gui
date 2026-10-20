@@ -12,6 +12,31 @@ This handover supersedes the morning version. The detailed history and evidence 
 [AF-ROI-X10.md](AF-ROI-X10.md) (centre ROI / x5 vs x10), [EOSM-AF-STOP-ANALYSIS.md](EOSM-AF-STOP-ANALYSIS.md),
 [EOSM-AF-FOCUSFEED.md](EOSM-AF-FOCUSFEED.md), and the reviews `AF-PATCH-REVIEW*.md`.
 
+> **Update 2026-10-20 late (patches 13-17, field-validated; read this first).** Specs/as-built notes:
+> [AF-PATCH13-DONE-TRUST.md](AF-PATCH13-DONE-TRUST.md), [AF-PATCH14-LENS-PROFILE.md](AF-PATCH14-LENS-PROFILE.md),
+> [AF-PATCH15-FIELD-FIXES.md](AF-PATCH15-FIELD-FIXES.md), [AF-PATCH16-PROFILE-RETURN.md](AF-PATCH16-PROFILE-RETURN.md),
+> [AF-PATCH17-DEEP-SEARCH.md](AF-PATCH17-DEEP-SEARCH.md). Build `crop_rec.mo` 9b3aca28.
+> - **Lens profiles:** automatic on lens swap / zoom change (default ON, never while recording), stored in
+>   `ML/SETTINGS/AFLENS.TXT` (save merges with the card file), plus a built-in table from `data/af_lens_profiles.txt`
+>   (`contrib/af_test/lens_db.py import|list|export-header` → `modules/crop_rec/af_lens_db.h`). The profile scales the
+>   Refocus-test defocus (2.5/6/15 × W50) and the AF step sizes (fine, probe, Local probes; sweep chunk / re-catch L1 only
+>   on a "trusted" lens).
+> - **Done trust:** only the EF-adapter FOCUS_DONE word 0x100 (EF50) is trusted (end a move at done + 2 frames); the EF-M
+>   (0x4e....) never: it reports early "honest" dones, refuses/ignores moves sent before its ~510 ms timer done, and can
+>   silently drop 40-100 pulse moves (profile returns lost 80 pulses; AF runs show `suspect_dropped` ~1 in 4 runs).
+>   Never pipeline moves on the EF-M; the profile uses <= 30-pulse moves there and verifies returns by sharpness.
+> - **Deep search:** both directions are always searched (no "flat, no other way"), the hunt's alternate leg reverses
+>   the previously searched direction, trusted lenses sweep 12 × 200 pulses per direction.
+> - **Field (2026-10-20):** Refocus tests 55 mm 5/5 (5.6-10.1 s), EF50 5/5 (3.3-6.1 s); EF50 near<->far auto refocus lands;
+>   EF-M profiles 18 mm W50 25, 55 mm W50 19; EF50 W50 137.
+> - **Logging is ON by default** (16 KB in-recording buffer). Tools: `field_session.py --copy` (also copies AFLENS.TXT),
+>   `time_budget.py` (phase markers), `af_replay/af_recatch.py` (landing simulator).
+> - **Build gotchas:** the zip name carries the build date (after midnight a new zip appears) and `make zip` exits 0 even
+>   when crop_rec.c fails - always flash the newest zip and compare `unzip -p <zip> ML/modules/crop_rec.mo | md5` with the
+>   built module. If the build deletes `modules/crop_rec/module_strings.h`, copy the stub from `modules/dual_iso/`.
+> - **Open:** the `# PROFILE load` line is logged before logging is ready (not visible); EF-M dropped moves in sweeps
+>   (detector only); deep defocus (~400) on the 55 mm in the simulator; trigger latency (~1.2 s dwell).
+
 > **Update 2026-10-20 (patches 11-12, field-validated):** see [AF-PATCH11-RECATCH.md](AF-PATCH11-RECATCH.md) and
 > [AF-PATCH12-SPEED.md](AF-PATCH12-SPEED.md). Root cause of the 55 mm ping-pong: the sweep found focus but the landing jumped
 > back to an estimated pulse position (20-60 pulses off; 55 mm peak ~30 wide), then open-loop recovery hit the end stops.
