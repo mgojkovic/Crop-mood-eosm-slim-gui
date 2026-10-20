@@ -268,6 +268,11 @@ def model_ms(pulses, spd, mspp_x10=None, lat=LAT_MS):
     return lat + abs(pulses) * mspp_x10 / 10.0
 
 
+# firmware "# phase name=.. t=.." markers (patch 12 / S5) -> bucket; used when present, else the inference below
+PHASE_BUCKET = {"session": "session", "probe": "b_probe", "coarse": "coarse1f", "sweep": "sweep", "land": "landing",
+                "top": "landing", "local": "local", "epilogue": "epilogue"}
+
+
 def attribute(r):
     """Fills r.cells (list of dict bucket/comp/ms/...) and r.mv (move records), r.ck (chunk records)."""
     r.cells, r.mv, r.ck, r.wall, r.notes = [], [], [], None, collections.Counter()
@@ -280,10 +285,13 @@ def attribute(r):
     prev = None                         # previous event type
     prev_mv_end = None
     local_fallback = False
+    cur_phase = None                    # bucket named by the last "# phase" marker (None = no marker yet)
     ev = [e for e in r.events]
     for idx, (typ, d) in enumerate(ev):
         if typ == "note":
             t = d
+            if t.startswith("# phase "):
+                cur_phase = PHASE_BUCKET.get(parse_kv(t).get("name"), cur_phase)
             if t.startswith("# coarse1f: probe flat") or t.startswith("# coarse1f:") and "scan at" in t:
                 coarse_pending = True
             if t.startswith("# local") and "-> B" in t:
@@ -336,6 +344,8 @@ def attribute(r):
             else:
                 bucket = "other"
                 r.notes["unknown phase " + ph] += 1
+            if cur_phase in BUCKETS and cur_phase not in ("session", "epilogue") and ph != "x":
+                bucket = cur_phase
             speed = move_speed(ph, r)
             motion = d["done"] if d["done"] > 0 else 0
             wait, samp = d["wait"], d["samp"]
@@ -373,6 +383,8 @@ def attribute(r):
             bucket = "landing"
         else:
             bucket = "sweep"
+        if cur_phase in BUCKETS and cur_phase not in ("session", "epilogue"):
+            bucket = cur_phase
         if c["kind"] == "sweep" and spd != "1f":
             coarse_pending = False
         gap = c["t_send"] - cursor

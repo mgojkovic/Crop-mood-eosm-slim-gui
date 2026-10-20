@@ -401,6 +401,9 @@ class Ctl:
         self.tp = bool(cfg and cfg['tp'])                 # S3 tracked probe
         self.tp_guard = bool(cfg and cfg.get('guard'))    # (not in the spec) probe 'peak' needs a rise before the max, not a monotonic fall
         self.tp_second = bool(cfg and cfg.get('second'))  # (not in the spec) a flat first probe chunk gets a second tracked chunk
+        self.top3 = bool(cfg and cfg.get('top3'))        # patch 13 T2: 3-point parabolic top instead of the two-sided climb
+        self.top3_h = cfg.get('h') if cfg else None      # half step override: 'fine' = AFD_FINE instead of fine/2
+        self.top3_skip = cfg.get('skip', 0) if cfg else 0  # (variant) skip top3 when r >= this % of P
         mode = cfg['base'] if cfg else mode
         self.gtop = mode.endswith('_gtop')   # variant (patch 11 final): skip land_top when s_rest >= RC_GATE_PCT of P, else two-sided
         mode = mode.replace('_gtop', '_top2') if self.gtop else mode
@@ -410,6 +413,7 @@ class Ctl:
         self.mode = mode.replace('_top2', '')   # 'classic' | 'classic_fix' | 'recatch'
         self.fine = sim.lens.fine
         self.one_dir = False
+        self.P = 0.0
 
     # -- afd_sweep_find.  pre = AFD_SW_PRE (0 for the re-catch fallback / reverse scan)
     def sweep_find(self, pos0, d, spd, maxch, pre=SW_PRE, one_dir=False):
@@ -489,6 +493,10 @@ class Ctl:
     def land_top(self, d, r):
         c = self.c
         h = max(self.fine // 2, 6)
+        if self.top3 and self.top3_h == 'fine':
+            h = max(self.fine, 6)
+        if self.top3 and self.P and not (self.top3_skip and r >= self.P * self.top3_skip / 100.0):
+            return self.land_top3(d, r, h)
         if self.top2:
             return self.land_top2(d, r, h)
         best = r
@@ -504,6 +512,27 @@ class Ctl:
                 r = s2
             break
         return r
+
+    def land_top3(self, d, r, h):
+        """Patch 13 T2 (AFD_P13_TOP3): measure +h and -h around the landing point x0, fit a parabola through the three
+        points, move to the vertex (clamped to +-h); fall back to the best measured point if the vertex reads < 97 % of it."""
+        c = self.c
+        sp = c.move_ex('t', d * h, 2)
+        sm = c.move_ex('t', -2 * d * h, 2)
+        den = sm - 2 * r + sp
+        cur = -h                                  # offset of the lens from x0, in units of d
+        sx = None
+        delta = None
+        if den < 0:
+            delta = max(-h, min(h, h * (sm - sp) / (2.0 * den)))
+            tgt = int(round(delta))
+            sx = c.move_ex('t', d * (tgt - cur), 2)
+            cur = tgt
+        bx, bv = max(((0, r), (h, sp), (-h, sm)), key=lambda t: t[1])
+        if sx is None or sx < 0.97 * bv:
+            sx = c.move_ex('t', d * (bx - cur), 2)
+        c._lg('# recatch top3 r=%d s+=%d s-=%d delta=%s final=%d' % (r, sp, sm, 'none' if delta is None else '%.1f' % delta, sx))
+        return sx
 
     def land_top2(self, d, r, h):
         """Variant, not in the C code or the spec: land_top, but when the first half step in d goes down also try the other side
@@ -557,6 +586,7 @@ class Ctl:
         c = self.c
         d = -dr
         thr = P * RT_THR1 / 100.0
+        self.P = P
         L = self.l1
         lmin = min(2 * self.fine, L)
         cap = over + SW_ERR + L
@@ -758,9 +788,13 @@ NEW_VARIANTS = {
     # exploratory fixes of S3 (not in the spec): rise-before-max guard on the probe peak; second chunk before 'flat'
     'recatch_gtop_l30_tpg': dict(base='recatch_gtop', l1=30, nopad=True, tp=True, guard=True),
     'recatch_gtop_l30_tpg2': dict(base='recatch_gtop', l1=30, nopad=True, tp=True, guard=True, second=True),
+    # patch 13 T2: 3-point parabolic top (land_top replaced in the re-catch); _h: h = fine; _s92: not when r >= 92 % of P
+    'recatch_gtop_l30_tpg2_top3': dict(base='recatch_gtop', l1=30, nopad=True, tp=True, guard=True, second=True, top3=True),
+    'recatch_gtop_l30_tpg2_top3_h': dict(base='recatch_gtop', l1=30, nopad=True, tp=True, guard=True, second=True, top3=True, h='fine'),
+    'recatch_gtop_l30_tpg2_top3_s92': dict(base='recatch_gtop', l1=30, nopad=True, tp=True, guard=True, second=True, top3=True, skip=92),
 }
 P12 = tuple(NEW_VARIANTS)
-RC_GATE_PCT = 97   # recatch_gtop: s at rest >= this % of the sweep peak = already on the top, no land_top
+RC_GATE_PCT = 95   # recatch_gtop: s at rest >= this % of the sweep peak = already on the top, no land_top
 
 
 def run_trial(lens, err, defocus, algo, seed, cell, i, log=False):

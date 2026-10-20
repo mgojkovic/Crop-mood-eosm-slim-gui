@@ -1,0 +1,5 @@
+# AF lens profiles shipped with the module (source of truth for modules/crop_rec/af_lens_db.h).
+# Line format: v1|name|mm|zoom|W50|floor_pct|done_word_hex|honest_pct|fine|n=<samples>|src=<contributors>
+# Same as the camera's ML/SETTINGS/AFLENS.TXT plus n= and src=.  Maintained by contrib/af_test/lens_db.py
+# (import / list / export-header); see the "Sharing lens profiles" section of contrib/af_test/README.md.
+v1|EF-M18-55mm f/3.5-5.6 IS STM|20|5|40|16|4e0000|92|28|n=1|src=mgojkovic-eosm|w=40|f=16

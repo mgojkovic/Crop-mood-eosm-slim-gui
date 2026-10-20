@@ -89,7 +89,17 @@ def main():
                 os.makedirs(d, exist_ok=True)
                 shutil.copy2(p, d)
                 n += 1
-        print("copied %d log(s) to %s\n" % (n, dst))
+        # patch 15: the lens profiles measured on the card (share them with contrib/af_test/lens_db.py import)
+        for rel in (("ML", "SETTINGS", "AFLENS.TXT"), ("SETTINGS", "AFLENS.TXT")):
+            src = os.path.join(base, *rel)
+            if os.path.isfile(src):
+                d = os.path.join(dst, *rel[:-1])
+                os.makedirs(d, exist_ok=True)
+                shutil.copy2(src, d)
+                n += 1
+                print("copied lens profiles %s" % os.path.join(*rel))
+                break
+        print("copied %d file(s) to %s\n" % (n, dst))
         base = dst
 
     logs = find_logs_dir(base)
@@ -234,6 +244,45 @@ def main():
         if gates.get(4, 0) > 20:
             warnings.append("Auto refocus: %d 'no usable peak' decisions - trigger reference could not form"
                             % gates.get(4, 0))
+        print()
+
+    # ---------------------------------------------------------------- lens profiles / run parameters (patch 14/15)
+    prof_lines, defs_lines, params_lines = [], [], []
+    for p in (drive, newest_matching(logs, ["AFPROF.LOG"]), rtest):
+        if not p:
+            continue
+        for l in read_lines(p):
+            if l.startswith("# PROFILE ") and l not in prof_lines:
+                prof_lines.append(l)
+            elif l.startswith("# RT_DEFS"):
+                defs_lines.append(l)
+            elif l.startswith("# params"):
+                params_lines.append(l)
+    aflens = None
+    for rel in (("ML", "SETTINGS", "AFLENS.TXT"), ("SETTINGS", "AFLENS.TXT")):
+        cand = os.path.join(base, *rel)
+        if os.path.isfile(cand):
+            aflens = cand
+            break
+    if prof_lines or defs_lines or params_lines or aflens:
+        print("== Lens profiles and AF parameters")
+        for l in prof_lines[-6:]:
+            kv = parse_kv(l)
+            print("   %s" % l[2:170])
+            if kv.get("ok") == "0":
+                warnings.append("lens profile failed: %s" % kv.get("why", "?"))
+        for l in defs_lines[-3:]:
+            print("   " + l[2:])
+        if params_lines:
+            srcs = {}
+            for l in params_lines:
+                k = parse_kv(l).get("source", "?")
+                srcs[k] = srcs.get(k, 0) + 1
+            print("   # params source: " + ", ".join("%s=%d" % kv for kv in sorted(srcs.items())))
+            print("   last: " + params_lines[-1][2:170])
+        if aflens:
+            n = sum(1 for l in read_lines(aflens) if l.startswith("v1|"))
+            print("   AFLENS.TXT: %d profile(s) on the card (share: lens_db.py import <folder>)" % n)
         print()
 
     # ---------------------------------------------------------------- stop test

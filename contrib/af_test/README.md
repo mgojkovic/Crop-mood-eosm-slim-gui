@@ -106,6 +106,25 @@ Current real data: **12/12 trials continued** (0 halted), median post-stop |slop
   card9's full-format file has `s2/s4/band` zero in every sample; s1 is used for the
   classification and the zero columns are reported, not treated as an error.
 
+## Sharing lens profiles
+
+The camera measures the focus-peak width (W50) of each lens / zoom once and keeps it in `ML/SETTINGS/AFLENS.TXT`
+(menu "Auto lens profile", "Profile this lens now", "Forget lens profiles"). Profiles from many cards are pooled in
+`data/af_lens_profiles.txt` and compiled into the module, so a known lens needs no measuring run.
+
+1. After a session, `python3 contrib/af_test/field_session.py --copy` copies the logs and `ML/SETTINGS/AFLENS.TXT`
+   to `~/af_logs/af-<timestamp>/` and lists the `# PROFILE`, `# RT_DEFS` and `# params` lines.
+2. Merge them: `python3 contrib/af_test/lens_db.py import --src <your-tag> ~/af_logs/af-<timestamp>`
+   (also accepts an `AFLENS.TXT` file or a card mount). Same key (lens name, 10 mm bucket, LV zoom) -> median W50 / floor,
+   `n` summed, raw samples kept (last 32). A sample more than 2x away from the known median is reported as `OUTLIER`
+   (exit code 1) and not merged - re-measure that lens before trusting it.
+3. `python3 contrib/af_test/lens_db.py list` shows the table; `python3 contrib/af_test/lens_db.py export-header`
+   regenerates `modules/crop_rec/af_lens_db.h` (a test fails when the header is stale). Commit both files and rebuild.
+
+On the camera the lookup order is: own measured profile (card) > built-in > default (`# params source=card|builtin|default`).
+A built-in hit suppresses the automatic profile run; "Profile this lens now" still measures and stores an own profile,
+which then wins. File format: `v1|name|mm|zoom|W50|floor_pct|done_word_hex|honest_pct|fine[|n=..|src=..|w=..|f=..]`.
+
 ## Adding tests
 
 - Unit/simulator test: add `contrib/af_replay/tests/test_<area>.py`, inherit

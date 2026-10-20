@@ -53,6 +53,19 @@ class TimeBudget(unittest.TestCase):
         self.assertEqual(r.bsum["sweep"], 500 + 500 + 100 + 300)   # o setup + chunk1 + gap + chunk2
         self.assertEqual(r.bsum["landing"], 200)
 
+    def test_phase_markers_override_inference(self):
+        text = RUN % ("B", "classic", "")
+        # the first probe move 'p' and the chunks would be b_probe / sweep by inference; the markers say landing
+        text = text.replace("1300 p 100", "# phase name=land t=700\n1300 p 100")
+        runs, _ = self.analyse(text)
+        r = runs[0]
+        self.assertEqual(sum(c["ms"] for c in r.cells), r.wall)
+        self.assertEqual(r.bsum["b_probe"], 0)
+        self.assertEqual(r.bsum["sweep"], 0)
+        self.assertEqual(r.bsum["landing"], 2200)
+        runs, _ = self.analyse(RUN % ("B", "classic", ""))
+        self.assertEqual(runs[0].bsum["b_probe"], 600)   # no markers: unchanged inference
+
     def test_chunk_idle_and_frames(self):
         runs, _ = self.analyse(RUN % ("B", "classic", ""))
         r = runs[0]

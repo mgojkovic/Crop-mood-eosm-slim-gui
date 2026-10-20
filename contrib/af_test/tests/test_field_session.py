@@ -83,6 +83,22 @@ class FieldSessionTest(unittest.TestCase):
         self.assertIn("pre-patch-2", out)
         self.assertIn("ok=3/5", out)
 
+    def test_profile_defs_params_and_copy(self):
+        drive = MODERN_DRIVE + (
+            '# PROFILE lens="EF50mm f/1.8 II" mm=50 zoom=1 ok=1 P=90000 W50L=48 W50R=52 W50=50 floor_pct=25 x0_return_pct=97 fine=30 done_word=100 honest_pct=100 done_ms_per10=40 ms=4800\n'
+            "# params source=card W50=50 fine=30 probe=200 chunk=100 rc_l1=30 local_probe=60 half=15 trusted=0 floor_abs=0\n")
+        rtest = HEALTHY_RTEST.replace("# RT_REF", "# RT_DEFS source=profile W50=50 defs=125,-125,300,-300,750 from=card\n# RT_REF", 1)
+        d = self._case(rtest, drive=drive)
+        os.makedirs(os.path.join(d, "ML", "SETTINGS"))
+        with open(os.path.join(d, "ML", "SETTINGS", "AFLENS.TXT"), "w") as f:
+            f.write("v1|EF50mm f/1.8 II|50|1|50|25|100|100|30\n")
+        rc, out = run_tool(d)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("PROFILE lens=\"EF50mm f/1.8 II\"", out)
+        self.assertIn("RT_DEFS source=profile W50=50", out)
+        self.assertIn("source: card=1", out)
+        self.assertIn("AFLENS.TXT: 1 profile(s)", out)
+
 
 if __name__ == "__main__":
     unittest.main()
